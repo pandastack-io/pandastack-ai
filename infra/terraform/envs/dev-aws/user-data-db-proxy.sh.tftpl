@@ -1,0 +1,43 @@
+#!/bin/bash
+# cloud-init for the pandastack db-proxy node (AWS). Native postgres:// TLS
+# proxy with SNI routing for *.db.<zone>:5432. Fetches secrets from AWS Secrets
+# Manager (prefix "${secret_prefix}-").
+set -euo pipefail
+exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+
+REGION="${region}"
+SECRET_PREFIX="${secret_prefix}"
+DB_PROXY_BINARY_URL="${db_proxy_binary_url}"
+SNI_SUFFIX="${sni_suffix}"
+
+apt-get update -y
+apt-get install -y awscli jq curl ca-certificates certbot
+
+secret() { aws --region "$REGION" secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
+
+NODE_TOKEN="$(secret "$${SECRET_PREFIX}-node-token")"
+DATABASE_URL="$(secret "$${SECRET_PREFIX}-database-url")"
+CLOUDFLARE_TOKEN="$(secret "$${SECRET_PREFIX}-cloudflare-api-token")"
+
+mkdir -p /etc/pandastack
+{
+  echo "PANDASTACK_NODE_TOKEN=$${NODE_TOKEN}"
+  echo "PANDASTACK_DB_DSN=$${DATABASE_URL}"
+  echo "PANDASTACK_SNI_SUFFIX=$${SNI_SUFFIX}"
+  echo "CLOUDFLARE_API_TOKEN=$${CLOUDFLARE_TOKEN}"
+} > /etc/pandastack/db-proxy.env
+chmod 600 /etc/pandastack/db-proxy.env
+
+# TODO: obtain the wildcard cert for *$${SNI_SUFFIX} via certbot DNS-01
+# (Cloudflare plugin, using CLOUDFLARE_API_TOKEN), then install + start the
+# pandastack-db-proxy binary under systemd with
+# EnvironmentFile=/etc/pandastack/db-proxy.env. If the AMI is pre-baked, this
+# block is a no-op.
+if [ -n "$DB_PROXY_BINARY_URL" ]; then
+  curl -fsSL "$DB_PROXY_BINARY_URL" -o /usr/local/bin/pandastack-db-proxy
+  chmod +x /usr/local/bin/pandastack-db-proxy
+fi
+systemctl daemon-reload || true
+systemctl enable --now pandastack-db-proxy 2>/dev/null || \
+  echo "pandastack-db-proxy unit not present — bake it into the AMI or extend this script."

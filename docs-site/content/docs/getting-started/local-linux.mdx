@@ -1,0 +1,305 @@
+---
+title: "Local install on Linux"
+description: "Run PandaStack end-to-end on a standalone Linux box (Ubuntu 22.04+/24.04 or Debian 12) with one command. No Lima, no nested VM — Firecracker runs directly on the host."
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+<Callout type="info">
+This is the bare-metal Linux path. Postgres and ClickHouse run in Docker; the API, dashboard, and Firecracker host agent run directly on your machine. KVM is required.
+</Callout>
+
+## 60-second path
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack
+bash scripts/linux-local-e2e.sh
+xdg-open http://localhost:3000
+```
+
+The script is idempotent. Re-running it skips work that is already done.
+
+## Step-by-step install
+
+<Steps>
+
+<Step>
+
+### Step 1 — Confirm hardware and OS
+
+```bash
+uname -sm
+. /etc/os-release && echo "$PRETTY_NAME"
+[ -e /dev/kvm ] && echo "kvm: ok" || echo "kvm: MISSING"
+```
+
+You need:
+
+- Linux on `x86_64` or `aarch64`.
+- Ubuntu 22.04 / 24.04 or Debian 12 (other distros may work, untested).
+- `/dev/kvm` present (hardware virtualization enabled in BIOS, or nested-virt enabled if running inside a cloud VM).
+- 4+ vCPUs, 8+ GiB RAM, 30+ GiB free disk space.
+
+If `/dev/kvm` is missing on a cloud VM, see [Troubleshooting](#troubleshooting) below.
+
+</Step>
+
+<Step>
+
+### Step 2 — Add yourself to the kvm and docker groups
+
+```bash
+sudo usermod -aG kvm,docker "$USER"
+newgrp kvm
+newgrp docker
+```
+
+This avoids needing `sudo` for every Firecracker and Docker command.
+
+</Step>
+
+<Step>
+
+### Step 3 — Clone the repository
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack
+```
+
+</Step>
+
+<Step>
+
+### Step 4 — Run the bootstrap script
+
+```bash
+bash scripts/linux-local-e2e.sh
+```
+
+The script performs Steps 5 through 9 below in order. It will use `sudo` to install system packages (`docker`, `golang`, `nodejs`, build tools), Firecracker, and the systemd unit.
+
+</Step>
+
+<Step>
+
+### Step 5 — Verify host prerequisites are installed
+
+After Step 4 completes, verify:
+
+```bash
+docker info >/dev/null && echo "docker ok"
+go version           # 1.22+
+node --version       # 20+
+firecracker --version
+```
+
+</Step>
+
+<Step>
+
+### Step 6 — Verify data services
+
+```bash
+docker exec pandastack-dev-postgres-1 pg_isready -U pandastack
+curl -fsS http://localhost:8123/ping
+```
+
+</Step>
+
+<Step>
+
+### Step 7 — Verify the host agent is running
+
+The agent runs as a systemd unit named `pandastack-agent-local-e2e.service`:
+
+```bash
+systemctl status pandastack-agent-local-e2e.service --no-pager
+curl -fsS http://localhost:7070/healthz
+```
+
+Logs:
+
+```bash
+sudo journalctl -u pandastack-agent-local-e2e.service -f
+```
+
+</Step>
+
+<Step>
+
+### Step 8 — Verify the API and dashboard
+
+```bash
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:3000 >/dev/null && echo "dashboard ok"
+```
+
+Open `http://localhost:3000` in your browser. You will be auto-logged-in as `dev@local.pandastack` (stub mode).
+
+</Step>
+
+<Step>
+
+### Step 9 — Smoke test
+
+The bootstrap script ran a smoke test on completion (create sandbox, exec `echo hello`, verify the dashboard). To repeat manually:
+
+```bash
+TOKEN=pds_local_dev_token
+TPL=$(curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:8080/v1/templates | jq -r '.[0].name')
+ID=$(curl -fsS -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -X POST http://localhost:8080/v1/sandboxes \
+  -d "{\"template\":\"$TPL\",\"ttl_seconds\":600}" | jq -r .id)
+curl -fsS -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
+  -X POST "http://localhost:8080/v1/sandboxes/$ID/exec" \
+  -d '{"cmd":"echo hello"}' | jq -r .stdout
+```
+
+</Step>
+
+<Step>
+
+### Step 10 — Tear down when finished
+
+```bash
+bash scripts/linux-local-e2e-down.sh
+```
+
+This stops the API, dashboard, agent systemd unit, and database containers without deleting any state. To wipe everything (Firecracker images, Docker volumes, local state), run the wipe commands the teardown prints.
+
+</Step>
+
+</Steps>
+
+## System requirements
+
+| Component | Minimum | Recommended | Notes |
+|-----------|---------|-------------|-------|
+| OS | Ubuntu 22.04, Ubuntu 24.04, or Debian 12 | Ubuntu 24.04 | Other distros likely work; not in CI |
+| Architecture | `x86_64` or `aarch64` | either | Detected automatically |
+| KVM | `/dev/kvm` r+w by your user | bare metal | Cloud VMs need nested-virt enabled |
+| CPU | 4 vCPUs | 8 vCPUs | Each sandbox defaults to 1 vCPU |
+| RAM | 8 GiB | 16 GiB | Each sandbox defaults to 256 MiB |
+| Disk | 30 GiB free | 60 GiB free | Templates + Postgres + ClickHouse |
+| Docker | Docker Engine 24+ | latest | Installed by the script if missing |
+| Go | 1.22+ | 1.22+ | Installed by the script if missing |
+| Node.js | 20+ | 20 LTS | Installed from NodeSource if missing |
+
+## What gets written where
+
+| Path | Owner | Purpose |
+|------|-------|---------|
+| `/usr/local/bin/firecracker`, `jailer`, `pandastack-agent` | root | Binaries installed by the bootstrap |
+| `/etc/systemd/system/pandastack-agent-local-e2e.service` | root | Agent systemd unit |
+| `/etc/pandastack/local-e2e.env` | root | Agent env file |
+| `/var/lib/pandastack/` | your user | Firecracker kernels, templates, sandbox rootfs, agent SQLite |
+| `./.local-state/linux-local-e2e/` | your user | Tokens, logs, pid files, last sandbox id |
+| Docker volumes `pandastack-dev_postgres-data`, `pandastack-dev_clickhouse-data` | docker | Postgres + ClickHouse state |
+
+## Architecture (Linux)
+
+```
+┌────────────────────────── Linux host ──────────────────────────┐
+│                                                                │
+│  Browser ──► Dashboard (:3000) ──► API (:8080) ──► Agent (:7070)
+│                                          │              │      │
+│                                          ▼              ▼      │
+│                                  Postgres (:5432)   Firecracker│
+│                                  ClickHouse (:8123) microVMs   │
+│                                  (Docker)           (KVM)      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+No Lima, no SSH hop, no host-side port forwarding gymnastics — everything talks to `localhost`.
+
+## Customization knobs
+
+All overridable via environment variables before running the script:
+
+| Variable | Default | Effect |
+|---------|---------|--------|
+| `FC_DATA_DIR` | `/var/lib/pandastack` | Where Firecracker kernels and templates live |
+| `PANDASTACK_STUB_USER_EMAIL` | `dev@local.pandastack` | Auto-login email |
+| `PANDASTACK_STUB_USER_ID` | `00000000-...-0001` | Stub user UUID |
+| `PANDASTACK_STUB_ORG_ID` | `00000000-...-0002` | Stub org UUID |
+| `PANDASTACK_STUB_WORKSPACE` | `local-dev` | Workspace name |
+
+To change ports, edit the script — defaults are 3000 (dashboard), 8080 (API), 7070 (agent), 5432 (Postgres), 8123 (ClickHouse), 9100/9101 (metrics).
+
+## Differences from production
+
+| | Production | Local Linux |
+|---|------------|-------------|
+| Auth | Supabase | Stub (auto-login) |
+| Identity | Real Supabase users + orgs | One pre-seeded stub user |
+| Region | Multi-region GKE | Single host, region `local` |
+| Data store | Cloud Postgres + Cloud ClickHouse | Local Docker containers |
+| Firecracker host | Bare-metal Linux pool | Your machine |
+| Stripe | Live keys | Empty (no billing) |
+
+## Troubleshooting
+
+### `/dev/kvm` is missing on a cloud VM
+
+You need nested virtualization enabled at the cloud provider:
+
+- **GCP**: create the VM with `--enable-nested-virtualization` (requires `--min-cpu-platform Haswell` or later on x86, or any `t2a` Ampere image on arm).
+- **AWS**: use bare-metal instance types (`*.metal`, e.g. `c5.metal`, `m6g.metal`).
+- **Azure**: use `Dasv5`, `Dadsv5`, or any size that lists "Nested virtualization: Yes".
+- **Hetzner**: dedicated/CCX (CPX shared do not expose KVM).
+
+### `docker info` says permission denied
+
+Group changes do not apply to existing shells. Run:
+
+```bash
+newgrp docker
+```
+
+or log out and back in.
+
+### `firecracker --version` works but the agent fails to boot a sandbox
+
+Check the agent log:
+
+```bash
+sudo journalctl -u pandastack-agent-local-e2e.service -n 200 --no-pager
+```
+
+Common causes: missing `iptables`/`iproute2`, SELinux/AppArmor blocking the agent (try `sudo aa-status` and disable the relevant profile), or nested-virt enabled but the cloud VM's kernel does not load `kvm_intel`/`kvm_amd`.
+
+### Port already in use
+
+```bash
+ss -ltnp 'sport = :8080'
+```
+
+Kill the offender or change the port in `scripts/linux-local-e2e.sh`.
+
+### Wipe and start over
+
+```bash
+bash scripts/linux-local-e2e-down.sh
+sudo rm -rf .local-state/linux-local-e2e ./data /var/lib/pandastack
+sudo rm -f /etc/systemd/system/pandastack-agent-local-e2e.service /etc/pandastack/local-e2e.env
+sudo systemctl daemon-reload
+bash scripts/linux-local-e2e.sh
+```
+
+## FAQ
+
+**Q: Can I run this in WSL2?**
+A: Not yet supported. WSL2 exposes `/dev/kvm` only on recent Windows 11 builds with `nestedVirtualization=true`, and even then, networking inside Firecracker is unreliable. Use a Linux VM or bare metal.
+
+**Q: Does this work on Raspberry Pi?**
+A: An aarch64 Pi 5 with Ubuntu 24.04 may work but is not in CI. Pi 4 lacks the KVM extensions Firecracker requires.
+
+**Q: How do I expose the dashboard on my LAN?**
+A: Edit the `start_dashboard` function and replace `--hostname 127.0.0.1` with `--hostname 0.0.0.0`. Same for the API in `build_and_start_api` (change `:8080` listen address). For anything beyond local LAN testing, put a real reverse proxy and TLS in front.
+
+**Q: How do I use real Supabase auth instead of the stub?**
+A: See [Self-hosted Supabase auth](/docs/self-host/auth-supabase). Set `PANDASTACK_AUTH_MODE=supabase` and the matching env vars in `/etc/pandastack/local-e2e.env`, restart the unit, and rebuild the dashboard with the matching `NEXT_PUBLIC_*` variables.

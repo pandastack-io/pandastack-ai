@@ -1,0 +1,67 @@
+---
+title: Errors
+description: Error envelope and common error codes.
+---
+
+All HTTP errors follow a consistent JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "sandbox.not_found",
+    "message": "Sandbox sb_abc123 does not exist",
+    "request_id": "req_xyz",
+    "details": {}
+  }
+}
+```
+
+| HTTP | Code prefix | Meaning |
+|---|---|---|
+| 400 | `validation.*` | Invalid request shape or parameter |
+| 401 | `auth.*` | Missing or invalid credentials |
+| 403 | `auth.forbidden`, `quota.exceeded` | Authenticated but not allowed |
+| 404 | `*.not_found` | Resource does not exist |
+| 409 | `*.conflict` | Resource state conflict (e.g. delete while booting) |
+| 429 | `rate_limit.*` | Too many requests |
+| 500 | `internal.*` | Bug in PandaStack — please report |
+| 503 | `capacity.unavailable` | No agent capacity for placement |
+
+## Common codes
+
+| Code | Meaning |
+|---|---|
+| `auth.invalid_token` | JWT/API key invalid or expired |
+| `auth.token_revoked` | Token was explicitly revoked |
+| `auth.workspace_mismatch` | Token doesn't have access to the requested workspace |
+| `sandbox.not_found` | Sandbox ID doesn't exist (or not in your workspace) |
+| `sandbox.invalid_state` | Operation not allowed in current state (e.g. exec on a paused sandbox) |
+| `sandbox.boot_failed` | Firecracker boot timed out or kernel panic'd |
+| `template.not_found` | Template name unknown |
+| `template.build_failed` | Template image build failed (see `details.log_url`) |
+| `volume.in_use` | Trying to delete a volume that's still attached |
+| `quota.sandboxes_exceeded` | Hit workspace concurrent-sandbox limit |
+| `quota.vcpu_exceeded` | Hit workspace vCPU limit |
+| `capacity.unavailable` | All agents at capacity — try a different region |
+| `rate_limit.api` | Too many API calls per minute |
+
+## Retrying
+
+Errors with `retryable: true` in the `details` are safe to retry with exponential backoff:
+
+```json
+{
+  "error": {
+    "code": "capacity.unavailable",
+    "message": "No agent capacity available",
+    "details": { "retryable": true, "retry_after_sec": 5 }
+  }
+}
+```
+
+Other errors should not be blindly retried.
+
+## Reporting bugs
+
+Include `request_id` from any failed response when filing an issue at
+[github.com/pandastack-io/pandastack/issues](https://github.com/pandastack-io/pandastack/issues).

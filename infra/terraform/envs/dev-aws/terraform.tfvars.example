@@ -1,0 +1,53 @@
+# Copy to terraform.tfvars and fill in. Never commit terraform.tfvars.
+
+aws_region         = "us-east-1"
+availability_zones = ["us-east-1a", "us-east-1b"]
+project_tag        = "pandastack-multi-aws"
+
+# Public SSH key contents, e.g. output from: cat ~/.ssh/id_ed25519.pub
+ssh_pubkey = "ssh-ed25519 AAAA... you@host"
+
+# CIDR allowed to SSH (your IP /32).
+ssh_allowed_cidr = "<your-ip>/32"
+
+# Edge tier (API + dashboard).
+edge_instance_type = "t3.small"
+edge_count         = 1
+edge_max_count     = 2
+
+# Agent tier — MUST be a *.metal flavor for Firecracker (bare-metal KVM):
+#   c5n.metal   72 vCPU 192GB
+#   m5zn.metal  48 vCPU 192GB
+#   m5.metal    96 vCPU 384GB
+agent_instance_type = "c5n.metal"
+agent_count         = 1
+agent_max_count     = 8
+
+# Cloudflare (Zone:DNS:Edit on your zone).
+cloudflare_api_token = "<create at https://dash.cloudflare.com/profile/api-tokens>"
+cloudflare_zone_id   = "<zone id>"
+cloudflare_zone_name = "example.com"
+
+# Optional: Supabase auth (leave blank to provision empty secret containers).
+supabase_url      = ""
+supabase_jwks_url = ""
+supabase_anon_key = ""
+
+# Optional: release-bundle URLs (empty = bake into the AMI).
+edge_binary_url     = ""
+agent_binary_url    = ""
+db_proxy_binary_url = ""
+
+# RDS (control-plane Postgres).
+rds_instance_class      = "db.t4g.micro"
+rds_allocated_storage_gb = 20
+rds_deletion_protection = true
+
+# Optional GitHub App (apps feature) — leave blank to populate secrets later.
+github_app_id              = ""
+github_app_installation_id = ""
+github_app_slug            = ""
+github_app_client_id       = ""
+github_app_client_secret   = ""
+github_app_private_key     = ""
+github_app_webhook_secret  = ""

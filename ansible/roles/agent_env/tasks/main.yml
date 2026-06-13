@@ -1,0 +1,35 @@
+---
+# Manage ONLY fleet-wide, non-secret knobs in env.agent. Secret + per-host
+# lines are left byte-for-byte untouched (lineinfile only rewrites the exact
+# key it targets).
+
+- name: Guard — managed keys must not overlap the denylist
+  ansible.builtin.assert:
+    that: "item.key not in agent_env_denylist"
+    fail_msg: "Refusing to manage protected env key '{{ item.key }}'."
+  loop: "{{ agent_env_managed | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Ensure env.agent exists (managed by cloud-init on first boot)
+  ansible.builtin.stat:
+    path: "{{ agent_env_file }}"
+  register: env_stat
+
+- name: Fail clearly if env.agent is missing
+  ansible.builtin.assert:
+    that: env_stat.stat.exists
+    fail_msg: "{{ agent_env_file }} not found — cloud-init has not provisioned this node yet."
+
+- name: Set managed env knobs (idempotent, preserves 0600)
+  ansible.builtin.lineinfile:
+    path: "{{ agent_env_file }}"
+    regexp: "^{{ item.key }}=.*$"
+    line: "{{ item.key }}={{ item.value }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ agent_env_managed | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: restart pandastack-agent

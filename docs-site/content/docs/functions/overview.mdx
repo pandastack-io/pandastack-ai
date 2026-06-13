@@ -1,0 +1,332 @@
+---
+title: Functions overview
+description: Deploy Python or Node.js functions into isolated PandaStack microVMs — multi-file bundles, GCS storage, ClickHouse metrics, better than Lambda.
+---
+
+## What are Functions?
+
+PandaStack Functions run your Python or Node.js code inside isolated Firecracker microVMs. Every invocation gets a **fresh** runtime — no shared state, no noisy neighbours, no cold-start containers leaking secrets between customers.
+
+Unlike AWS Lambda, PandaStack Functions:
+
+- Accept **full directory bundles** (not just single files) — ship your entire project with dependencies
+- Store code privately in GCS, never in your database
+- Emit **golden metrics** (p50/p95/p99 latency, error rate, cold-start rate) to ClickHouse automatically
+- Run inside VM-level isolation — `kill -9` can't escape the sandbox
+
+## Supported runtimes
+
+| Runtime  | Default entrypoint | Install hook              |
+|----------|--------------------|---------------------------|
+| `python` | `handler.py`       | `pip install -r requirements.txt` |
+| `nodejs` | `handler.js`       | `npm install --production` |
+
+## Your first function
+
+Create a file `handler.py`:
+
+```python
+# handler.py
+import json, datetime
+
+def main():
+    print(json.dumps({
+        "message": "Hello from PandaStack Functions",
+        "ts": datetime.datetime.utcnow().isoformat(),
+    }))
+
+main()
+```
+
+Deploy and invoke it:
+
+```bash
+# Deploy a single file
+pandastack fn deploy handler.py --name hello --runtime python
+
+# Deploy an entire directory (recommended)
+pandastack fn deploy ./my-project/ --name hello --runtime python --entrypoint handler.py
+
+# Invoke it
+pandastack fn invoke <function-id>
+
+# See metrics
+pandastack fn metrics <function-id>
+```
+
+## Multi-file projects
+
+PandaStack bundles your directory as `tar.gz` and stores it in GCS. All files land in `/fn/` inside the microVM.
+
+```text
+my-project/
+├── handler.py          # entrypoint
+├── utils.py            # imported by handler.py
+├── requirements.txt    # pip install runs automatically
+└── models/
+    └── config.json
+```
+
+```python
+# handler.py
+from utils import format_response
+import json
+
+def main():
+    result = format_response({"status": "ok"})
+    print(json.dumps(result))
+
+main()
+```
+
+```python
+# utils.py
+def format_response(data: dict) -> dict:
+    return {"data": data, "version": "1.0"}
+```
+
+```bash
+pandastack fn deploy ./my-project/ \
+  --name data-processor \
+  --runtime python \
+  --entrypoint handler.py
+```
+
+The following directories are **automatically excluded** from the bundle:
+
+`node_modules`, `__pycache__`, `.git`, `.venv`, `venv`, `dist`, `.next`, `.turbo`
+
+## TypeScript SDK
+
+```ts
+import { Client } from "@pandastack/sdk";
+import { readFileSync } from "node:fs";
+import { execFileSync, mkdtempSync, rmSync } from "node:child_process";
+import * as os from "node:os";
+import * as path from "node:path";
+
+const client = new Client();
+
+// 1. Create the function (no code yet)
+const fn = await client.functions.create("data-processor", "python", Buffer.alloc(0), {
+  entrypoint: "handler.py",
+  template: "code-interpreter",
+});
+console.log("Created:", fn.id, "is_ready:", fn.is_ready);  // false
+
+// 2. Build and deploy a tar.gz bundle
+const tmp = mkdtempSync(path.join(os.tmpdir(), "fn-"));
+const tarPath = path.join(tmp, "bundle.tar.gz");
+execFileSync("tar", ["-czf", tarPath, "."], { cwd: "./my-project" });
+const bundle = readFileSync(tarPath);
+rmSync(tmp, { recursive: true });
+
+const deployed = await client.functions.deployBundle(fn.id, bundle, "handler.py");
+console.log("Deployed:", deployed.id, "version:", deployed.version, "is_ready:", deployed.is_ready);
+
+// 3. Get metrics after some invocations
+const metrics = await client.functions.metrics(fn.id, 24);  // last 24 hours
+console.log(`p50: ${metrics.p50_ms}ms | p95: ${metrics.p95_ms}ms | errors: ${(metrics.error_rate * 100).toFixed(1)}%`);
+```
+
+The CLI's `fn deploy` command does all of this automatically — use the SDK directly only when you need programmatic control.
+
+## Python SDK
+
+```python
+from pandastack import Client
+
+client = Client()
+
+# Deploy from a directory — creates the function if it doesn't exist
+fn = client.functions.deploy(
+    name="data-processor",
+    runtime="python",
+    path="./my-project",          # accepts file OR directory
+    entrypoint="handler.py",
+    env={"LOG_LEVEL": "info"},
+    public=False,
+)
+print(f"Deployed {fn['name']} v{fn['version']} — ready: {fn['is_ready']}")
+
+# Get golden metrics
+m = client.functions.metrics(fn["id"], period_hours=24)
+print(f"p50={m['p50_ms']}ms  p95={m['p95_ms']}ms  p99={m['p99_ms']}ms  errors={m['error_rate']*100:.1f}%")
+```
+
+## is_ready lifecycle
+
+Functions go through two stages:
+
+1. **Created** (`is_ready: false`) — the function record exists but no code has been deployed yet. All invoke attempts return `409 Function not ready`.
+2. **Deployed** (`is_ready: true`) — code bundle is in GCS, function can be invoked.
+
+This lets you pre-register a function name and attach it to a schedule before uploading the first bundle.
+
+```bash
+# Create without code (is_ready: false)
+pandastack fn create --name my-fn --runtime python
+
+# Attach a schedule immediately
+pandastack schedule create --name nightly --fn <function-id> --cron "0 2 * * *"
+
+# Later, push the first bundle (is_ready becomes true, schedule starts firing)
+pandastack fn deploy ./my-project/ --name my-fn --runtime python
+```
+
+## Versioning
+
+Every deploy atomically increments `version`. The previous code version is not deleted — GCS keeps all versions at `fn/{workspace}/{id}/v{N}/code.tar.gz`. This means you can audit what ran at any point in time from the metrics and trace back to the exact bundle.
+
+## Environment variables
+
+```bash
+# At deploy time
+pandastack fn deploy ./my-project/ \
+  --name my-fn \
+  --runtime python \
+  --env DATABASE_URL=postgres://...,LOG_LEVEL=info
+
+# Update env on an existing function (no redeploy needed)
+pandastack fn update <function-id> --env LOG_LEVEL=debug
+```
+
+In Python SDK:
+
+```python
+client.functions.update("fn-id", env={"LOG_LEVEL": "debug"})
+```
+
+## Public HTTP endpoints
+
+Deploy with `--public` to get a live HTTPS endpoint — no API key required from callers:
+
+```bash
+pandastack fn deploy ./my-project/ \
+  --name public-api \
+  --runtime python \
+  --entrypoint handler.py \
+  --public
+```
+
+```
+🌐 Public endpoint: https://fn-abc123.pandastack.ai
+```
+
+Any HTTP request to that URL runs your function in a fresh microVM. Use this for webhooks, lightweight APIs, or public demos.
+
+## Golden metrics
+
+PandaStack automatically tracks every invocation in ClickHouse and exposes an aggregated metrics endpoint:
+
+```bash
+pandastack fn metrics my-fn --period 24
+```
+
+```
+Period:          24h
+Invocations:     1,482
+Errors:          12 (0.8%)
+p50 latency:     143ms
+p95 latency:     389ms
+p99 latency:     621ms
+Cold start rate: 2.1%
+```
+
+Via the REST API:
+
+```bash
+curl https://api.pandastack.ai/v1/functions/<id>/metrics?period=24 \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN"
+```
+
+```json
+{
+  "period": "24h",
+  "total": 1482,
+  "errors": 12,
+  "error_rate": 0.0081,
+  "p50_ms": 143,
+  "p95_ms": 389,
+  "p99_ms": 621,
+  "cold_start_rate": 0.021
+}
+```
+
+## Dependency installation
+
+Dependencies are installed **inside the microVM** after your bundle is extracted — per invocation, because each sandbox is ephemeral:
+
+| File               | Command run automatically               |
+|--------------------|-----------------------------------------|
+| `requirements.txt` | `pip install -r requirements.txt`       |
+| `package.json`     | `npm install --production`              |
+
+Installation failures are **non-fatal** — your function still runs if install fails (useful when dependencies are optional or pre-baked into the template).
+
+For heavy dependencies, bake a custom template instead:
+
+```bash
+# Bake numpy, pandas, scikit-learn into a template once
+pandastack template build -f Dockerfile -n ml-runner --size-mb 4096
+pandastack fn deploy ./model/ --name predictor --runtime python --template ml-runner
+```
+
+## Full lifecycle example
+
+```bash
+# 1. Write your function
+mkdir -p my-fn && cat > my-fn/handler.py << 'EOF'
+import json, os, datetime
+
+def main():
+    print(json.dumps({
+        "env": os.environ.get("APP_ENV", "dev"),
+        "ts": datetime.datetime.utcnow().isoformat(),
+    }))
+
+main()
+EOF
+
+# 2. Deploy
+pandastack fn deploy ./my-fn/ \
+  --name timestamp-fn \
+  --runtime python \
+  --entrypoint handler.py \
+  --env APP_ENV=production \
+  --public
+
+# 3. Check it
+pandastack fn list
+pandastack fn get <function-id>
+
+# 4. Invoke manually
+pandastack fn invoke <function-id>
+
+# 5. Check runs + metrics
+pandastack fn runs <function-id>
+pandastack fn metrics <function-id> --period 1
+
+# 6. Update env without redeploying
+pandastack fn update <function-id> --env APP_ENV=staging
+
+# 7. Push a new version
+pandastack fn deploy ./my-fn/ --name timestamp-fn --runtime python
+
+# 8. Delete when done
+pandastack fn delete <function-id>
+```
+
+## CLI reference
+
+| Command | Description |
+|---------|-------------|
+| `fn deploy <dir\|file> --name <n> --runtime <r>` | Bundle + deploy (creates function if new) |
+| `fn list` | List all functions in the workspace |
+| `fn get <id>` | Inspect a single function |
+| `fn update <id> [--env k=v] [--public]` | Update metadata without redeploying code |
+| `fn invoke <id>` | Trigger a manual invocation |
+| `fn runs <id>` | List run history for a function |
+| `fn metrics <id> [--period <hours>]` | Show golden metrics (default: 24h) |
+| `fn delete <id>` | Delete function and its GCS bundles |
+

@@ -1,0 +1,61 @@
+---
+title: CI runners
+description: Run untrusted PR CI inside ephemeral Firecracker microVMs — no sandbox-escape risk.
+---
+
+PandaStack can run each CI job in a short-lived sandbox. Use tokens in CI secrets and clean up each sandbox at the end of the job.
+
+## Environment
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+## Shell runner pattern
+
+```bash
+set -euo pipefail
+
+sandbox_id=$(pandastack -o json sandbox create --template base --ttl 1h | jq -r '.id')
+
+pandastack sandbox cp ./repo.tar.gz "$sandbox_id:/workspace/repo.tar.gz"
+pandastack sandbox exec "$sandbox_id" -- bash -lc 'cd /workspace && tar -xzf repo.tar.gz && cd repo && ./ci.sh'
+pandastack sandbox logs "$sandbox_id" --no-follow --stream both
+pandastack sandbox delete "$sandbox_id"
+```
+
+## TypeScript runner pattern
+
+```ts
+import { Sandbox } from "@pandastack/sdk";
+
+const sandbox = await Sandbox.create({
+  template: "base",
+  ttlSeconds: 3600,
+  metadata: { kind: "ci" },
+});
+
+try {
+  await sandbox.filesystem.upload("./repo.tar.gz", "/workspace/repo.tar.gz");
+  const result = await sandbox.exec([
+    "bash",
+    "-lc",
+    "cd /workspace && tar -xzf repo.tar.gz && cd repo && ./ci.sh",
+  ], 1800);
+
+  if (result.exitCode !== 0) throw new Error(result.stderr);
+} finally {
+  await sandbox.kill();
+}
+```
+
+## Useful lifecycle controls
+
+```bash
+pandastack sandbox pause <id>
+pandastack sandbox resume <id>
+pandastack sandbox set-ttl <id> 1h
+pandastack sandbox hibernate <id>
+pandastack sandbox wake <id>
+```

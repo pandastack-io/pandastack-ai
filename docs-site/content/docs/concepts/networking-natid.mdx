@@ -1,0 +1,65 @@
+---
+title: Networking — NATID mode
+description: Why every sandbox has the same internal IP, and how the orchestrator dials it.
+---
+
+PandaStack uses a network mode called **NATID** (NAT-identity-preserving) to deliver fast
+snapshot restores. Understanding it matters when you're debugging connectivity.
+
+## The problem
+
+Firecracker snapshots include the kernel's network state — interface IPs, ARP tables, DHCP
+leases. If we restore a snapshot into a VM that has a *different* IP than the one baked
+into the snapshot, the guest networking is broken until DHCP renegotiates.
+
+For 180 ms cold boots, we can't afford that.
+
+## The solution
+
+Every snapshot bakes a **fixed guest identity**:
+- `tap_host_ip` (e.g. `172.20.3.249`) — the gateway the guest knows about.
+- `guest_ip` (e.g. `172.20.3.250`) — the IP assigned to `eth0` inside the guest.
+- `mac` — the MAC address baked into the virtio-net device.
+
+These three values are **identical for every sandbox restored from the same template snapshot**.
+
+To make that work across thousands of sandboxes on the same host, each sandbox runs in its
+own network namespace (`netns`) with its own veth pair. Inside each netns, the same
+`172.20.3.250` exists — but they're isolated.
+
+## How the orchestrator dials in
+
+The host orchestrator (outside the netns) can't talk to `172.20.3.250` directly — it
+exists in N different namespaces simultaneously. Instead, each netns has a veth pair:
+
+```
+   root netns                    sandbox netns (ns-XXXX)
+                                 ┌──────────────────────────┐
+   10.200.4.137 (host-side) ◄───►│ 10.200.4.138 (netns-side)│
+                                 │   │                      │
+                                 │   │ PREROUTING DNAT       │
+                                 │   ▼                      │
+                                 │ 172.20.3.250:22 ──► tap0 │
+                                 └──────────────────────────┘
+                                              ▼
+                                       firecracker VM
+                                       (eth0 = 172.20.3.250)
+```
+
+The orchestrator dials **`ProxyGuestIP`** (the netns-side veth, `10.200.4.138`).
+A `PREROUTING DNAT` rule inside the netns rewrites it to `172.20.3.250:22`,
+and the kernel routes it via `tap0` to the guest.
+
+<Callout title="Common gotcha">
+Don't dial `ProxyHostIP` (the host-side veth). That's the host's own IP — packets to it
+get delivered to the host's TCP stack, which is not what you want.
+</Callout>
+
+## What you see in the dashboard
+
+The `guest_ip` shown for each sandbox is the **proxy IP** (e.g. `10.200.4.138`), not the
+baked guest IP. This is the address you'd dial if you wanted to reach the sandbox from
+the host network.
+
+For multi-host setups, agents are private (not internet-reachable). The API edge dials
+the agent over the private VPC; the agent dials its local netns.

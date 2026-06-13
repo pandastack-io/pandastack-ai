@@ -1,0 +1,91 @@
+---
+title: AI agents
+description: Give your LLM agent a sandbox so it can actually run code, edit files, and call tools — without compromising your host.
+---
+
+The most common reason people use PandaStack: their LLM agent needs to **execute code** or **mutate a filesystem** as part of its plan. Putting that inside a Firecracker microVM means a misbehaving model can't `rm -rf /` your laptop or exfiltrate creds.
+
+## Pattern: one sandbox per agent turn
+
+```python
+import json
+from pandastack import Sandbox
+from openai import OpenAI
+
+oai = OpenAI()
+
+def agent_turn(user_msg: str) -> str:
+    sandbox = Sandbox.create(template="code-interpreter", ttl_seconds=3600)
+    try:
+        messages = [{"role": "user", "content": user_msg}]
+        while True:
+            resp = oai.chat.completions.create(
+                model="gpt-4.1",
+                messages=messages,
+                tools=[{
+                    "type": "function",
+                    "function": {
+                        "name": "run_python",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"code": {"type": "string"}},
+                        },
+                    },
+                }],
+            )
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                return msg.content
+
+            for tc in msg.tool_calls:
+                code = json.loads(tc.function.arguments)["code"]
+                result = sandbox.run_code(code, language="python")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result.stdout + result.stderr,
+                })
+    finally:
+        sandbox.kill()
+```
+
+## Pattern: persistent agent workspace
+
+Persistent volumes are not exposed in the current SDKs. For now, keep agent state in the sandbox filesystem while the sandbox is alive, or upload and download the workspace between turns.
+
+```python
+sandbox = Sandbox.create(template="code-interpreter", ttl_seconds=7200)
+sandbox.filesystem.upload("./workspace.tar.gz", "/workspace/workspace.tar.gz")
+sandbox.exec(["bash", "-lc", "cd /workspace && tar -xzf workspace.tar.gz"], timeout_seconds=60)
+sandbox.exec(["bash", "-lc", "cd /workspace && git status"], timeout_seconds=30)
+sandbox.filesystem.download("/workspace/workspace.tar.gz", "./workspace.tar.gz")
+```
+
+Track persistent storage work at [GitHub issues](https://github.com/pandastack-io/pandastack/issues).
+
+## Pattern: fork-on-explore
+
+When an agent wants to **try multiple approaches** without losing state:
+
+```python
+parent = Sandbox.create(template="code-interpreter", ttl_seconds=3600)
+parent.run_code("import pandas as pd; df = pd.read_csv('/workspace/data.csv'); print(df.head())", language="python")
+
+branches = []
+for approach in ["fillna", "dropna", "interpolate"]:
+    child = parent.fork(metadata={"approach": approach})
+    child.run_code(f"print('trying {approach}')", language="python")
+    branches.append(child)
+
+winner = branches[0]
+for branch in branches[1:]:
+    branch.kill()
+```
+
+Forks share parent memory pages via CoW. 10 forks of a 500 MiB Python session take ~5 MiB extra RSS until each child diverges.
+
+## Security defaults
+
+- Egress is netns-isolated. Outbound traffic goes through a NAT'd interface in the agent's network namespace — no access to the host network or other sandboxes.
+- All inter-sandbox communication is blocked by default.
+- Use `metadata` on `Sandbox.create(...)` to tag agent sandboxes for audit and cleanup.

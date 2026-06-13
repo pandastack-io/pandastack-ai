@@ -1,0 +1,65 @@
+---
+title: Install the CLI
+description: The `pandastack` CLI manages sandboxes, templates, tokens, and auth from your terminal.
+---
+
+## Build from source
+
+PandaStack does not publish a shell installer. Build the CLI from the repository:
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack/cmd/pandastack
+go build -o /usr/local/bin/pandastack ./
+```
+
+Make sure `/usr/local/bin` is on your `PATH`, or choose another output path that is.
+
+## Configure
+
+Use browser auth for dashboard-backed workflows:
+
+```bash
+pandastack auth login
+pandastack auth whoami
+```
+
+For token-based SDK or API access, set the real environment variables:
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+## Verify
+
+```bash
+$ pandastack version
+pandastack 0.5.0 (commit abc123)
+
+$ pandastack sandbox list
+ID                                    TEMPLATE          STATUS   AGE
+278a4f42-3467-4424-98e6-a547646dd0fd  code-interpreter  running  2m
+```
+
+## Common commands
+
+```bash
+pandastack sandbox create --template code-interpreter --ttl 1h
+pandastack sandbox list
+pandastack sandbox exec <id> -- python -c 'print(1 + 1)'
+pandastack sandbox logs <id> --no-follow --stream both
+pandastack sandbox ssh <id>
+pandastack sandbox preview-url <id> 3000 --ttl 1h
+pandastack sandbox delete <id>
+
+pandastack template list
+pandastack template build -f Dockerfile -n my-template --size-mb 2048
+pandastack template delete my-template
+
+pandastack token list
+pandastack token create local-dev
+pandastack token revoke pds_abc123
+```
+
+See [CLI reference](/docs/sdk/cli) for the full command tree.

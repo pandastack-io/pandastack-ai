@@ -1,0 +1,53 @@
+---
+title: Deploy on-prem
+description: Run PandaStack on your own bare-metal hardware.
+---
+
+On-prem deployments run the PandaStack API, dashboard, scheduler, and one or more sandbox agents on your hardware. The `pandastack` CLI does not deploy clusters; use your infrastructure tooling to run the services, then point clients at the API.
+
+## Domains
+
+For hosted PandaStack:
+
+- Marketing: `pandastack.ai`
+- Dashboard: `app.pandastack.ai`
+- API: `api.pandastack.ai`
+- Docs: `docs.pandastack.ai`
+
+For an on-prem deployment, expose your own HTTPS API origin and set:
+
+```bash
+export PANDASTACK_API=https://api.pandastack.ai
+export PANDASTACK_TOKEN=pds_abc123def456...
+```
+
+Replace the API URL with your private origin when self-hosting.
+
+## Build local tools
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack/cmd/pandastack
+go build -o /usr/local/bin/pandastack ./
+```
+
+## Validate the deployment
+
+```bash
+curl -fsS https://api.pandastack.ai/healthz
+curl -fsS https://api.pandastack.ai/version
+
+pandastack auth whoami
+pandastack template list
+pandastack sandbox create --template base --ttl 1h
+pandastack sandbox list
+```
+
+## Operational checks
+
+```bash
+pandastack sandbox logs <id> --stream both --no-follow
+pandastack sandbox exec <id> -- uname -a
+pandastack sandbox preview-url <id> 3000 --ttl 1h
+pandastack sandbox delete <id>
+```

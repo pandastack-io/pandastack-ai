@@ -1,0 +1,103 @@
+---
+title: Filesystem
+description: Read, write, upload, and download files inside a sandbox.
+---
+
+Every sandbox has a writable rootfs, scoped to its lifetime (or longer if you use [volumes](/docs/concepts/volumes)). The filesystem API lets you push files in and pull files out without going through `exec` + base64 dance.
+
+All four calls live under `sandbox.filesystem`. There are **no** top-level `sandbox.read()` / `sandbox.write()` helpers.
+
+## Quickstart
+
+```python
+sandbox.filesystem.write("/workspace/input.txt", "hello\n")
+text = sandbox.filesystem.read("/workspace/input.txt")          # → bytes
+
+sandbox.filesystem.upload("./local.csv", "/workspace/data.csv")
+sandbox.filesystem.download("/workspace/result.csv", "./out.csv")
+```
+
+```ts
+await sandbox.filesystem.write("/workspace/input.txt", "hello\n");
+const text = await sandbox.filesystem.read("/workspace/input.txt"); // → string
+
+await sandbox.filesystem.upload("./local.csv", "/workspace/data.csv");
+await sandbox.filesystem.download("/workspace/result.csv", "./out.csv");
+```
+
+## `read(path)`
+
+Fetch the bytes at `path` in the guest. The whole file is loaded into memory — for large files, stream via `exec` (`tar c …`) instead.
+
+| SDK    | Returns                                                          |
+| ------ | ---------------------------------------------------------------- |
+| Python | `bytes`. Decode yourself: `sandbox.filesystem.read(p).decode()`. |
+| TS     | `string`. Use `exec` + `base64` for binary content larger than a few MB. |
+
+Raises `NotFoundError` if `path` doesn't exist.
+
+## `write(path, content)`
+
+Write bytes to `path`. Parent directories are created if missing. The previous file (if any) is truncated.
+
+```python
+sandbox.filesystem.write("/workspace/config.json", json.dumps(cfg))
+
+# binary
+with open("model.bin", "rb") as f:
+    sandbox.filesystem.write("/workspace/model.bin", f.read())
+```
+
+```ts
+await sandbox.filesystem.write("/workspace/config.json", JSON.stringify(cfg));
+
+// binary
+await sandbox.filesystem.write("/workspace/model.bin", new Uint8Array(buf));
+```
+
+Returns `{ path, bytes }` with the absolute path written and byte count. Calls are **not** atomic — concurrent writes to the same path race.
+
+## `upload(localPath, remotePath)`
+
+Convenience wrapper: read a local file and `write` it. Identical to:
+
+```python
+sandbox.filesystem.write(remote, open(local, "rb").read())
+```
+
+Use this for small artifacts (configs, code, datasets up to ~10 MB). For larger payloads, mount a [volume](/docs/concepts/volumes) or scp via the [preview URL](/docs/concepts/preview-urls) on port 22.
+
+## `download(remotePath, localPath)`
+
+Mirror of `upload`: `read` the guest file and write it locally. The parent directory of `localPath` is created with `mkdir -p` semantics.
+
+## Path conventions
+
+- All paths are absolute inside the guest. `/workspace` is the conventional scratch directory on every official template — your code and outputs live there.
+- Symlinks are followed.
+- `path` is URL-encoded over the wire, so spaces and Unicode work transparently.
+
+## REST equivalents
+
+```http
+GET  /v1/sandboxes/{id}/fs?path=/workspace/input.txt
+PUT  /v1/sandboxes/{id}/fs?path=/workspace/input.txt
+Content-Type: application/octet-stream
+
+<raw bytes>
+```
+
+The `PUT` response is `{"path": "/workspace/input.txt", "bytes": 6}`. The `GET` returns the file body verbatim (`Content-Type: application/octet-stream`).
+
+## When to use volumes instead
+
+Filesystem calls write to the sandbox's ephemeral rootfs — when the sandbox is killed, the data goes with it. If you want persistence across sandboxes (datasets, model checkpoints, code repos), declare a [volume](/docs/concepts/volumes) at create time:
+
+```ts
+await Sandbox.create({
+  template: "code-interpreter",
+  volumes: [{ name: "training-data", readOnly: true }],
+});
+```
+
+Volumes mount at `/mnt/{name}` and survive `kill` / `hibernate` / `fork`.

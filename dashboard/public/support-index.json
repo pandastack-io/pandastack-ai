@@ -1,0 +1,511 @@
+[
+  {
+    "title": "Getting 401 Unauthorized",
+    "keywords": [
+      "401",
+      "unauthorized",
+      "auth",
+      "token",
+      "authentication"
+    ],
+    "heading": "",
+    "body": "Check your PANDASTACK_TOKEN is set and valid. Get a new token from dashboard settings.",
+    "url": "/docs/quickstart/authentication",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Getting 402 Payment Required",
+    "keywords": [
+      "402",
+      "payment",
+      "upgrade",
+      "paid",
+      "tier",
+      "plan"
+    ],
+    "heading": "",
+    "body": "This feature requires a paid plan. Upgrade to Pro, Team, or Enterprise.",
+    "url": "https://pandastack.ai/pricing",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Getting 429 Too Many Requests",
+    "keywords": [
+      "429",
+      "rate limit",
+      "quota",
+      "throttle",
+      "too many"
+    ],
+    "heading": "",
+    "body": "You've hit the hourly sandbox creation limit. Wait or upgrade your plan.",
+    "url": "/docs/concepts/billing#quotas",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Getting 503 Service Unavailable - no agents",
+    "keywords": [
+      "503",
+      "unavailable",
+      "no agents",
+      "capacity"
+    ],
+    "heading": "",
+    "body": "No agents available. Contact support if this persists.",
+    "url": "https://pandastack.ai/contact",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Getting 507 Insufficient Storage",
+    "keywords": [
+      "507",
+      "storage",
+      "disk full",
+      "volume"
+    ],
+    "heading": "",
+    "body": "Agent disk full. Volume provisioning failed \u2014 contact support or delete unused volumes.",
+    "url": "/docs/concepts/volumes",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Sandbox not responding or stuck",
+    "keywords": [
+      "sandbox",
+      "stuck",
+      "hanging",
+      "timeout",
+      "not responding"
+    ],
+    "heading": "",
+    "body": "Check sandbox logs. Try exec with shorter timeout or restart the sandbox.",
+    "url": "/docs/guides/debugging",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Database connection refused",
+    "keywords": [
+      "database",
+      "postgres",
+      "connection",
+      "refused",
+      "psql"
+    ],
+    "heading": "",
+    "body": "Ensure TLS is enabled. Check connection_url from GET /v1/databases/{id}.",
+    "url": "/docs/concepts/databases",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "App deploy failing or stuck",
+    "keywords": [
+      "app",
+      "deploy",
+      "build",
+      "failing",
+      "error"
+    ],
+    "heading": "",
+    "body": "Check deployment logs for errors. Verify framework detection and build commands.",
+    "url": "/docs/guides/apps",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Can't create sandbox - quota exceeded",
+    "keywords": [
+      "quota",
+      "limit",
+      "max sandboxes",
+      "create",
+      "exceeded"
+    ],
+    "heading": "",
+    "body": "You've reached your workspace sandbox limit. Delete old sandboxes or upgrade.",
+    "url": "/docs/concepts/billing#quotas",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Using sandbox for machine learning / AI",
+    "keywords": [
+      "ml",
+      "ai",
+      "python",
+      "jupyter",
+      "notebook",
+      "pytorch",
+      "tensorflow"
+    ],
+    "heading": "",
+    "body": "Use code-interpreter template with Python. Install packages via exec or custom template.",
+    "url": "/docs/guides/custom-templates",
+    "type": "troubleshooting"
+  },
+  {
+    "title": "Databases",
+    "keywords": [],
+    "heading": "",
+    "body": "Beta. Managed Databases are in public beta. The API is stable for create / list / get / delete, but advanced features (branching, read replicas, point-in-time restore) are still in progress \u2014 see Coming soon. Don't yet rely on a single beta database as the only copy of irreplaceable production data. A database is a managed PostgreSQL 16 instance running in its own dedicated Firecracker microVM \u2014 not a shared schema on a multi-tenant cluster. Each database gets its own kernel, its own process, a ",
+    "url": "/docs/concepts/databases",
+    "type": "doc"
+  },
+  {
+    "title": "Events",
+    "keywords": [],
+    "heading": "",
+    "body": "Every meaningful state change a sandbox goes through is published as a JSON event with a stable schema. You can either snapshot the recent history or subscribe to the live tail. Event schema - \u2014 server timestamp (millisecond precision, UTC). - \u2014 string from the catalog below. - \u2014 / / . Driven by the event type. - \u2014 type-specific structured fields (often duplicates of what's in ). Event catalog Lifecycle | | When | Notable metadata | | --------------------- | -------------------------------------",
+    "url": "/docs/concepts/events",
+    "type": "doc"
+  },
+  {
+    "title": "Exec \u2014 running commands",
+    "keywords": [],
+    "heading": "",
+    "body": "is the bread-and-butter call on a PandaStack sandbox: send a command, get back stdout, stderr, an exit code, and how long it took. Everything else (notebooks, code interpreters, agent tools) is built on top. Anatomy of a call | Field | Type | Meaning | | ------------- | ------ | ------------------------------------------------------------- | | | string | Everything written to file descriptor 1. | | | string | Everything written to file descriptor 2. | | | int | Process exit code. is success; any",
+    "url": "/docs/concepts/exec",
+    "type": "doc"
+  },
+  {
+    "title": "Filesystem",
+    "keywords": [],
+    "heading": "",
+    "body": "Every sandbox has a writable rootfs, scoped to its lifetime (or longer if you use volumes). The filesystem API lets you push files in and pull files out without going through + base64 dance. All four calls live under . There are no top-level / helpers. Quickstart Fetch the bytes at in the guest. The whole file is loaded into memory \u2014 for large files, stream via ( ) instead. | SDK | Returns | | ------ | ---------------------------------------------------------------- | | Python | . Decode yoursel",
+    "url": "/docs/concepts/filesystem",
+    "type": "doc"
+  },
+  {
+    "title": "Logs",
+    "keywords": [],
+    "heading": "",
+    "body": "Every sandbox has a single combined console log (the Firecracker serial port + the in-guest agent's stdout/stderr). It's append-only, persists for the sandbox's lifetime, and is exposed two ways: snapshot or follow. Snapshot \u2014 read what's been logged so far Plain body, newline-delimited. returns the last N lines (default: full log). Omit and the response closes as soon as the file has been read \u2014 useful for -style polling. Follow \u2014 server-sent events Returns ; each frame is one log line. SDK equ",
+    "url": "/docs/concepts/logs",
+    "type": "doc"
+  },
+  {
+    "title": "LSP",
+    "keywords": [],
+    "heading": "",
+    "body": "LSP proxies a Language Server Protocol server running inside a sandbox out to your editor or browser. You get autocomplete, hover, go-to-definition, diagnostics \u2014 all backed by the real toolchain in the sandbox, not a stub. This is what makes the in-dashboard editor \"feel like VS Code\" without us re-implementing a language server in the browser. Wire protocol Once upgraded, the WebSocket transports raw LSP framing in both directions: - client \u2192 server : standard LSP envelopes ( ). Binary or text",
+    "url": "/docs/concepts/lsp",
+    "type": "doc"
+  },
+  {
+    "title": "Hosted MCP Server",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack ships a hosted, workspace-level MCP server . Where the per-sandbox MCP endpoint turns one sandbox into a tool, this endpoint turns your whole workspace into one: the model can create and destroy sandboxes, run commands, read/write files, provision Postgres databases, and trigger app deploys \u2014 all through a single URL and your existing API token. is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 \u2014 every request stands alone, no session handshake required, so it works",
+    "url": "/docs/concepts/mcp-server",
+    "type": "doc"
+  },
+  {
+    "title": "MCP (Model Context Protocol)",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack speaks MCP natively. Every sandbox is a fully-formed MCP server \u2014 point Claude Desktop, Cursor, the CLI, or your own agent at it and the model gets , , , and tools wired to a real Linux microVM. Looking for workspace-level tools (create/delete sandboxes, databases, app deploys) behind a single URL? That's the hosted MCP server at \u2014 this page covers the per-sandbox endpoint. Body is JSON-RPC 2.0. Stateless \u2014 every request stands alone, no session affinity needed. Methods Returns capabi",
+    "url": "/docs/concepts/mcp",
+    "type": "doc"
+  },
+  {
+    "title": "Networking \u2014 NATID mode",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack uses a network mode called NATID (NAT-identity-preserving) to deliver fast snapshot restores. Understanding it matters when you're debugging connectivity. The problem Firecracker snapshots include the kernel's network state \u2014 interface IPs, ARP tables, DHCP leases. If we restore a snapshot into a VM that has a different IP than the one baked into the snapshot, the guest networking is broken until DHCP renegotiates. For 180 ms cold boots, we can't afford that. The solution Every snapsh",
+    "url": "/docs/concepts/networking-natid",
+    "type": "doc"
+  },
+  {
+    "title": "Observability",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack ships first-class observability \u2014 every sandbox emits process-level metrics and lifecycle events that flow into ClickHouse, then back out through the dashboard as charts. No Grafana, no Prometheus to operate; it's built in. What gets collected Five tables in ClickHouse, all partitioned by workspace and retained per the SLA below. | Table | Cardinality | Retention | What's in it | | -------------------------- | ----------------- | --------- | -------------------------------------------",
+    "url": "/docs/concepts/observability",
+    "type": "doc"
+  },
+  {
+    "title": "Performance",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack's whole point is \"start a real VM faster than you can blink.\" This page is the honest breakdown \u2014 what we measure, how the snapshot-restore boot path works, and what numbers you should plan against. Measured cold-start (production, n=50) Last refresh: 2026-06-01 , snapshot-natid mode on XFS+reflink, template, \u2192 . | Percentile | (server-side) | (client over public internet) | | ---------- | ----------------------- | --------------------------------------- | | min | 157 ms | 412 ms | | ",
+    "url": "/docs/concepts/performance",
+    "type": "doc"
+  },
+  {
+    "title": "Preview URLs",
+    "keywords": [],
+    "heading": "",
+    "body": "A preview URL is a public hostname that proxies HTTP(S) into a port inside your sandbox. It's how you let a teammate poke at a server, share a Streamlit app with a stakeholder, or hand a webhook URL to a third-party service \u2014 without exposing your API token. PandaStack offers two flavors: | | Public preview URL | Signed preview URL | | ------------------ | ----------------------------------------------- | ------------------------------------------ | | How it's auth'd | The sandbox UUID is the cr",
+    "url": "/docs/concepts/preview-urls",
+    "type": "doc"
+  },
+  {
+    "title": "REPL",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack ships two REPL modes: | | One-shot REPL | REPL sessions | | ------------------- | ------------------------------------------------ | ------------------------------------------------------ | | Endpoint | | | | State | None \u2014 fresh interpreter per call. | Persistent \u2014 variables, imports, state live across cells. | | Latency | 50 ms (one process spawn). | First call 150 ms (kernel boot), subsequent 5 ms. | | Right tool for\u2026 | Stateless code execution, agent tools. | Notebook-style workfl",
+    "url": "/docs/concepts/repl",
+    "type": "doc"
+  },
+  {
+    "title": "Sandbox lifecycle",
+    "keywords": [],
+    "heading": "",
+    "body": "A sandbox is a single Firecracker microVM with a dedicated kernel, rootfs, network namespace, and lifecycle. Sandboxes are identified by a UUID (e.g. ) and always belong to a workspace. States Lifetime guarantees | Transition | P50 | P99 | Notes | | ------------------ | -------- | -------- | ----- | | Create \u2192 running | 179 ms | 203 ms | Snapshot-natid path on every create, n=50 prod. See Performance. | | Pause \u2192 resume | &lt;5 ms | 8 ms | Just / . No memory writes. | | Hibernate \u2192 wake | 150 ms",
+    "url": "/docs/concepts/sandbox-lifecycle",
+    "type": "doc"
+  },
+  {
+    "title": "Snapshots and forks",
+    "keywords": [],
+    "heading": "",
+    "body": "Snapshots capture a sandbox state. Forks create a new sandbox from an existing sandbox. The supported API works from a live sandbox ID; SDK helpers that construct directly from a snapshot are not available today. CLI Python TypeScript API",
+    "url": "/docs/concepts/snapshots-and-forks",
+    "type": "doc"
+  },
+  {
+    "title": "Templates",
+    "keywords": [],
+    "heading": "",
+    "body": "A template is a snapshot-ready root filesystem with a pinned kernel. When you , the scheduler restores a snapshot of that template into a fresh microVM \u2014 that's how cold-start lands at 179 ms instead of \"boot a kernel from scratch\". Templates are immutable and content-addressed: once a snapshot exists for , every sandbox boots from the same bytes. Official catalog PandaStack ships 5 production templates. All names are stable and accepted by in the SDKs and in the CLI. CPU and memory are baked in",
+    "url": "/docs/concepts/templates",
+    "type": "doc"
+  },
+  {
+    "title": "Terminal",
+    "keywords": [],
+    "heading": "",
+    "body": "The terminal endpoint hands you a real Linux PTY inside the sandbox over a WebSocket. It's what powers the dashboard's \"Connect\" tab, and it's the right primitive to embed if you're building an IDE or a CI live-tail. The endpoint upgrades an HTTP to a WebSocket. Opening a PTY Wire protocol after the upgrade: | Direction | Frame | Meaning | | --------- | ----------------------------------------------------------- | -------------------------------------- | | client \u2192 server | binary frame | Bytes ",
+    "url": "/docs/concepts/terminal",
+    "type": "doc"
+  },
+  {
+    "title": "Volumes",
+    "keywords": [],
+    "heading": "",
+    "body": "A volume is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies \u2014 the data stays. Lifecycle Backing layout: one file per volume at . Maximum size 65,536 MB (64 GiB) per volume on every plan. Names are workspace-scoped. Attach to a sandbox Each entry adds a device to the VM. Volumes appear in the guest in attach-order: | Attach position | Gu",
+    "url": "/docs/concepts/volumes",
+    "type": "doc"
+  },
+  {
+    "title": "Deploy on Mac (M1/M2/M3)",
+    "keywords": [],
+    "heading": "",
+    "body": "Apple Silicon Macs are useful for local PandaStack development. Build the CLI from source and point it at the API you are running. Build the CLI Configure Use your local API origin instead of when developing against a local control plane. Smoke test The current CLI command tree is , , , , , and ; it does not include a Mac-specific deploy command.",
+    "url": "/docs/deploy/deploy-mac-m1",
+    "type": "doc"
+  },
+  {
+    "title": "Deploy on-prem",
+    "keywords": [],
+    "heading": "",
+    "body": "On-prem deployments run the PandaStack API, dashboard, scheduler, and one or more sandbox agents on your hardware. The CLI does not deploy clusters; use your infrastructure tooling to run the services, then point clients at the API. Domains For hosted PandaStack: - Marketing: - Dashboard: - API: - Docs: For an on-prem deployment, expose your own HTTPS API origin and set: Replace the API URL with your private origin when self-hosting. Build local tools Validate the deployment Operational checks",
+    "url": "/docs/deploy/deploy-on-prem",
+    "type": "doc"
+  },
+  {
+    "title": "Functions overview",
+    "keywords": [],
+    "heading": "",
+    "body": "What are Functions? PandaStack Functions run your Python or Node.js code inside isolated Firecracker microVMs. Every invocation gets a fresh runtime \u2014 no shared state, no noisy neighbours, no cold-start containers leaking secrets between customers. Unlike AWS Lambda, PandaStack Functions: - Accept full directory bundles (not just single files) \u2014 ship your entire project with dependencies - Store code privately in GCS, never in your database - Emit golden metrics (p50/p95/p99 latency, error rate,",
+    "url": "/docs/functions/overview",
+    "type": "doc"
+  },
+  {
+    "title": "Schedules",
+    "keywords": [],
+    "heading": "",
+    "body": "What are Schedules? Schedules attach a cron expression to a function and trigger it automatically. Every scheduled run executes the target function in a fresh isolated microVM, just like a manual invocation. Create a schedule First deploy a function, then attach a schedule to it: The schedule stores: - - - - - - - Cron syntax Schedules use standard 5-field cron expressions: Examples: - \u2014 every 5 minutes - \u2014 every hour - \u2014 every day at 09:00 UTC - \u2014 every Monday at midnight UTC Pause and resume P",
+    "url": "/docs/functions/schedules",
+    "type": "doc"
+  },
+  {
+    "title": "Install the CLI",
+    "keywords": [],
+    "heading": "",
+    "body": "Build from source PandaStack does not publish a shell installer. Build the CLI from the repository: Make sure is on your , or choose another output path that is. Configure Use browser auth for dashboard-backed workflows: For token-based SDK or API access, set the real environment variables: Verify Common commands See CLI reference for the full command tree.",
+    "url": "/docs/getting-started/install-cli",
+    "type": "doc"
+  },
+  {
+    "title": "Local install on Linux",
+    "keywords": [],
+    "heading": "",
+    "body": "import { Callout } from 'fumadocs-ui/components/callout'; import { Step, Steps } from 'fumadocs-ui/components/steps'; import { Tab, Tabs } from 'fumadocs-ui/components/tabs'; This is the bare-metal Linux path. Postgres and ClickHouse run in Docker; the API, dashboard, and Firecracker host agent run directly on your machine. KVM is required. 60-second path The script is idempotent. Re-running it skips work that is already done. Step-by-step install Step 1 \u2014 Confirm hardware and OS You need: - Lin",
+    "url": "/docs/getting-started/local-linux",
+    "type": "doc"
+  },
+  {
+    "title": "Local Apple Silicon development",
+    "keywords": [],
+    "heading": "",
+    "body": "Local Apple Silicon development > Single-tenant dev mode. Do not expose to the network. > > This guide uses stub auth, local databases, and a local Lima VM. It is designed for one developer on one Mac. This guide gets PandaStack running locally on an Apple Silicon Mac with the API, dashboard, Postgres, ClickHouse, a Lima VM, the agent, and real Firecracker microVM smoke tests. 60-second path The script is intentionally opinionated. It installs or checks local dependencies, starts data services, ",
+    "url": "/docs/getting-started/local-mac-apple-silicon",
+    "type": "doc"
+  },
+  {
+    "title": "Quickstart",
+    "keywords": [],
+    "heading": "",
+    "body": "1. Authenticate Or sign in with the CLI: 2. Create a sandbox Available templates are , , , , and . 3. Run a command Python TypeScript Preview a service SDK equivalents are in Python and in TypeScript.",
+    "url": "/docs/getting-started/quickstart",
+    "type": "doc"
+  },
+  {
+    "title": "Self-host overview",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack is split into a control plane, agents, and Firecracker-based sandbox hosts. Self-hosting means running those services yourself and pointing clients at your API endpoint. Client configuration Use the same SDKs and CLI against your endpoint: For a private deployment, replace with your HTTPS API origin. Build the CLI Smoke test Related deployment guides - Deploy on-prem - Deploy on Mac (M1/M2/M3) The CLI does not include subcommands; deployment automation lives outside the command surfac",
+    "url": "/docs/getting-started/self-host",
+    "type": "doc"
+  },
+  {
+    "title": "AI agents",
+    "keywords": [],
+    "heading": "",
+    "body": "The most common reason people use PandaStack: their LLM agent needs to execute code or mutate a filesystem as part of its plan. Putting that inside a Firecracker microVM means a misbehaving model can't your laptop or exfiltrate creds. Pattern: one sandbox per agent turn Pattern: persistent agent workspace Persistent volumes are not exposed in the current SDKs. For now, keep agent state in the sandbox filesystem while the sandbox is alive, or upload and download the workspace between turns. Track",
+    "url": "/docs/guides/ai-agents",
+    "type": "doc"
+  },
+  {
+    "title": "CI runners",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack can run each CI job in a short-lived sandbox. Use tokens in CI secrets and clean up each sandbox at the end of the job. Environment Shell runner pattern TypeScript runner pattern Useful lifecycle controls",
+    "url": "/docs/guides/ci-runners",
+    "type": "doc"
+  },
+  {
+    "title": "Claude Managed Agents",
+    "keywords": [],
+    "heading": "",
+    "body": "Claude Managed Agents let Anthropic run the agent loop \u2014 the model, the reasoning, the multi-turn session state \u2014 while the agent's tool calls execute in infrastructure you control . Anthropic calls this a self-hosted sandbox , and a PandaStack microVM is an ideal one: every session gets a fresh, isolated Firecracker VM that boots from a snapshot in 180 ms and can hibernate between turns. This guide wires the two together. By the end you'll have an agent whose , file, and code tool calls run ins",
+    "url": "/docs/guides/claude-managed-agents",
+    "type": "doc"
+  },
+  {
+    "title": "Code interpreter",
+    "keywords": [],
+    "heading": "",
+    "body": "The template runs Python inside a Firecracker microVM. Use for commands, for Python snippets, and for files. One-shot exec This spawns Python fresh each call. Variables don't persist between runs. Run Python code For shell snippets, use . File uploads For larger files, use upload and download helpers: Persistence Persistent volume APIs are not available yet. Keep work inside a live sandbox with a longer TTL, or download the workspace before cleanup. Track persistent storage work at GitHub issues",
+    "url": "/docs/guides/code-interpreter",
+    "type": "doc"
+  },
+  {
+    "title": "Data pipelines",
+    "keywords": [],
+    "heading": "",
+    "body": "Use disposable sandboxes to isolate ETL steps, scrapers, and batch transforms. Put files through and execute code with or . Python batch job TypeScript batch job CLI debugging",
+    "url": "/docs/guides/data-pipelines",
+    "type": "doc"
+  },
+  {
+    "title": "PandaStack",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack Open-source Firecracker microVM sandboxes for AI agents and code execution. 60-second quickstart Create a sandbox from the local API: What it does - Firecracker microVM sandboxes with strong process and kernel isolation. - Snapshot anywhere and fork running environments instantly. - Sub-second boot on every create via baked snapshot restore. - Template-defined CPU, RAM, and disk quotas. - Network egress controls for safer code execution. - Template-based images: Docker images converte",
+    "url": "/docs/index",
+    "type": "doc"
+  },
+  {
+    "title": "Fork & Copy-on-Write",
+    "keywords": [],
+    "heading": "",
+    "body": "produces a new sandbox whose initial state is a byte-perfect copy of the parent \u2014 same processes, same open file descriptors, same -installed packages, same in-memory variables. We do it in 400\u2013750 ms per child, in parallel. Two CoW layers make it possible. Layer 1: memory CoW (Firecracker snapshot) We don't actually duplicate the parent's RAM. We: 1. Pause the parent ( 5 ms). 2. Write the parent's memory to (this is a copy of the RAM out to disk \u2014 the only expensive step, 30 ms for 256 MiB to N",
+    "url": "/docs/internals/fork-cow",
+    "type": "doc"
+  },
+  {
+    "title": "Networking",
+    "keywords": [],
+    "heading": "",
+    "body": "Every sandbox lives in its own Linux network namespace, with its own MAC and its own private IP. The host doesn't share an IP space with the guest, the guests don't share an IP space with each other, and yet every guest can reach the internet and be reached on whatever ports it exposes. This page is how. The per-sandbox netns For sandbox : Inside the netns lives one tap device ( ) that Firecracker plumbs into the VM's . The veth pair shuttles packets between the netns and the root namespace wher",
+    "url": "/docs/internals/networking",
+    "type": "doc"
+  },
+  {
+    "title": "Scheduler",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack has a tiny global scheduler \u2014 a handful of SQL queries plus a deterministic scoring function \u2014 that picks the right agent host for every create. It's not Kubernetes; it doesn't need to be. The whole thing fits in one file. The decision Whichever agent scores highest wins the create. Agents that fail the resource floor (requested CPU/RAM doesn't fit in free capacity) are excluded before scoring. Every create takes the same snapshot-restore fast path on any agent that has the template's",
+    "url": "/docs/internals/scheduler",
+    "type": "doc"
+  },
+  {
+    "title": "Snapshot & Restore",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux once at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is 179 ms and p99 is 203 ms on bare-metal Intel Cascade Lake. This page walks the full path, end to end. The artifacts on disk For each template (e.g., ) we keep three files o",
+    "url": "/docs/internals/snapshot-restore",
+    "type": "doc"
+  },
+  {
+    "title": "Streaming Restore (UFFD)",
+    "keywords": [],
+    "heading": "",
+    "body": "Snapshot restore is fast because is already a local file: Firecracker s it and pages fault in lazily. But that assumes the file is on the host . On a cold host \u2014 one that has never restored this template \u2014 the agent first has to download the entire (256 MiB \u2013 several GiB) from object storage before Firecracker can it. That download is the \"cold host first-boot cliff\": the create blocks on transferring memory the guest may never even touch. Streaming restore removes that cliff. Instead of downloa",
+    "url": "/docs/internals/streaming-restore",
+    "type": "doc"
+  },
+  {
+    "title": "Architecture",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack has three main layers: 1. Control plane \u2014 API, auth, organizations, tokens, templates, billing, and orchestration. 2. Data plane \u2014 agents that run sandbox operations on hosts. 3. Workload microVMs \u2014 Firecracker sandboxes created from templates. Public surfaces - Marketing: - Dashboard: - API: - Docs: API entry points Sandbox operations are scoped under . Filesystem access uses , lifecycle uses routes such as , , , , , and , and streaming uses , , and WebSocket upgrades. Agent-proxied ",
+    "url": "/docs/reference/architecture",
+    "type": "doc"
+  },
+  {
+    "title": "Errors",
+    "keywords": [],
+    "heading": "",
+    "body": "All HTTP errors follow a consistent JSON envelope: | HTTP | Code prefix | Meaning | |---|---|---| | 400 | | Invalid request shape or parameter | | 401 | | Missing or invalid credentials | | 403 | , | Authenticated but not allowed | | 404 | | Resource does not exist | | 409 | | Resource state conflict (e.g. delete while booting) | | 429 | | Too many requests | | 500 | | Bug in PandaStack \u2014 please report | | 503 | | No agent capacity for placement | Common codes | Code | Meaning | |---|---| | | JW",
+    "url": "/docs/reference/errors",
+    "type": "doc"
+  },
+  {
+    "title": "REST API",
+    "keywords": [],
+    "heading": "",
+    "body": "Base URL for the hosted API: Token-based requests use . Token examples use the prefix. Public Auth and tokens JWT-only endpoints: Sandboxes Token or JWT: Create body \u2014 only is required. CPU and memory come from the template's baked size and are not accepted in this payload (older clients may send them; they will be ignored and reflected back as the template's actual size). Sandbox operations All operations are proxied to the agent: and use Server-Sent Events. , , and upgrade to WebSocket. Filesy",
+    "url": "/docs/reference/rest-api",
+    "type": "doc"
+  },
+  {
+    "title": "WebSocket & SSE",
+    "keywords": [],
+    "heading": "",
+    "body": "The hosted API origin is ; WebSocket clients should use the matching scheme. Authenticate with JWT or where the route allows token auth. Server-Sent Events streams command output. streams sandbox lifecycle and agent events. Logs The SDK exposes this as in Python and in TypeScript. WebSocket endpoints - opens an interactive terminal. - runs command execution over WebSocket. - proxies a language server session for . CLI equivalents",
+    "url": "/docs/reference/websocket",
+    "type": "doc"
+  },
+  {
+    "title": "CLI reference",
+    "keywords": [],
+    "heading": "",
+    "body": "Installation Build from source: Global flags Use for machine-readable output where supported. Auth Token-based clients use: Templates Known templates: , , , , . Sandboxes Databases (Beta) Manage managed PostgreSQL databases. is an alias for . is optional and just tags the database for easy identification in . CPU and memory are fixed by the template (baked into its snapshot at build time) and can't be set per-database. returns the URL for the database. Tokens Misc There are no , , , or subcomman",
+    "url": "/docs/sdk/cli",
+    "type": "doc"
+  },
+  {
+    "title": "Python SDK",
+    "keywords": [],
+    "heading": "",
+    "body": "The package is the recommended way to use PandaStack from Python. It targets 3.9+, has no required dependencies beyond , and mirrors the REST API 1:1. Install Configure Two env vars: The SDK also reads ( / / ) if no env vars are set \u2014 useful for shared dev workstations. Imports The most common surface is \u2014 a class with classmethod constructors and rich instance methods. Under the hood every call goes through a singleton , but you rarely instantiate one yourself. Sandboxes | Arg | Type | Default ",
+    "url": "/docs/sdk/python",
+    "type": "doc"
+  },
+  {
+    "title": "TypeScript SDK",
+    "keywords": [],
+    "heading": "",
+    "body": "The package is the recommended way to use PandaStack from Node, Bun, Deno, or modern browsers. It targets ES2022, uses native , and ships full TypeScript types. Install Configure On Node, the SDK also reads ( / / ) if no env vars are set. Imports There is no global class \u2014 you create one through a : Exposes resource namespaces \u2014 , , , , \u2014 and one direct call: Sandboxes and (and ) are accepted for backwards compatibility but deprecated and ignored \u2014 the server always uses the template's baked siz",
+    "url": "/docs/sdk/typescript",
+    "type": "doc"
+  },
+  {
+    "title": "Supabase auth",
+    "keywords": [],
+    "heading": "",
+    "body": "Supabase auth for self-hosting Use Supabase Auth when your PandaStack deployment has more than one human user, more than one organization, or a dashboard exposed beyond a single trusted development machine. Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider. When to use it Choose Supabase auth when you need: - dashboard sign-in for multiple users - organization membership and invitations - API requests ti",
+    "url": "/docs/self-host/auth-supabase",
+    "type": "doc"
+  }
+]

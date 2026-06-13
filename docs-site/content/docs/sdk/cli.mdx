@@ -1,0 +1,100 @@
+---
+title: CLI reference
+description: pandastack — the official CLI.
+---
+
+## Installation
+
+Build from source:
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack/cmd/pandastack
+go build -o /usr/local/bin/pandastack ./
+```
+
+## Global flags
+
+```bash
+pandastack -o json <command>
+```
+
+Use `-o json` for machine-readable output where supported.
+
+## Auth
+
+```bash
+pandastack auth login
+pandastack auth logout
+pandastack auth whoami
+```
+
+Token-based clients use:
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+## Templates
+
+```bash
+pandastack template list
+pandastack template build -f Dockerfile -n code-interpreter --size-mb 2048
+pandastack template delete code-interpreter
+```
+
+Known templates: `base`, `code-interpreter`, `agent`, `browser`, `postgres-16`.
+
+## Sandboxes
+
+```bash
+pandastack sandbox create --template code-interpreter --ttl 1h
+pandastack sandbox list
+pandastack sandbox get <id>
+pandastack sandbox exec <id> --timeout 30 -- python -c 'print(42)'
+pandastack sandbox logs <id> --no-follow --stream both
+pandastack sandbox ssh <id>
+pandastack sandbox cp ./local.txt <id>:/workspace/local.txt
+pandastack sandbox cp <id>:/workspace/out.txt ./out.txt
+pandastack sandbox pause <id>
+pandastack sandbox resume <id>
+pandastack sandbox snapshot <id>
+pandastack sandbox fork <id>
+pandastack sandbox hibernate <id>
+pandastack sandbox wake <id>
+pandastack sandbox set-ttl <id> 1h
+pandastack sandbox preview-url <id> 3000 --ttl 1h
+pandastack sandbox delete <id>
+```
+
+## Databases (Beta)
+
+Manage [managed PostgreSQL databases](/docs/concepts/databases). `db` is an alias for `database`.
+
+```bash
+pandastack database create --label app
+pandastack database list
+pandastack database get <id>
+pandastack database connection <id>
+pandastack database delete <id>
+```
+
+`--label` is optional and just tags the database for easy identification in `list`. CPU and memory are fixed by the `postgres-16` template (baked into its snapshot at build time) and can't be set per-database. `connection` returns the `postgres://` URL for the database.
+
+## Tokens
+
+```bash
+pandastack token list
+pandastack token create local-dev
+pandastack token revoke pds_abc123
+```
+
+## Misc
+
+```bash
+pandastack version
+pandastack help
+```
+
+There are no `volumes`, `files`, `deploy`, or `completion` subcommands in the current CLI. Use `sandbox cp` for file transfer and the SDK filesystem helpers for programmatic reads and writes.

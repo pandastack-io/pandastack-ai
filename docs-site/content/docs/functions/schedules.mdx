@@ -1,0 +1,76 @@
+---
+title: Schedules
+description: Run PandaStack Functions on cron schedules.
+---
+
+## What are Schedules?
+
+Schedules attach a cron expression to a function and trigger it automatically.
+
+Every scheduled run executes the target function in a fresh isolated microVM, just like a manual invocation.
+
+## Create a schedule
+
+First deploy a function, then attach a schedule to it:
+
+```bash
+pandastack function deploy handler.py --name daily-report --runtime python
+pandastack schedule create --name daily-report --fn <function-id> --cron "0 9 * * *"
+```
+
+The schedule stores:
+
+- `function_id`
+- `name`
+- `cron`
+- `paused`
+- `last_run_at`
+- `created_at`
+- `updated_at`
+
+## Cron syntax
+
+Schedules use standard 5-field cron expressions:
+
+```text
+┌ minute (0 - 59)
+│ ┌ hour (0 - 23)
+│ │ ┌ day of month (1 - 31)
+│ │ │ ┌ month (1 - 12)
+│ │ │ │ ┌ day of week (0 - 6)
+│ │ │ │ │
+* * * * *
+```
+
+Examples:
+
+- `*/5 * * * *` — every 5 minutes
+- `0 * * * *` — every hour
+- `0 9 * * *` — every day at 09:00 UTC
+- `0 0 * * 1` — every Monday at midnight UTC
+
+## Pause and resume
+
+```bash
+pandastack schedule pause <schedule-id>
+pandastack schedule resume <schedule-id>
+```
+
+Pausing keeps the schedule definition but stops future automatic invocations until you resume it.
+
+## Trigger manually
+
+```bash
+pandastack schedule trigger <schedule-id>
+pandastack schedule runs <schedule-id>
+```
+
+Manual triggers are useful for testing a cron-backed workflow immediately without waiting for the next scheduled window.
+
+## Update a schedule
+
+```bash
+pandastack schedule update <schedule-id> --cron "0 */6 * * *"
+```
+
+Use updates when you need to change cadence without redeploying the underlying function.

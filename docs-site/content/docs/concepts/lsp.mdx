@@ -1,0 +1,116 @@
+---
+title: LSP
+description: Language-server-as-a-service over WebSocket. Bring your editor's intelligence to a sandbox.
+---
+
+LSP proxies a [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) server running **inside** a sandbox out to your editor or browser. You get autocomplete, hover, go-to-definition, diagnostics — all backed by the real toolchain in the sandbox, not a stub.
+
+This is what makes the in-dashboard editor "feel like VS Code" without us re-implementing a language server in the browser.
+
+## Wire protocol
+
+```
+GET /v1/sandboxes/{id}/lsp/{lang}
+Upgrade: websocket
+Sec-WebSocket-Protocol: lsp
+```
+
+Once upgraded, the WebSocket transports raw LSP framing in both directions:
+
+- **client → server**: standard LSP envelopes (`Content-Length: N\r\n\r\n<JSON>`). Binary or text frame; we don't reframe.
+- **server → client**: raw bytes from the language server's stdout (binary). stderr is forwarded as `{"stream":"stderr","line":"..."}` text frames so dashboards can show errors. On exit, `{"exit": <code>}` and the WS closes.
+
+Most editor/LSP-client libraries (`vscode-jsonrpc`, `monaco-languageclient`, `tower-lsp`) speak this format natively — point them at the WS URL and they Just Work.
+
+## Supported languages
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/lsp/languages
+# {"languages":["python","py"]}
+```
+
+Currently shipped (v1, "honest scope"):
+
+| `lang`         | Server                                                      | Notes                                       |
+| -------------- | ----------------------------------------------------------- | ------------------------------------------- |
+| `python`, `py` | [`pylsp`](https://github.com/python-lsp/python-lsp-server)  | Pre-installed on every Python template.     |
+
+Planned but not yet shipped:
+
+- `ts` / `tsx` — `typescript-language-server`
+- `go` — `gopls`
+- `rust` — `rust-analyzer`
+
+The dispatch table is allowlisted server-side; you can't smuggle an arbitrary binary via the URL.
+
+## Monaco / browser example
+
+```ts
+import { MonacoLanguageClient, CloseAction, ErrorAction } from "monaco-languageclient";
+import { toSocket, WebSocketMessageReader, WebSocketMessageWriter } from "vscode-ws-jsonrpc";
+
+const ws = new WebSocket(
+  `wss://api.pandastack.ai/v1/sandboxes/${sandboxId}/lsp/python`,
+  ["lsp", `bearer.${token}`],
+);
+
+ws.onopen = () => {
+  const socket = toSocket(ws);
+  const reader = new WebSocketMessageReader(socket);
+  const writer = new WebSocketMessageWriter(socket);
+
+  const client = new MonacoLanguageClient({
+    name: "PandaStack Python",
+    clientOptions: {
+      documentSelector: ["python"],
+      errorHandler: { error: () => ErrorAction.Continue, closed: () => CloseAction.Restart },
+    },
+    connectionProvider: { get: () => Promise.resolve({ reader, writer }) },
+  });
+  client.start();
+};
+```
+
+Open a file in Monaco, set the language to `python`, point its model URI at the sandbox path (`file:///workspace/main.py`), and hover/completions light up from the real `pylsp`.
+
+## VS Code / native editor
+
+You can connect a native editor by tunneling the WS to a local Unix socket:
+
+```bash
+websocat \
+  --binary \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  unix-listen:/tmp/pds-pylsp.sock \
+  wss://api.pandastack.ai/v1/sandboxes/$SID/lsp/python
+```
+
+…then point your editor's "external language server" config at `/tmp/pds-pylsp.sock`. Most LSP clients (Neovim's `nvim-lspconfig`, Helix, Zed) accept a Unix socket as the transport.
+
+## Lifecycle and limits
+
+- **One language server per (sandbox, lang)**. Reconnecting reuses the running pylsp — your second tab gets the same workspace state.
+- **Idle teardown**: 10 minutes of no client traffic on either side kills the language server.
+- **Inbound frame cap**: 1 MiB per WS frame. LSP requests are KB-sized; this is a DoS guard.
+- **Hibernation**: a hibernated sandbox kills its language servers. They restart on next connect post-wake — the editor sees a brief reconnect.
+
+## Use cases
+
+**In-dashboard "VS Code in a browser"**. Monaco editor in your app, LSP proxy gives it real `pylsp`. Users get red-squigglies and `F12 → go to definition` against the actual code in the sandbox, not a watered-down web shim.
+
+**Agent introspection**. Before writing a refactor, an agent calls `textDocument/references` over the LSP socket to know every callsite it'll touch — same intel a human developer has.
+
+**Pair-programming with a remote engineer**. They open the sandbox in their local Neovim via the websocat tunnel; you watch via the [shared terminal](/docs/concepts/terminal). Both editors see the same diagnostics because they talk to the same pylsp.
+
+**Education / coding interview**. Candidate writes Python in your in-browser editor; pylsp gives them tab-complete and lint, just like their real environment.
+
+## Why it lives in the sandbox, not the API
+
+The language server needs to see the actual filesystem, virtualenv, installed packages, and project layout to answer questions correctly. Running it in the sandbox means:
+
+- Imports resolve against the real `pip install` graph.
+- Type stubs come from the real `mypy` cache.
+- Custom plugins (`pylsp-ruff`, `pylsp-rope`) work if you bake them into your template.
+
+We just shovel bytes across the boundary; the intelligence lives where the code lives.

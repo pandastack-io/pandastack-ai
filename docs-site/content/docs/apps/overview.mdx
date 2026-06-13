@@ -1,0 +1,262 @@
+---
+title: Apps (git-driven hosting)
+description: Connect a Git repo and PandaStack builds and serves it behind a stable URL — auto-detected frameworks, zero-downtime deploys, scale-to-zero, and push-to-deploy from GitHub.
+---
+
+**Apps** are PandaStack's Vercel/Render/Railway-style hosting: point it at a Git repository and PandaStack clones it, detects the framework, installs dependencies, builds, and serves the result behind a stable URL — all inside an isolated [Firecracker microVM](/docs/concepts/sandbox-lifecycle). Deploys are blue-green (zero downtime), idle apps scale to zero and wake on the next request, and a connected GitHub repo redeploys automatically on every push.
+
+<Callout type="info">
+An app runs in a **persistent** sandbox built from the universal [`base` template](/docs/concepts/templates) — Ubuntu 24.04 with [mise](https://mise.jdx.dev)-managed runtimes (Node 20, Python 3.12, Go, Bun pre-warmed). Your repo declares the exact versions it needs (`.nvmrc` / `.python-version` / `.tool-versions` / `mise.toml`) and the deploy pipeline installs them on demand.
+</Callout>
+
+## Create an app
+
+**REST**
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/apps \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-site",
+    "git_url": "https://github.com/me/my-site",
+    "git_branch": "main",
+    "port": 3000
+  }'
+```
+
+**Python**
+
+```python
+import pandastack
+
+client = pandastack.Client(api_key="pds_...")
+app = client.apps.create(
+    name="my-site",
+    git_url="https://github.com/me/my-site",
+    git_branch="main",
+)
+deploy = client.apps.deploy(app["id"])
+print(deploy["status"])  # "queued"
+```
+
+**TypeScript**
+
+```typescript
+import { Client } from "@pandastack/sdk";
+
+const client = new Client({ apiKey: "pds_..." });
+const app = await client.apps.create({
+  name: "my-site",
+  git_url: "https://github.com/me/my-site",
+});
+await client.apps.deploy(app.id);
+```
+
+**CLI**
+
+```bash
+pandastack app create \
+  --name my-site \
+  --git-url https://github.com/me/my-site
+pandastack app deploy <app-id>
+```
+
+Creating an app stores its configuration but does **not** build it — trigger the first build with a [deploy](#deploy). All create fields except `name` and `git_url` are optional:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `name` | — | **Required.** Unique app name within the workspace. |
+| `git_url` | — | **Required.** Repository to clone and build. |
+| `git_branch` | `main` | Branch to track and deploy. |
+| `framework` | auto-detect | Pin to `nextjs` / `vite` / `cra` / `node` / `python` / `static` / `generic`. Empty = auto-detect. |
+| `runtime` / `runtime_version` | auto | Force a mise runtime (e.g. `node` `20`); empty resolves from the repo's version files. |
+| `install_command` | framework default | Override the dependency-install step. |
+| `build_command` | framework default | Override the build step. |
+| `start_command` | framework default | Override the runtime start command (required for `python`/`generic`). |
+| `root_directory` | repo root | Sub-directory of the repo to build from (monorepos). |
+| `port` | `3000` | Port the app listens on inside the VM. |
+| `env` | `{}` | Environment variables injected at **both build and runtime**. |
+| `template` | `base` | microVM template for the runtime sandbox. |
+| `cpu` | `2` | vCPU for the runtime sandbox. |
+| `memory_mb` | `1024` | RAM for the runtime sandbox (see the [RAM note](#runtime-environment)). |
+| `auto_deploy` | `true` | Redeploy on a matching GitHub push (requires a [connected repo](#deploy-from-github)). |
+| `auto_hibernate` | `true` | Scale to zero after `idle_timeout_seconds` of no traffic. |
+| `idle_timeout_seconds` | `3600` | Idle window before hibernation (min 60). |
+
+## Framework detection
+
+If you don't pin a `framework`, PandaStack detects it from the repo, in this precedence:
+
+1. **Explicit pin** — the `framework` field on the app.
+2. **Repo manifest** — a `pandastack.json` at the repo root (see [below](#the-pandastackjson-manifest)).
+3. **Auto-detect** — from the files present:
+
+| Detected | Signal | Install | Build | Start (default) |
+| --- | --- | --- | --- | --- |
+| `nextjs` | `package.json` has `next` | `npm install` | `npm run build` | `next start -p $PORT -H 0.0.0.0` |
+| `vite` | `package.json` has `vite` | `npm install` | `npm run build` | `serve -s dist -l $PORT` |
+| `cra` | `package.json` has `react-scripts` | `npm install` | `npm run build` | `serve -s build -l $PORT` |
+| `node` | `package.json` (other) | `npm install` | — | `npm start` |
+| `static` | `index.html`, no `package.json` | — | — | `serve -s . -l $PORT` |
+| `python` | `requirements.txt` / `pyproject.toml` / `Pipfile` / `setup.py` | `pip install -r requirements.txt` | — | **you must set `start_command`** |
+| `generic` | none of the above | — | — | **you must set `start_command`** |
+
+A user override always wins over the manifest, which wins over the framework default. For Python and generic apps, set `start_command` yourself (e.g. `uvicorn app:app --host 0.0.0.0 --port $PORT`) — `$PORT` and `$HOST` are exported into the launch shell.
+
+### The `pandastack.json` manifest
+
+Commit a `pandastack.json` at the repo root to declare build config in the repo instead of on the app:
+
+```json
+{
+  "type": "vite",
+  "outputDir": "dist",
+  "installCommand": "pnpm install",
+  "buildCommand": "pnpm build",
+  "startCommand": "node server.js"
+}
+```
+
+## Deploy
+
+A deploy provisions a fresh sandbox, builds the repo in it, health-checks the app, then atomically flips traffic to the new sandbox (blue-green) and tears down the old one.
+
+```bash
+# Deploy the tracked branch's latest commit
+curl -X POST https://api.pandastack.ai/v1/apps/<id>/deploys \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN"
+
+# Or pin a specific ref (commit SHA, branch, or tag)
+curl -X POST https://api.pandastack.ai/v1/apps/<id>/deploys \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"git_ref": "abc1234"}'
+```
+
+The pipeline runs (12-minute budget):
+
+1. Provision a fresh **blue** sandbox on the app's template.
+2. Shallow `git clone` the ref (private repos use a [GitHub installation token](#deploy-from-github), never persisted).
+3. Detect the framework and read `pandastack.json`.
+4. Set up runtimes with mise (`mise install` honours `.nvmrc` / `.python-version` / `.tool-versions` / `mise.toml`).
+5. Run install → build, with `mise reshim` so newly-installed CLIs (uvicorn, gunicorn, …) are on `PATH`.
+6. Start the app detached, then HTTP health-check its port (up to ~60s).
+7. **Blue-green flip:** point the app at the new sandbox, mark the previous deployment `superseded`, and tear the old sandbox down.
+
+A deployment moves through `queued` → `building` → `deploying` → `live`, or `failed` if any step errors. A successful flip marks the prior deployment `superseded`; a [rollback](#rollback) marks one `rolled_back`.
+
+### Watch a deploy's logs
+
+`GET /v1/apps/{id}/deploys/{deployID}/logs` streams the build log (SSE):
+
+```python
+for line in client.apps.deploy_logs(app_id, deployment_id):
+    print(line)
+```
+
+List or fetch deployments with `client.apps.deployments(app_id)` and `client.apps.deployment(app_id, deployment_id)` (the single-deployment record includes its full build log).
+
+## Connect
+
+Once an app is `running`, `GET /v1/apps/{id}` returns a computed **`url`**:
+
+- When PandaStack is configured with an app host suffix (production), the app gets a stable host: **`https://<app-id>.<suffix>/`**. The app UUID is the bearer credential, and the URL survives every deploy.
+- Otherwise it falls back to the authenticated path proxy: **`/v1/apps/{id}/proxy/`**.
+
+Either form is durable across blue-green deploys — it always forwards to the app's current sandbox.
+
+## Runtime logs
+
+App stdout/stderr is captured in the guest to `/var/log/pandastack-app.log` and served by `GET /v1/apps/{id}/runtime-logs` (add `?follow=1` for a live SSE tail):
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/apps/<id>/runtime-logs?follow=1"
+```
+
+<Callout type="info">
+This is **not** the same as `GET /v1/sandboxes/{id}/logs`, which serves the host-side Firecracker console log. Use `runtime-logs` for your application's output.
+</Callout>
+
+## Scale to zero (auto-hibernate)
+
+With `auto_hibernate` (the default), an app that receives no traffic for `idle_timeout_seconds` (default 1 hour) is **hibernated** — its sandbox is snapshotted and stopped, freeing CPU/RAM. The next request to its URL transparently **wakes** it (typically sub-second) and the request proceeds; concurrent requests during a wake are coalesced so only one wake happens. The app's `/workspace` state and the deployed build are preserved across the cycle.
+
+Set `auto_hibernate: false` to keep an app always-on, or tune `idle_timeout_seconds` (minimum 60).
+
+## Health monitoring
+
+A background monitor reconciles every running app on a 30-second loop. If an app's port stops responding for **2 consecutive checks**, the monitor restarts the app process in place. After **5 restarts** in the app's lifetime without recovery, it parks the app in `error` (so a crash-looping app doesn't restart forever). If the underlying sandbox is lost entirely, the app is moved to `error`.
+
+## Deploy from GitHub
+
+Connecting a GitHub repository unlocks private-repo cloning and **push-to-deploy**.
+
+1. **Connect** — `GET /v1/github/connect` returns the GitHub App install URL. Install it on the repos you want; the callback records the installation against your workspace.
+2. **List repos** — `GET /v1/github/repos?installation_id=<id>` lists the repositories that installation can access.
+3. **Create the app** with the GitHub fields so pushes can match it:
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/apps \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-site",
+    "git_url": "https://github.com/me/my-site",
+    "git_branch": "main",
+    "github_installation_id": 12345678,
+    "github_repo_full_name": "me/my-site",
+    "auto_deploy": true
+  }'
+```
+
+Now an HMAC-verified push webhook to the tracked branch triggers a deploy **pinned to the exact pushed commit**, for every app with `auto_deploy: true` whose repo and branch match. Private repos are cloned with an on-demand installation token that is never written to logs or persisted.
+
+Manage connections with `GET /v1/github/installations` and `DELETE /v1/github/installations/{id}`.
+
+## Rollback
+
+`POST /v1/apps/{id}/rollback` re-deploys the most recent `superseded` deployment (or a specific one via `{"deployment_id": "..."}`) — a byte-identical rebuild on a fresh sandbox, pinned to that deployment's commit, with the same blue-green flip.
+
+```python
+client.apps.rollback(app_id)
+```
+
+## Update and delete
+
+```python
+# Partial update — only provided fields change; a new deploy applies them.
+client.apps.update(app_id, build_command="pnpm build", env={"NODE_ENV": "production"})
+
+# Delete the app AND tear down its runtime sandbox.
+client.apps.delete(app_id)
+```
+
+Configuration changes (`update`/`PATCH`) take effect on the **next deploy** — they don't rebuild the running app automatically.
+
+## Runtime environment
+
+A few details worth knowing when your build or start command misbehaves:
+
+- **`env` applies at build and runtime.** Variables you set are exported before the install/build steps and before the app starts. `PORT` and `HOST` (`0.0.0.0`) are injected automatically.
+- **Baked-RAM constraint.** Firecracker can't change a snapshot's memory at restore, so an app's actual RAM is governed by the **`base` template's baked size**, not the per-app `memory_mb`. For a larger footprint, [build a custom template](/docs/concepts/templates) at the size you need and set `template`.
+- **mise layout.** Runtimes live under `/opt/mise` with shims on `PATH`. Build steps run as non-login shells, so the pipeline exports `MISE_DATA_DIR` / `MISE_CONFIG_DIR` / `PATH` explicitly — and runs `mise reshim` after install so console scripts installed by pip/npm (uvicorn, gunicorn, …) are found.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Runtime base | `base` template — Ubuntu 24.04 + mise (Node 20, Python 3.12, Go, Bun) |
+| Default size | 2 vCPU · 1 GiB RAM (`cpu` / `memory_mb` on create) |
+| Deploy budget | 12 minutes per deploy |
+| Deploy model | Blue-green (zero downtime); previous deployment kept for one-click rollback |
+| Idle behavior | Scale-to-zero after `idle_timeout_seconds` (default 1h), sub-second wake |
+| Auto-deploy | GitHub push → deploy pinned to the pushed commit |
+
+## Coming soon
+
+- **Custom domains** — bring your own domain with managed TLS (SNI routing). Today apps are served on the stable `<app-id>.<suffix>` URL.
+- **Build-log streaming in the dashboard** — the SSE endpoint exists; richer in-dashboard streaming is in progress.
+
+Want one of these sooner? Tell us in [GitHub Discussions](https://github.com/pandastack/pandastack/discussions).

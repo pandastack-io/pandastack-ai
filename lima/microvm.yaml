@@ -1,0 +1,112 @@
+# Lima VM template for pandastack.
+# Hosts the orchestrator agent and runs Firecracker microVMs via nested KVM.
+#
+# Boot with:
+#   limactl start --name=pandastack ./lima/microvm.yaml
+
+vmType: vz                # Apple Virtualization.framework
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 60GiB
+
+nestedVirtualization: true   # exposes /dev/kvm inside the guest
+
+rosetta:
+  enabled: false
+  binfmt: false
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+mounts:
+  - location: "~"
+    writable: false
+  - location: "/tmp/pandastack"
+    writable: true
+
+# Forward the agent's Unix socket out to the Mac host so the control-plane API can reach it.
+portForwards:
+  - guestSocket: "/run/pandastack/agent.sock"
+    hostSocket: "{{.Dir}}/sock/agent.sock"
+
+provision:
+  - mode: system
+    description: "Install Firecracker, KVM tooling, and dependencies"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+
+      apt-get update
+      apt-get install -y \
+        ca-certificates curl wget jq squashfs-tools \
+        iproute2 iptables uuid-runtime e2fsprogs \
+        sqlite3 ssh-import-id
+
+      # KVM access
+      groupadd -f kvm
+      usermod -aG kvm ubuntu || true
+      cat > /etc/udev/rules.d/99-kvm.rules <<EOF
+      KERNEL=="kvm", GROUP="kvm", MODE="0660"
+      EOF
+      udevadm control --reload-rules || true
+
+      # Install Firecracker
+      FC_VERSION="v1.16.0"
+      ARCH="aarch64"
+      if ! command -v firecracker >/dev/null; then
+        cd /tmp
+        wget -q "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${ARCH}.tgz"
+        tar -xzf "firecracker-${FC_VERSION}-${ARCH}.tgz"
+        install -m 0755 "release-${FC_VERSION}-${ARCH}/firecracker-${FC_VERSION}-${ARCH}" /usr/local/bin/firecracker
+        install -m 0755 "release-${FC_VERSION}-${ARCH}/jailer-${FC_VERSION}-${ARCH}"     /usr/local/bin/jailer
+        rm -rf "firecracker-${FC_VERSION}-${ARCH}.tgz" "release-${FC_VERSION}-${ARCH}"
+      fi
+
+      # Directories
+      install -d -m 0755 /var/lib/pandastack/{kernels,templates,vms,snapshots}
+      install -d -m 0755 /run/pandastack
+      install -d -m 0750 /etc/pandastack
+
+      # Enable IP forwarding (needed for sandbox NAT)
+      sysctl -w net.ipv4.ip_forward=1
+      echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-pandastack.conf
+
+  - mode: user
+    description: "Download default kernel + rootfs template"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      cd /var/lib/pandastack/kernels
+      ARCH="aarch64"
+      if ! ls vmlinux-5.10* 2>/dev/null; then
+        key=$(curl -s "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.13/${ARCH}/vmlinux-5.10&list-type=2" \
+              | grep -oP "(?<=<Key>)(firecracker-ci/v1.13/${ARCH}/vmlinux-5\.10\.[0-9]+)(?=</Key>)" | sort -V | tail -1)
+        sudo wget -q "https://s3.amazonaws.com/spec.ccfc.min/${key}" -O "$(basename "$key")"
+      fi
+
+      cd /var/lib/pandastack/templates
+      if [ ! -d ubuntu-24.04 ]; then
+        sudo mkdir -p ubuntu-24.04 && cd ubuntu-24.04
+        key=$(curl -s "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.13/${ARCH}/ubuntu-&list-type=2" \
+              | grep -oP "(?<=<Key>)(firecracker-ci/v1.13/${ARCH}/ubuntu-[0-9]+\.[0-9]+\.squashfs)(?=</Key>)" | sort -V | tail -1)
+        sudo wget -q "https://s3.amazonaws.com/spec.ccfc.min/${key}" -O ubuntu.squashfs
+        sudo unsquashfs -d squashfs-root ubuntu.squashfs
+        sudo truncate -s 1G rootfs.ext4
+        sudo mkfs.ext4 -d squashfs-root -F rootfs.ext4 >/dev/null
+        sudo rm -rf squashfs-root ubuntu.squashfs
+        echo '{"name":"ubuntu-24.04","kernel":"vmlinux-5.10","arch":"aarch64"}' | sudo tee meta.json >/dev/null
+      fi
+
+probes:
+  - description: "firecracker binary present"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      command -v firecracker
+  - description: "kvm device exists"
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      [ -e /dev/kvm ]

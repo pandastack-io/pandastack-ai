@@ -1,0 +1,111 @@
+---
+title: Preview URLs
+description: Expose a port from a sandbox to the public internet — signed, time-boxed, or wide-open.
+---
+
+A preview URL is a public hostname that proxies HTTP(S) into a port inside your sandbox. It's how you let a teammate poke at a `next dev` server, share a Streamlit app with a stakeholder, or hand a webhook URL to a third-party service — without exposing your API token.
+
+PandaStack offers two flavors:
+
+|                    | Public preview URL                              | Signed preview URL                         |
+| ------------------ | ----------------------------------------------- | ------------------------------------------ |
+| **How it's auth'd** | The sandbox UUID is the credential.            | Time-limited HMAC token in the path.       |
+| **Who can reach it** | Anyone with the URL.                           | Anyone with the URL, until it expires.     |
+| **Expiry**          | Until the sandbox is killed.                    | TTL you choose (default 1 hour).           |
+| **Hostname shape**  | `https://{port}-{sandboxId}.pandastack.ai`     | `https://{token}.preview.pandastack.ai`    |
+| **Use it for**      | Dev servers, demos, webhooks, multi-port apps. | Time-boxed share links, customer reviews.  |
+
+Both share the same TLS-terminating edge — your sandbox doesn't need a public IP.
+
+## Public preview URLs
+
+If your template runs a server on a port, that port is reachable instantly. Apps deployed on the `base` runtime start their dev/start command via the `pandastack-autostart` systemd unit, so the URL works the moment the sandbox is `running`.
+
+```ts
+const sandbox = await Sandbox.create({ template: "base" });
+console.log(sandbox.previewUrl(3000));
+// → https://3000-1a2b3c4d.pandastack.ai
+```
+
+```python
+sandbox = Sandbox.create(template="base")
+print(sandbox.preview_url(3000))
+# → https://3000-1a2b3c4d.pandastack.ai
+```
+
+`previewUrl(port)` is a pure string-formatter — no API call. The hostname is derived from your client's `apiUrl`:
+
+| `apiUrl`                     | Preview suffix       |
+| ---------------------------- | -------------------- |
+| `https://api.pandastack.ai`  | `pandastack.ai`      |
+| `https://api.acme.dev`       | `acme.dev`           |
+| (self-hosted)                | Set `client.previewHost = "preview.example.com"` |
+
+### Listing all exposed ports
+
+```ts
+const urls = await sandbox.previewUrls();
+// { 3000: "https://3000-…", 9229: "https://9229-…" }
+```
+
+```python
+urls = sandbox.preview_urls()
+# {3000: "https://3000-…", 9229: "https://9229-…"}
+```
+
+The SDK calls `GET /v1/sandboxes/{id}/ports` — the in-guest agent reports every listening TCP socket it sees.
+
+## Signed preview URLs
+
+For when "anyone with the link" is too loose — share-with-a-customer, embed-in-an-email, expire-after-the-demo.
+
+```ts
+const link = await sandbox.signedPreviewUrl(3000, 3600); // 1h
+// link.url    → https://eyJhbGciOi….preview.pandastack.ai
+// link.token  → eyJhbGciOi…
+// link.expires_at → 2026-06-01T16:30:00Z
+```
+
+```python
+link = sandbox.signed_preview_url(3000, ttl_seconds=3600)
+# {"url": "...", "token": "...", "expires_at": "..."}
+```
+
+After expiry the edge returns `403 Forbidden`. There is no separate "revoke" call — issue a fresh token with a shorter TTL if you need to cut access early, then let the old one age out.
+
+## Concurrency and rate limits
+
+- A sandbox can expose **up to 32 distinct ports** simultaneously. Beyond that, the agent stops registering new ports until older ones close.
+- Each preview hostname carries the same per-token rate limit as the rest of the API (1 req/s burst 10 by default). Override per-org via the cloud dashboard.
+- WebSockets are supported transparently — useful for `next dev` HMR, Jupyter, and Streamlit.
+
+## REST equivalents
+
+```http
+POST /v1/sandboxes/{id}/preview-token
+Content-Type: application/json
+
+{ "port": 3000, "ttl_seconds": 3600 }
+```
+
+Returns:
+
+```json
+{
+  "url":       "https://….preview.pandastack.ai",
+  "token":     "…",
+  "sandbox_id":"1a2b3c4d",
+  "port":      3000,
+  "expires_at":"2026-06-01T16:30:00Z"
+}
+```
+
+```http
+GET /v1/sandboxes/{id}/ports
+```
+
+Returns `{"ports": [{"port": 3000}, {"port": 9229}]}` or the bare array form.
+
+## How it works (one paragraph)
+
+The TLS edge runs as a small Go service in front of every host. When a request arrives at `https://3000-{id}.pandastack.ai`, the edge extracts `id`, looks up the host that owns that sandbox in the shared state store, and proxies the TCP connection over the host's tap interface to the guest's NAT IP. The signed flavor decodes the token, validates the HMAC against the per-workspace signing key, checks expiry, and only then does the same proxy hop. No request ever touches a sandbox that doesn't match the hostname.

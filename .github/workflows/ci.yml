@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test-go:
+    name: Go vet/test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            module: api
+          - os: ubuntu-latest
+            module: agent
+          - os: macos-latest
+            module: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: Vet and test Go module
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ matrix.module }}"
+          go vet ./...
+          go test ./...
+
+  lint-and-test-node:
+    name: Node build/test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [dashboard, docs-site]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+      - name: Install, build, and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "${{ matrix.project }}/package.json" ]; then
+            echo "${{ matrix.project }} not present; skipping"
+            exit 0
+          fi
+          cd "${{ matrix.project }}"
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build --if-present
+          npm test --if-present

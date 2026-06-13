@@ -1,0 +1,134 @@
+---
+title: Networking
+description: Per-sandbox Linux netns, veth /30 pairs from a /16 pool, baked guest identity, and the DNAT/SNAT rules behind preview URLs.
+---
+
+Every sandbox lives in its own Linux network namespace, with its own MAC and its own private IP. The host doesn't share an IP space with the guest, the guests don't share an IP space with each other, and yet every guest can reach the internet and be reached on whatever ports it exposes. This page is how.
+
+## The per-sandbox netns
+
+For sandbox `s7abc…`:
+
+```
+netns:        ns-s7abc
+veth host:    vh-s7abc   (in root netns)
+veth guest:   vg-s7abc   (in ns-s7abc)
+tap0:         (in ns-s7abc, owned by Firecracker)
+```
+
+Inside the netns lives one tap device (`tap0`) that Firecracker plumbs into the VM's `eth0`. The veth pair shuttles packets between the netns and the root namespace where they meet the outside world via SNAT.
+
+## /30 per veth from a /16 pool
+
+The host owns `10.200.0.0/16`. We carve it into /30s (4 IPs each: net / host / peer / broadcast):
+
+```
+10.200.0.0/30  → vh-…/vg-…  (sandbox 0)
+10.200.0.4/30  → vh-…/vg-…  (sandbox 1)
+10.200.0.8/30  → vh-…/vg-…  (sandbox 2)
+…
+10.200.255.252/30           (sandbox 16383)
+```
+
+That's **16,384 sandboxes per agent** before address exhaustion. With `n2-standard-4` agents capping at 20–40 *running* slots and 64 NATID slots reserved (most idle), exhaustion is not a real concern at production scale; we still alarm at 80 %.
+
+## Baked guest identity
+
+Per [snapshot & restore](/docs/internals/snapshot-restore), the guest's notion of "my IP, my MAC, my gateway" is **frozen at template-bake time** and recorded in `meta.json`:
+
+```json
+{
+  "baked_tap_host_ip": "172.20.6.1",
+  "baked_guest_ip":    "172.20.6.118",
+  "baked_mac":         "06:00:AC:14:06:76"
+}
+```
+
+(Notice: the guest IP is in `172.20.0.0/12`, not in the host's `10.200.0.0/16`. Two different planes — the inside-VM network and the outside-VM bridging network.)
+
+On restore, the agent:
+
+1. Sets `tap0`'s MAC to the baked MAC.
+2. Configures `tap0` with the baked tap-host IP.
+3. Adds a route on the host side for the baked guest IP, pointing through `tap0`.
+
+The guest's kernel sees the same MAC, same IP, same gateway as when it was snapshotted — ARP succeeds, packets flow, no kernel reconfiguration needed.
+
+## DNAT for preview URLs
+
+When a user exposes a port via `POST /sandboxes/{id}/ports`, we add an iptables DNAT rule **inside the sandbox's netns**:
+
+```
+iptables -t nat -A PREROUTING -d <baked_guest_ip> -p tcp --dport <port> \
+  -j DNAT --to <guest_ip>:<port>
+```
+
+…where `<guest_ip>` is the VM's actual IP. Result: traffic for `8080-<sandbox>.pandastack.ai`, after the edge has rewritten the URL to `/v1/sandboxes/{id}/proxy/{port}/…`, arrives at the host, gets routed into the netns, hits the DNAT and lands on the VM at the right port.
+
+See [preview URLs](/docs/concepts/preview-urls) for the user-facing side.
+
+## SNAT for egress
+
+The guest's outbound packets exit `tap0`, cross the veth into the root netns, and hit the SNAT rule:
+
+```
+iptables -t nat -A POSTROUTING -o <wan-iface> \
+  -j MASQUERADE
+```
+
+Standard NAT — guest gets internet, host doesn't expose internal IPs.
+
+DNS resolution inside the guest goes to `/etc/resolv.conf`, which the template bakes with `1.1.1.1` and `8.8.8.8`. We don't run an in-host resolver.
+
+## NATID pool — the speed trick
+
+Doing all the above (`ip netns add`, `ip link add veth`, set MAC, set IP, add tap, add iptables rules) takes ~100 ms cold. That's a huge chunk of the boot budget.
+
+The trick: do it ahead of time. The agent boots, pre-allocates 24 NATID "slots" — each slot is a (ns-X, vh-X, vg-X, tap0, /30) tuple already configured. On sandbox create, we just need to:
+
+1. Pop a slot (O(1)).
+2. Patch the tap's MAC to match the snapshot's baked identity (~2 ms).
+3. Hand the slot to Firecracker.
+
+That's why netns+tap show up as **~9 ms** in the [snapshot & restore](/docs/internals/snapshot-restore) timeline instead of 100 ms.
+
+On `Delete`, the slot's MAC/IP are reset to default and it goes back in the pool. NATID slots are reusable across sandboxes and across templates (the tap is generic — only the MAC needs to match the snapshot at use-time).
+
+## Preview-URL host routing
+
+The edge VMs (Cloud LB → CF → edge) run a `previewHostRouter` middleware in front of the auth chain:
+
+```
+Host: 8080-6be92de4-….pandastack.ai
+       ↓ regex ^([0-9]{1,5})-([A-Za-z0-9][A-Za-z0-9-]{0,62})$
+URL rewritten to: /v1/sandboxes/6be92de4-…/proxy/8080/<original-path>
+Auth header replaced with: X-Damroo-User-Id=_preview-host, X-Fcs-Workspace=admin
+```
+
+The synthetic auth bypasses tenant scope (the agent's `workspaceScope` middleware sees `admin` and lets the proxy path through), and the *only* paths this middleware ever produces are `/v1/sandboxes/{id}/proxy/{port}/…` — so the "admin" bypass is tightly bounded.
+
+This is what makes `https://3000-abc.pandastack.ai/` work zero-config without a per-port custom domain or signed-URL token.
+
+## Why one netns per sandbox
+
+We could share a netns across sandboxes and partition by IP. We don't, because:
+
+- **iptables rules grow O(sandboxes).** In a shared netns, every port-exposure rule is in the global iptables table, and rule lookup is O(n). With per-sandbox netns, each netns has ≤2 NAT rules, lookup is O(1).
+- **Network policy is free.** Want to forbid two sandboxes from seeing each other? Default already done — they're in different netnses with no route between them.
+- **Cleanup is atomic.** `ip netns delete ns-X` removes the netns *and* every interface in it. No leaked tap, no leaked rule.
+
+The cost is "one netns per sandbox" — but Linux netnses are cheap (a few KB each), and we share the rest of the kernel.
+
+## Files
+
+- `agent/internal/netns/netns.go` — netns + veth lifecycle.
+- `agent/internal/network/natid.go` — pre-allocated slot pool.
+- `agent/internal/api/ports.go` — `POST /ports` handler, adds the DNAT rule.
+- `api/cmd/api/preview_host.go` — the edge `previewHostRouter` middleware (5 unit tests in `preview_host_test.go`).
+
+## Limits & notes
+
+- **One IP per sandbox.** Multi-IP-per-VM is not implemented; if you need it, expose a second port via DNAT.
+- **IPv6.** Currently disabled in the guest (kernel `ipv6.disable=1` boot param) for simplicity. On the roadmap.
+- **MTU.** 1450 inside the VM to leave room for the veth + any tunnels in the host's path. Override per-template if you have hosts with jumbo frames.
+- **Outbound rate-limit.** No traffic shaping by default. Easy to add per-netns via `tc` if you need per-sandbox bandwidth caps.

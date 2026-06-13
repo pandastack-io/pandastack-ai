@@ -1,0 +1,33 @@
+#!/bin/bash
+# cloud-init for the pandastack ClickHouse node (AWS). Runs the official
+# ClickHouse container and applies the pandastack schema fetched from S3.
+set -euo pipefail
+exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+
+REGION="${region}"
+CH_PASSWORD="${clickhouse_password}"
+SCHEMA_S3_URL="${schema_s3_url}"
+
+apt-get update -y
+apt-get install -y awscli docker.io ca-certificates
+systemctl enable --now docker
+
+mkdir -p /var/lib/clickhouse
+docker run -d --name clickhouse --restart unless-stopped \
+  -p 8123:8123 -p 9000:9000 \
+  -e CLICKHOUSE_USER=default \
+  -e CLICKHOUSE_PASSWORD="$CH_PASSWORD" \
+  -e CLICKHOUSE_DB=pandastack \
+  -v /var/lib/clickhouse:/var/lib/clickhouse \
+  clickhouse/clickhouse-server:latest
+
+# Wait for CH to accept connections, then apply the schema from S3.
+for _ in $(seq 1 60); do
+  if curl -fsS "http://default:$CH_PASSWORD@127.0.0.1:8123/ping" >/dev/null 2>&1; then break; fi
+  sleep 2
+done
+aws --region "$REGION" s3 cp "$SCHEMA_S3_URL" /tmp/schema.sql
+curl -fsS "http://default:$CH_PASSWORD@127.0.0.1:8123/?database=pandastack" \
+  --data-binary @/tmp/schema.sql || \
+  echo "schema apply failed — check /tmp/schema.sql and CH logs."

@@ -1,0 +1,111 @@
+---
+title: Logs
+description: Stream a sandbox's console output — tail the last N lines or follow live with SSE.
+---
+
+Every sandbox has a single combined console log (the Firecracker serial port + the in-guest agent's stdout/stderr). It's append-only, persists for the sandbox's lifetime, and is exposed two ways: snapshot or follow.
+
+## Snapshot — read what's been logged so far
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/logs?tail=200"
+```
+
+Plain `text/plain` body, newline-delimited. `?tail=N` returns the last N lines (default: full log). Omit `follow` and the response closes as soon as the file has been read — useful for `kubectl logs`-style polling.
+
+```python
+import requests
+log = requests.get(
+    f"https://api.pandastack.ai/v1/sandboxes/{sid}/logs",
+    headers={"Authorization": f"Bearer {tok}"},
+    params={"tail": 200},
+).text
+print(log)
+```
+
+## Follow — server-sent events
+
+```bash
+curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/logs?follow=1"
+```
+
+Returns `text/event-stream`; each frame is one log line.
+
+```
+event: log
+data: 2026-06-01T15:30:18Z [agent] sandbox.running tap=tap0 guest_ip=172.20.6.118
+
+event: log
+data: 2026-06-01T15:30:18Z [agent] sshd accepted from 10.200.4.2
+```
+
+SDK equivalents:
+
+```python
+for line in sandbox.logs(stream="both", follow=True):
+    print(line)
+    if "Ready" in line:
+        break
+```
+
+```ts
+for await (const line of sandbox.logs({ stream: "both", follow: true })) {
+  console.log(line);
+  if (line.includes("Ready")) break;
+}
+```
+
+Both SDKs hide the SSE framing; you get one string per `data:` line.
+
+## What's in the log
+
+| Source              | Format                                                          |
+| ------------------- | --------------------------------------------------------------- |
+| Firecracker         | Serial console — kernel boot, oops, panics.                     |
+| In-guest `pandastack-agent` | Lifecycle + health probe messages.                       |
+| `pandastack-autostart` (apps on `base`) | App dev/start command stdout (`next dev`, `vite`, etc.). |
+| Your processes      | Anything written to `journalctl` or `/var/log/pandastack/*.log`. |
+
+The log file lives on the host at `<data-dir>/vms/<sandbox-id>/console.log`. The agent rotates it at 32 MiB to a `.1`, `.2` chain (3 generations kept).
+
+## Logs vs exec output
+
+`exec` returns the stdout/stderr of one command synchronously. `logs` is the **everything** stream — boot messages, every process's writes to the system log, everything `journalctl` would show. Use:
+
+- `exec` when you want the output of a specific command and an exit code.
+- `logs` (snapshot) when you want to know "what did this sandbox do since boot".
+- `logs` (follow) when you want to react to startup messages in real time (e.g., wait for "Ready on :3000" before opening a [preview URL](/docs/concepts/preview-urls)).
+
+## Streaming exec output in real time
+
+For per-command live output (vs. the entire sandbox console), use the dedicated streaming exec endpoints:
+
+```http
+POST /v1/sandboxes/{id}/exec/stream
+GET  /v1/sandboxes/{id}/exec/ws    (WebSocket)
+```
+
+These yield stdout/stderr frames as the command runs, with structured JSON envelopes (`{"stream":"stdout","line":"…"}`). The SDKs don't wrap these yet — use them directly when latency-to-first-byte matters.
+
+## Use cases
+
+**Boot-readiness gate.** Wait for `sshd | listening on 0.0.0.0:22` (always emitted) before calling `exec`. Avoids the first-call sshd retry path.
+
+**Crash forensics.** Sandbox went `failed`? Pull `?tail=500` and look for kernel oops, OOM-killer messages, or your app's last traceback.
+
+**Live dashboards.** Stream logs over SSE into your UI. The dashboard's "Logs" tab is exactly this.
+
+**Long-running batch monitoring.** Kick off a 30-minute training job via `exec` (with a generous timeout), then stream logs in parallel to show progress.
+
+## Retention
+
+- Hot, in-memory: the last 64 KiB are always available, even after sandbox kill (briefly, for forensics).
+- On-disk: up to ~100 MiB (3 × 32 MiB rotation) for the sandbox's lifetime.
+- After sandbox is deleted: gone. Mirror to ClickHouse via the events stream if you need long-term retention; see [Observability](/docs/concepts/observability).
+
+## Limits
+
+- Single subscriber per follow stream is best — multiple subscribers all read the same file but each maintains its own offset; many concurrent followers can saturate the disk.
+- Lines longer than 16 KiB are split. Log records of ~1 KiB are the sweet spot.

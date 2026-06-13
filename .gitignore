@@ -1,0 +1,82 @@
+# build artefacts
+bin/
+dist/
+node_modules/
+*.log
+
+# go
+agent/vendor/
+api/vendor/
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+
+# local data
+*.db
+*.sqlite
+
+# Local environment files (never commit secrets)
+# Catch all .env variants; whitelist the safe examples below.
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.sample
+!.env.template
+!*.env.example
+!*.env.sample
+!*.env.template
+!.env.local.example
+!**/.env.example
+
+# Python virtualenvs (third-party stdlib pulls trigger secret scanners)
+.venv/
+venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Terraform state + plans + vars (NEVER commit — contain real credentials/JWTs)
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+*.tfplan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.tftpl
+.terraform/
+.terraform.lock.hcl.bak
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Next.js / dashboard build output
+.next/
+out/
+.vercel/
+.open-next/
+docs-site/out/
+dashboard/.wrangler/*
+.npmrc
+
+# fumadocs-mdx generated source (regenerated on next dev/build)
+docs-site/.source/
+# Lima / Firecracker local artifacts
+*.qcow2
+*.img
+*.snap
+
+# Copilot session planning file
+plan.md
+
+# Local runtime state (tokens, session data)
+.local-state/
+templates/postgres-16/query-broker/query-broker
+db-proxy/db-proxy

@@ -1,0 +1,56 @@
+#!/bin/bash
+# cloud-init for pandastack-edge nodes (AWS multi-node mode).
+# Runs the public web surface: pandastack-api + dashboard. Does NOT run
+# Firecracker. Talks to agents over the private VPC on :7070 with X-Node-Token.
+#
+# Identity + secrets are fetched from AWS Secrets Manager (names are prefixed
+# "${secret_prefix}-"). The IAM instance profile (see main.tf) grants read.
+set -euo pipefail
+exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+
+REGION="${region}"
+SECRET_PREFIX="${secret_prefix}"
+EDGE_BINARY_URL="${edge_binary_url}"
+DASHBOARD_BUCKET="${dashboard_bucket}"
+ZONE_NAME="${cloudflare_zone_name}"
+
+apt-get update -y
+apt-get install -y awscli jq curl ca-certificates
+
+secret() { aws --region "$REGION" secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
+
+NODE_TOKEN="$(secret "$${SECRET_PREFIX}-node-token")"
+DATABASE_URL="$(secret "$${SECRET_PREFIX}-database-url")"
+CLICKHOUSE_URL="$(secret "$${SECRET_PREFIX}-clickhouse-url" || echo '')"
+SUPABASE_JSON="$(secret "$${SECRET_PREFIX}-supabase" || echo '{}')"
+GITHUB_JSON="$(secret "$${SECRET_PREFIX}-github-env" || echo '{}')"
+
+mkdir -p /etc/pandastack
+{
+  echo "PANDASTACK_ENV=prod"
+  echo "PANDASTACK_API_LISTEN=:8080"
+  echo "PANDASTACK_NODE_TOKEN=$${NODE_TOKEN}"
+  echo "PANDASTACK_DB_DSN=$${DATABASE_URL}"
+  echo "PANDASTACK_CLICKHOUSE_URL=$${CLICKHOUSE_URL}"
+  echo "PANDASTACK_AUTH_MODE=jwt"
+  echo "PANDASTACK_PREVIEW_HOST_SUFFIX=$${ZONE_NAME}"
+  echo "PANDASTACK_DASHBOARD_BUCKET=$${DASHBOARD_BUCKET}"
+  echo "SUPABASE_URL=$(echo "$SUPABASE_JSON" | jq -r '.supabase_url // ""')"
+  echo "SUPABASE_JWKS_URL=$(echo "$SUPABASE_JSON" | jq -r '.supabase_jwks_url // ""')"
+  echo "SUPABASE_ANON_KEY=$(echo "$SUPABASE_JSON" | jq -r '.supabase_anon_key // ""')"
+  echo "$GITHUB_JSON" | jq -r 'to_entries[] | "\(.key)=\(.value)"'
+} > /etc/pandastack/edge.env
+chmod 600 /etc/pandastack/edge.env
+
+# TODO: fetch + install the edge release bundle and start the service.
+# When EDGE_BINARY_URL is set, download pandastack-api (+ dashboard assets) and
+# run it under systemd with EnvironmentFile=/etc/pandastack/edge.env. If the AMI
+# is pre-baked with the binary + unit, this block is a no-op.
+if [ -n "$EDGE_BINARY_URL" ]; then
+  curl -fsSL "$EDGE_BINARY_URL" -o /tmp/edge-bundle.tgz
+  tar -xzf /tmp/edge-bundle.tgz -C /usr/local/bin/ || true
+fi
+systemctl daemon-reload || true
+systemctl enable --now pandastack-api 2>/dev/null || \
+  echo "pandastack-api unit not present — bake it into the AMI or extend this script."

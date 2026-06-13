@@ -1,0 +1,63 @@
+- name: bug
+  color: d73a4a
+  description: Something is not working
+- name: feature
+  color: a2eeef
+  description: New capability or enhancement
+- name: docs
+  color: 0075ca
+  description: Documentation change
+- name: good-first-issue
+  color: 7057ff
+  description: Good for first-time contributors
+- name: help-wanted
+  color: 008672
+  description: Community help is welcome
+- name: breaking
+  color: b60205
+  description: Breaking API or behavior change
+- name: area/agent
+  color: cfd3d7
+  description: Agent and Firecracker runtime
+- name: area/api
+  color: cfd3d7
+  description: API and control plane
+- name: area/dashboard
+  color: cfd3d7
+  description: Dashboard frontend
+- name: area/sdks
+  color: cfd3d7
+  description: SDKs and client libraries
+- name: area/docs-site
+  color: cfd3d7
+  description: Documentation site
+- name: area/examples
+  color: cfd3d7
+  description: Examples and templates
+- name: area/terraform
+  color: cfd3d7
+  description: Terraform examples
+- name: priority/0
+  color: b60205
+  description: Critical priority
+- name: priority/1
+  color: d93f0b
+  description: High priority
+- name: priority/2
+  color: fbca04
+  description: Normal priority
+- name: priority/3
+  color: 0e8a16
+  description: Low priority
+- name: status/triage
+  color: ededed
+  description: Needs maintainer triage
+- name: status/blocked
+  color: bfdadc
+  description: Blocked on an external dependency or decision
+- name: status/in-progress
+  color: 1d76db
+  description: Work is in progress
+- name: status/needs-review
+  color: 5319e7
+  description: Ready for review

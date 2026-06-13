@@ -1,0 +1,56 @@
+---
+title: Architecture
+description: How PandaStack fits together — control plane, data plane, and the workload microVMs.
+---
+
+PandaStack has three main layers:
+
+1. **Control plane** — API, auth, organizations, tokens, templates, billing, and orchestration.
+2. **Data plane** — agents that run sandbox operations on hosts.
+3. **Workload microVMs** — Firecracker sandboxes created from templates.
+
+## Public surfaces
+
+- Marketing: `pandastack.ai`
+- Dashboard: `app.pandastack.ai`
+- API: `api.pandastack.ai`
+- Docs: `docs.pandastack.ai`
+
+## API entry points
+
+```http
+GET /healthz
+GET /version
+GET /metrics
+GET /v1/me
+POST /v1/sandboxes
+GET /v1/templates
+POST /v1/billing/sync
+```
+
+Sandbox operations are scoped under `/v1/sandboxes/{id}`. Filesystem access uses `/fs`, lifecycle uses routes such as `/pause`, `/resume`, `/snapshots`, `/fork`, `/hibernate`, and `/wake`, and streaming uses `/exec/stream`, `/events`, and WebSocket upgrades.
+
+## Agent-proxied operations
+
+```http
+POST /v1/sandboxes/{id}/exec
+POST /v1/sandboxes/{id}/exec/stream
+GET /v1/sandboxes/{id}/exec/pty
+GET /v1/sandboxes/{id}/exec/ws
+GET /v1/sandboxes/{id}/logs
+GET /v1/sandboxes/{id}/events
+GET /v1/sandboxes/{id}/lsp/{lang}
+```
+
+## Client configuration
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+The Python SDK imports from `pandastack`; the TypeScript SDK imports from `@pandastack/sdk`; the CLI binary is `pandastack`.
+
+## Lifecycle model
+
+Use `Sandbox.create(...)` or `pandastack sandbox create` to start a sandbox, `exec` or `run_code` to run work, `sandbox.filesystem` or `sandbox cp` for files, and `kill` or `pandastack sandbox delete` to clean up. Advanced lifecycle operations include pause, resume, snapshot, fork, hibernate, wake, TTL changes, and persistence changes.

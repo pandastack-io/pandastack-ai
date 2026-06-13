@@ -1,0 +1,153 @@
+---
+title: Hosted MCP Server
+description: A workspace-level MCP endpoint at api.pandastack.ai/mcp — connect Claude, Cursor, or any MCP client once and manage sandboxes, databases, and apps with 13 tools.
+---
+
+PandaStack ships a **hosted, workspace-level MCP server**. Where the [per-sandbox MCP endpoint](/docs/concepts/mcp) turns one sandbox into a tool, this endpoint turns your **whole workspace** into one: the model can create and destroy sandboxes, run commands, read/write files, provision Postgres databases, and trigger app deploys — all through a single URL and your existing API token.
+
+```
+POST https://api.pandastack.ai/mcp
+Content-Type: application/json
+Authorization: Bearer pds_...
+```
+
+`POST /v1/mcp` is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works with every MCP client that supports remote HTTP servers.
+
+<Callout title="Paid plans only">
+The hosted MCP server is available on **Pro, Team, and Enterprise** plans. Requests from free workspaces get HTTP `402` with an upgrade message. Enterprise gets a 10× higher tool-call rate limit. See [pricing](https://pandastack.ai/pricing).
+</Callout>
+
+## Tools
+
+13 tools, mirroring the REST API. Every call is scoped to the workspace your token belongs to and counts against the same quotas and billing as the equivalent REST call.
+
+### Sandboxes
+
+| Tool              | Arguments                                          | Equivalent REST call                    |
+| ----------------- | -------------------------------------------------- | --------------------------------------- |
+| `create_sandbox`  | `{template?, ttl_seconds?, metadata?}`             | `POST /v1/sandboxes`                     |
+| `list_sandboxes`  | `{}`                                               | `GET /v1/sandboxes`                      |
+| `delete_sandbox`  | `{sandbox_id}`                                     | `DELETE /v1/sandboxes/{id}`              |
+| `run_command`     | `{sandbox_id, command, timeout_seconds?}`          | `POST /v1/sandboxes/{id}/exec`           |
+| `read_file`       | `{sandbox_id, path}`                               | `GET /v1/sandboxes/{id}/fs`              |
+| `write_file`      | `{sandbox_id, path, content}`                      | `PUT /v1/sandboxes/{id}/fs`              |
+| `list_dir`        | `{sandbox_id, path}`                               | `GET /v1/sandboxes/{id}/fs/dir`          |
+
+`create_sandbox` defaults to the `code-interpreter` template. `run_command` defaults to a 60-second timeout (max 300).
+
+### Databases
+
+| Tool               | Arguments     | Equivalent REST call          |
+| ------------------ | ------------- | ----------------------------- |
+| `create_database`  | `{label?}`    | `POST /v1/databases`          |
+| `list_databases`   | `{}`          | `GET /v1/databases`           |
+| `delete_database`  | `{database_id}` | `DELETE /v1/databases/{id}` |
+
+`create_database` blocks until PostgreSQL is ready (30–90s) and returns the connection URL.
+
+### Apps & templates
+
+| Tool             | Arguments              | Equivalent REST call             |
+| ---------------- | ---------------------- | -------------------------------- |
+| `list_apps`      | `{}`                   | `GET /v1/apps`                   |
+| `deploy_app`     | `{app_id, git_ref?}`   | `POST /v1/apps/{id}/deploys`     |
+| `list_templates` | `{}`                   | `GET /v1/templates`              |
+
+## Quick test with curl
+
+```bash
+# Handshake
+curl -s -X POST https://api.pandastack.ai/mcp \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2025-03-26"}}'
+
+# Discover tools
+curl -s -X POST https://api.pandastack.ai/mcp \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# Spin up a sandbox and run a command
+curl -s -X POST https://api.pandastack.ai/mcp \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
+       "params":{"name":"create_sandbox","arguments":{"template":"code-interpreter"}}}'
+
+curl -s -X POST https://api.pandastack.ai/mcp \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
+       "params":{"name":"run_command",
+                 "arguments":{"sandbox_id":"<id from previous call>","command":"python3 -c \"print(2+2)\""}}}'
+```
+
+Results follow the standard MCP `content[]` convention; failed upstream calls come back with `isError: true` and the REST error body as text.
+
+## Client configuration
+
+### Claude Code
+
+```bash
+claude mcp add --transport http pandastack \
+  https://api.pandastack.ai/mcp \
+  --header "Authorization: Bearer pds_..."
+```
+
+### Claude Desktop / other stdio-only clients
+
+Use the standard remote bridge:
+
+```json
+{
+  "mcpServers": {
+    "pandastack": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote",
+        "https://api.pandastack.ai/mcp",
+        "--header", "Authorization: Bearer pds_..."
+      ]
+    }
+  }
+}
+```
+
+### Cursor
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pandastack": {
+      "url": "https://api.pandastack.ai/mcp",
+      "headers": { "Authorization": "Bearer pds_..." }
+    }
+  }
+}
+```
+
+After connecting, ask the model things like *"create a sandbox and benchmark this script"*, *"spin up a Postgres database for this project"*, or *"redeploy my app from main"* — the tools do the rest.
+
+## Auth, limits, and behavior
+
+- **Auth**: the same `Bearer pds_...` workspace token as the REST API. `401` without one.
+- **Plan gate**: paid plans only — free workspaces get `402 Payment Required`.
+- **Rate limits**: tool calls are limited per workspace per minute — 60/min on Pro/Team, 600/min on Enterprise. Exceeding returns JSON-RPC error `-32000`; `initialize` and `tools/list` are never rate-limited.
+- **Stateless**: no sessions to manage; safe to use from many clients concurrently.
+- **Request body cap**: 1 MiB. JSON-RPC batch arrays are not supported (`-32600`).
+- **Billing**: tool calls execute the same control-plane paths as REST, so sandbox runtime, database storage, and deploys are metered identically.
+
+## Hosted vs per-sandbox MCP
+
+| | Hosted (`/mcp`) | Per-sandbox (`/v1/sandboxes/{id}/mcp`) |
+| --- | --- | --- |
+| Scope | whole workspace | one sandbox |
+| Lifecycle tools | create/delete sandboxes, DBs, deploys | none — sandbox must already exist |
+| Plan | paid plans | all plans |
+| Best for | agents that manage infrastructure | giving a model one disposable Linux box |
+
+They compose: use the hosted server to `create_sandbox`, then hand the per-sandbox MCP URL to a narrower-scoped agent that should only touch that box.

@@ -1,0 +1,10 @@
+---
+agent_gcs_bucket: REPLACE_WITH_YOUR_GCS_BUCKET
+agent_gcs_object: bin/pandastack-agent
+agent_bin_path: /usr/local/bin/pandastack-agent
+agent_candidate_path: /tmp/pandastack-agent.candidate
+agent_service: pandastack-agent
+agent_restart_on_change: true
+# Sanity floor: a real agent binary is tens of MB. Guards against pushing a
+# truncated/empty object.
+agent_min_bytes: 5000000

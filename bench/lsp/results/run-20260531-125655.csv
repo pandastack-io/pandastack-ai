@@ -1,0 +1,11 @@
+task_id,variant,passed,steps,input_tokens,output_tokens,total_tokens,wall_seconds,hallucinated_count,error
+01_renamed_helper,exec,True,6,2318,211,2529,18.30,0,
+01_renamed_helper,lsp,True,11,8945,333,9278,58.31,3,
+02_wrong_attribute,exec,True,5,1746,193,1939,12.37,0,
+02_wrong_attribute,lsp,True,7,5049,237,5286,64.83,1,
+03_moved_symbol,exec,True,23,19670,715,20385,41.84,2,
+03_moved_symbol,lsp,True,14,15629,804,16433,51.11,2,
+04_wrong_arg_order,exec,True,4,1279,132,1411,9.61,0,
+04_wrong_arg_order,lsp,True,6,4241,306,4547,42.67,1,
+05_typo_in_constant,exec,True,5,1585,112,1697,11.60,0,
+05_typo_in_constant,lsp,True,8,6035,304,6339,52.43,1,

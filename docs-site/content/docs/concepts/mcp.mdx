@@ -1,0 +1,136 @@
+---
+title: MCP (Model Context Protocol)
+description: A built-in JSON-RPC endpoint that lets Claude Desktop, Cursor, mcp-cli, and other MCP clients drive any sandbox as a tool.
+---
+
+PandaStack speaks [MCP](https://modelcontextprotocol.io) natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the `mcp` CLI, or your own agent at it and the model gets `shell`, `read_file`, `write_file`, and `list_dir` tools wired to a real Linux microVM.
+
+Looking for workspace-level tools (create/delete sandboxes, databases, app deploys) behind a single URL? That's the [hosted MCP server](/docs/concepts/mcp-server) at `https://api.pandastack.ai/mcp` — this page covers the per-sandbox endpoint.
+
+```
+POST /v1/sandboxes/{id}/mcp
+Content-Type: application/json
+Authorization: Bearer <token>
+```
+
+Body is JSON-RPC 2.0. Stateless — every request stands alone, no session affinity needed.
+
+## Methods
+
+### `initialize`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
+```
+
+Returns capabilities + the tool catalog. Standard MCP handshake.
+
+### `tools/list`
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+```
+
+Returns the four shipped tools with their JSON schemas:
+
+| Tool          | Args                                  | Returns                              |
+| ------------- | ------------------------------------- | ------------------------------------ |
+| `shell`       | `{cmd:string, timeout_seconds?:int}`  | `{stdout,stderr,exit_code}`          |
+| `read_file`   | `{path:string}`                       | `{content:string}` (UTF-8)           |
+| `write_file`  | `{path:string, content:string}`       | `{ok:true,bytes:int}`                |
+| `list_dir`    | `{path:string}`                       | `{entries:[{name,is_dir,size}]}`     |
+
+### `tools/call`
+
+```json
+{
+  "jsonrpc":"2.0","id":3,"method":"tools/call",
+  "params":{"name":"shell","arguments":{"cmd":"python -c 'print(2+2)'"}}
+}
+```
+
+```json
+{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"4\n"}],"isError":false}}
+```
+
+Result follows the MCP `content[]` convention so any spec-compliant client renders it correctly.
+
+## Why "stateless"
+
+Each `tools/call` runs through the same agent path as `POST /v1/sandboxes/{id}/exec` — it grabs the sandbox handle, runs the command (or fs op) and returns. There's no per-MCP-client session on the server side, which means:
+
+- You can hibernate and wake the sandbox between calls; the next MCP call wakes it automatically.
+- You can multiplex many concurrent MCP clients against one sandbox without coordinating.
+- Restarting the agent doesn't lose any "MCP context" — there isn't any.
+
+If you need persistent shell state (env vars, `cd`, `source`), use [REPL sessions](/docs/concepts/repl) — same sandbox, different endpoint.
+
+## Claude Desktop config
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your OS:
+
+```json
+{
+  "mcpServers": {
+    "pandastack-sandbox": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "env": {
+        "MCP_FETCH_URL": "https://api.pandastack.ai/v1/sandboxes/<sandbox-id>/mcp",
+        "MCP_FETCH_HEADERS": "Authorization: Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The sandbox shows up as a server in the 🔌 menu; tools are auto-discovered.
+
+(If you have a native MCP bridge — Cursor 0.42+, `@anthropic-ai/mcp` cli — point it at the URL with the bearer header. No fetch shim needed.)
+
+## mcp-cli example
+
+```bash
+mcp call \
+  --url https://api.pandastack.ai/v1/sandboxes/$SID/mcp \
+  --header "Authorization: Bearer $PANDASTACK_TOKEN" \
+  tools/call shell '{"cmd":"ls -la /workspace"}'
+```
+
+## Programmatic example (curl)
+
+```bash
+curl -s -X POST https://api.pandastack.ai/v1/sandboxes/$SID/mcp \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+       "params":{"name":"write_file","arguments":{"path":"/workspace/hello.py","content":"print(\"hi\")"}}}'
+```
+
+## How it relates to the rest of the API
+
+`tools/call shell` ≅ `POST /v1/sandboxes/{id}/exec`. `read_file` / `write_file` / `list_dir` ≅ the [filesystem](/docs/concepts/filesystem) endpoints. The MCP layer is a thin JSON-RPC façade over the same primitives — you can mix and match (e.g., open a [shared terminal](/docs/concepts/terminal) for the human while Claude drives via MCP).
+
+## Use cases
+
+**"Give Claude a Linux box."** Spin up `code-interpreter`, hand the MCP URL + token to Claude Desktop. Claude can now install packages, run Python, edit files — all in a disposable sandbox, not on your laptop.
+
+**Coding-agent loop.** Your agent reads a GitHub issue, opens a sandbox, clones the repo with `shell`, edits files with `write_file`, runs tests with `shell`, posts the diff back. Whole loop is 6 MCP calls.
+
+**Sandboxed plugin runtime for your own product.** Expose user-uploaded scripts as MCP tools by routing tool-call → sandbox `shell`. Untrusted code, contained.
+
+**Parallel experimentation.** Fork a sandbox into 10 children (see [fork-cow](/docs/internals/fork-cow)). Each child gets its own MCP URL. The agent runs the same prompt 10 times in parallel — pick the best result via [`promote`](/docs/concepts/sandbox-lifecycle).
+
+**Long-running notebook companion.** Open a REPL session (state preserved across `tools/call shell`s by living inside a tmux/jupyter process the agent launches in the sandbox), let the LLM drive it.
+
+## Auth, multi-tenancy, and quotas
+
+- Same `Bearer` token system as the REST API. The token's workspace scopes the sandbox lookup; you can't MCP into someone else's sandbox.
+- Counts against your `exec` quota — every `tools/call shell` is one exec call.
+- 30-second per-tool timeout default. Override with `timeout_seconds` in `arguments` (`shell` only).
+
+## Limits
+
+- 1 MiB request body (covers any reasonable `write_file`).
+- 4 MiB response body. Bigger files: use [filesystem `GET /fs`](/docs/concepts/filesystem) which streams.
+- `shell` is a one-shot, **not** a persistent session. For interactive multi-step work, see [REPL sessions](/docs/concepts/repl).

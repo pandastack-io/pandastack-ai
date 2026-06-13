@@ -1,0 +1,52 @@
+---
+# ─────────────────────────── Connection ────────────────────────────────────
+# Force the OpenSSH connection plugin: it honours the IAP ProxyCommand below.
+# (paramiko ignores ssh -o ProxyCommand and would try to resolve the instance
+# name via DNS, which fails — agents have no public DNS/IP.)
+ansible_connection: ssh
+# SSH login user + key are the same ones `gcloud compute ssh` provisions into
+# instance metadata (confirmed via `gcloud compute ssh --dry-run`).
+ansible_user: ajaykumar
+ansible_ssh_private_key_file: "{{ lookup('env', 'HOME') }}/.ssh/google_compute_engine"
+
+# Tunnel every SSH connection through IAP. `%h`/`%p` are the instance name and
+# port; the 3rd arg is the per-host zone surfaced by the inventory (compose).
+# StrictHostKeyChecking is off because agent VMs are ephemeral (autoscaled /
+# recreated) so their host keys legitimately change — IAP + our key already
+# provide the trust boundary.
+ansible_ssh_common_args: >-
+  -o IdentitiesOnly=yes
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o ProxyCommand="{{ playbook_dir }}/iap-proxy.sh %h %p {{ pandastack_zone | default('') }}"
+
+# ─────────────────────────── Project / GCS ─────────────────────────────────
+gcp_project: demo
+# Runtime bucket the agent VMs already read from (seeds + bin/). Matches
+# release.yml's GCS_BUCKET and cloud-init's PANDASTACK_GCS_BUCKET.
+agent_gcs_bucket: REPLACE_WITH_YOUR_GCS_BUCKET
+
+# ─────────────────────────── Firecracker ───────────────────────────────────
+firecracker_version: "1.16.0"
+firecracker_arch: x86_64
+
+# ─────────────────────────── Agent binary ──────────────────────────────────
+agent_gcs_object: bin/pandastack-agent
+agent_bin_path: /usr/local/bin/pandastack-agent
+agent_service: pandastack-agent
+# Restart the service after swapping the binary. Safe for running sandboxes:
+# the unit is KillMode=mixed, so SIGTERM hits ONLY the agent PID — Firecracker
+# children keep running across the restart.
+agent_restart_on_change: true
+
+# ─────────────────────────── Managed env knobs ─────────────────────────────
+# agent_env manages ONLY these fleet-wide, non-secret knobs in env.agent.
+# Secret + per-host keys (DB_DSN, NODE_TOKEN, SHARED_KEY, *CLICKHOUSE_URL,
+# SUPABASE_JWKS_URL, AGENT_ID, NATID_SLOT, INTERNAL_IP, ZONE, REGION, …) stay
+# owned by cloud-init and are protected by agent_env_denylist.
+agent_env_file: /etc/pandastack/env.agent
+agent_env_managed:
+  PANDASTACK_STREAM_RESTORE: "1"
+  PANDASTACK_HUGEPAGES: "1"
+  PANDASTACK_NATID: "1"
+  PANDASTACK_NATID_POOL_SIZE: "24"

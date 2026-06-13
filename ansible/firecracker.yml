@@ -1,0 +1,11 @@
+---
+# Install/upgrade Firecracker on the fleet (rare — only when bumping the FC
+# version). Does NOT restart the agent; FC binary swaps affect newly-spawned
+# microVMs only.
+- name: Install Firecracker
+  hosts: agents
+  gather_facts: false
+  serial: 1
+  roles:
+    - common
+    - firecracker

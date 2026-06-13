@@ -1,0 +1,430 @@
+{
+  "started_at": "2026-05-26T18:42:36.365368+05:30",
+  "finished_at": "2026-05-26T18:46:19.173097+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 50,
+  "successes": 45,
+  "failures": 5,
+  "boot_p50_ms": 1233,
+  "boot_p90_ms": 1840.6000000000001,
+  "boot_p99_ms": 2554.8,
+  "boot_p99_9_ms": 2635.98,
+  "boot_min_ms": 967,
+  "boot_max_ms": 2645,
+  "wall_p50_ms": 1453,
+  "wall_p99_ms": 2797.56,
+  "boot_modes": {
+    "snapshot-natid": 45
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 1345,
+      "wall_ms": 1563,
+      "delete_ms": 3133,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 2,
+      "boot_ms": 1316,
+      "wall_ms": 1561,
+      "delete_ms": 3138,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 1251,
+      "wall_ms": 1449,
+      "delete_ms": 3150,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 5,
+      "boot_ms": 1165,
+      "wall_ms": 1421,
+      "delete_ms": 3125,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 7,
+      "boot_ms": 1364,
+      "wall_ms": 1570,
+      "delete_ms": 3154,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 1056,
+      "wall_ms": 1306,
+      "delete_ms": 3131,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 1233,
+      "wall_ms": 1453,
+      "delete_ms": 3145,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 1062,
+      "wall_ms": 1326,
+      "delete_ms": 3085,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 1180,
+      "wall_ms": 1457,
+      "delete_ms": 3132,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 1006,
+      "wall_ms": 1263,
+      "delete_ms": 3139,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 14,
+      "boot_ms": 1111,
+      "wall_ms": 1307,
+      "delete_ms": 3138,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 1022,
+      "wall_ms": 1198,
+      "delete_ms": 3152,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 16,
+      "boot_ms": 1225,
+      "wall_ms": 1428,
+      "delete_ms": 3120,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 1101,
+      "wall_ms": 1335,
+      "delete_ms": 3135,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 1758,
+      "wall_ms": 2000,
+      "delete_ms": 3171,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 1444,
+      "wall_ms": 1653,
+      "delete_ms": 3122,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 20,
+      "boot_ms": 1104,
+      "wall_ms": 1330,
+      "delete_ms": 3120,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 21,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 22,
+      "boot_ms": 1236,
+      "wall_ms": 1442,
+      "delete_ms": 3165,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 23,
+      "boot_ms": 1226,
+      "wall_ms": 1456,
+      "delete_ms": 3112,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 24,
+      "boot_ms": 1127,
+      "wall_ms": 1339,
+      "delete_ms": 3124,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 25,
+      "boot_ms": 1447,
+      "wall_ms": 1666,
+      "delete_ms": 3229,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 26,
+      "boot_ms": 2645,
+      "wall_ms": 2875,
+      "delete_ms": 3133,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 27,
+      "boot_ms": 1966,
+      "wall_ms": 2180,
+      "delete_ms": 3129,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 28,
+      "boot_ms": 1593,
+      "wall_ms": 1839,
+      "delete_ms": 3141,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 29,
+      "boot_ms": 2440,
+      "wall_ms": 2699,
+      "delete_ms": 3150,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 30,
+      "boot_ms": 1691,
+      "wall_ms": 1912,
+      "delete_ms": 3163,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 31,
+      "boot_ms": 1492,
+      "wall_ms": 1726,
+      "delete_ms": 3150,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 32,
+      "boot_ms": 1420,
+      "wall_ms": 1641,
+      "delete_ms": 3132,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 33,
+      "boot_ms": 1275,
+      "wall_ms": 1462,
+      "delete_ms": 3143,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 34,
+      "boot_ms": 1891,
+      "wall_ms": 2203,
+      "delete_ms": 3136,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 35,
+      "boot_ms": 1765,
+      "wall_ms": 1969,
+      "delete_ms": 3136,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 36,
+      "boot_ms": 1522,
+      "wall_ms": 1723,
+      "delete_ms": 3169,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 37,
+      "boot_ms": 2176,
+      "wall_ms": 2418,
+      "delete_ms": 3180,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 38,
+      "boot_ms": 1631,
+      "wall_ms": 1831,
+      "delete_ms": 3155,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 39,
+      "boot_ms": 972,
+      "wall_ms": 1172,
+      "delete_ms": 3142,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 40,
+      "boot_ms": 1210,
+      "wall_ms": 1420,
+      "delete_ms": 3152,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 41,
+      "boot_ms": 967,
+      "wall_ms": 1153,
+      "delete_ms": 3132,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 42,
+      "boot_ms": 1169,
+      "wall_ms": 1383,
+      "delete_ms": 3147,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 43,
+      "boot_ms": 1108,
+      "wall_ms": 1318,
+      "delete_ms": 3144,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 44,
+      "boot_ms": 1141,
+      "wall_ms": 1341,
+      "delete_ms": 3150,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 45,
+      "boot_ms": 1010,
+      "wall_ms": 1254,
+      "delete_ms": 3121,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 46,
+      "boot_ms": 1347,
+      "wall_ms": 1631,
+      "delete_ms": 3154,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 47,
+      "boot_ms": 1092,
+      "wall_ms": 1319,
+      "delete_ms": 3126,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 48,
+      "boot_ms": 1098,
+      "wall_ms": 1313,
+      "delete_ms": 3147,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 49,
+      "boot_ms": 1101,
+      "wall_ms": 1299,
+      "delete_ms": 3115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

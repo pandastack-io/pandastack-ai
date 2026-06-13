@@ -1,0 +1,176 @@
+---
+title: Streaming Restore (UFFD)
+description: How a cold host boots a sandbox without first downloading the whole memory snapshot — on-demand page streaming over userfaultfd.
+---
+
+[Snapshot restore](/docs/internals/snapshot-restore) is fast because `vm.mem` is already a local file: Firecracker `mmap`s it and pages fault in lazily. But that assumes the file is *on the host*. On a **cold host** — one that has never restored this template — the agent first has to download the entire `vm.mem` (256 MiB – several GiB) from object storage before Firecracker can `mmap` it. That download is the "cold host first-boot cliff": the create blocks on transferring memory the guest may never even touch.
+
+Streaming restore removes that cliff. Instead of downloading `vm.mem` up front, the agent serves guest page faults **on demand** over `userfaultfd`, pulling only the chunks the guest actually touches, directly from a GCS HTTP Range request.
+
+<Callout type="info">
+Streaming restore is opt-in, gated behind `PANDASTACK_STREAM_RESTORE=1`. The default and always-available fallback is the full-download path (`mem_file_path`). If anything in the streaming path is unavailable — no header, no socket, kernel without `userfaultfd` — the agent uses the regular restore.
+</Callout>
+
+## How userfaultfd handoff works
+
+Firecracker supports a `Uffd` memory backend on `PUT /snapshot/load`. The contract is subtle and order-sensitive:
+
+1. The agent opens a **listening** unix socket and points the load at it (`mem_backend: {backend_type: "Uffd", backend_path: <socket>}`).
+2. Firecracker connects to that socket *during* the load and sends two things over it: the `userfaultfd` file descriptor (via `SCM_RIGHTS`) and a JSON description of the guest memory mappings.
+3. The agent's handler reads `UFFD_EVENT_PAGEFAULT` events off the fd and installs pages with `UFFDIO_COPY`.
+
+The ordering trap: Firecracker's connect happens *inside* the load call, so the socket must be **listening before** the load and the page-fault loop must start **after** the load returns but **before** the guest resumes. That's why the agent splits the work into three calls:
+
+```
+beginUffdRestore(snapDir)  → Listen() on the handoff socket   (BEFORE /snapshot/load)
+PUT /snapshot/load         → Firecracker connects, sends fd   (queues in listen backlog)
+serveUffd()                → Serve() the page-fault loop      (AFTER load, BEFORE Resume)
+```
+
+See `agent/internal/firecracker/uffd_restore.go` and `agent/internal/uffd/`.
+
+## On-disk formats
+
+Two small binary side-files live next to `vm.mem` in the snapshot directory. Both are produced at template-bake time and are optional at restore time.
+
+### `vm.mem.header` — the chunk map (`PSM1`)
+
+The header describes how `vm.mem` is chunked so the resolver can map a faulting guest offset to a chunk and know whether that chunk is all-zero (and thus needs no I/O at all).
+
+| Field          | Value                                                             |
+| -------------- | ---------------------------------------------------------------- |
+| Magic          | `PSM1`                                                            |
+| Chunk size     | 4 MiB (`DefaultChunkSize`)                                        |
+| Page size      | 4096                                                              |
+| Presence bitmap| One bit per chunk: set = chunk has non-zero bytes in `vm.mem`     |
+
+The presence bitmap is the zero-eliding optimization: a fresh guest's RAM is overwhelmingly zero pages. Any fault landing in an absent (all-zero) chunk is served as a zero page with **no I/O**. If the header is missing *and* `vm.mem` is a local file, the agent rebuilds it by scanning the file (`memstream.BuildHeader`). When `vm.mem` is being streamed from GCS there is nothing local to scan, so a baked header is **mandatory** for the streaming path.
+
+### `vm.mem.gcs` — the streaming sidecar
+
+When an agent streams `vm.mem` straight from object storage (see [No local seed pre-sync](#no-local-seed-pre-sync) below) there is no local `vm.mem` at all. In its place, seed-sync drops a tiny JSON sidecar that tells the restore path where to range-GET the memory from:
+
+| Field   | Value                                                       |
+| ------- | ----------------------------------------------------------- |
+| `bucket`| GCS bucket holding the seed                                 |
+| `object`| Object key, e.g. `seeds/<template>/<generation>/vm.mem`     |
+| `size`  | Object byte length — pinned against the header's `TotalSize`|
+
+Its mere presence (in lieu of a local `vm.mem`) is what tells `beginUffdRestore` to build a `NewGCSRangeSource` instead of a `NewFileSource`. See `agent/internal/memstream/memref.go`.
+
+### `vm.mem.prefetch` — the warm-set replay list (`PSP1`)
+
+Records the *chunk indices* a prior restore actually faulted in, so the next restore can warm them in the background before the guest demands them.
+
+| Field      | Value                                       |
+| ---------- | ------------------------------------------- |
+| Magic      | `PSP1`                                       |
+| Chunk size | Must match the header's chunk size           |
+| Chunk list | Sorted chunk indices to prefault             |
+
+A chunk-size mismatch makes the prefault a **no-op** — a stale trace can never warm the wrong offsets. See `agent/internal/memstream/prefetch.go`.
+
+## The resolver: single-flight chunk cache
+
+`memstream.Resolver` sits between page faults and the chunk source (`NewFileSource` for a local file, `NewGCSRangeSource(bucket, object, tokenProvider)` for object storage). For each fault it:
+
+1. Maps the guest offset → chunk index via the header.
+2. If the chunk is absent in the presence bitmap → serve a **zero page** (no I/O).
+3. Otherwise `ensureChunk`: **single-flight** the fetch (concurrent faults for the same chunk coalesce into one range GET) into a sparse local **cache** file, then `UFFDIO_COPY` the page.
+
+The cache is a sparse file alongside the per-sandbox API socket (not in the shared template snapshot dir) so concurrent restores from the same template never collide. The resolver tracks lifetime counters — `Faults`, `Fetches`, `ZeroFill` — surfaced via `Stats()`.
+
+## The shared chunk cache: pay GCS latency once per host
+
+The per-restore resolver cache dies with the sandbox, so without anything else every restore of the same seed re-fetches the same chunks from GCS. The **shared chunk cache** (`memstream.SharedCache`, `agent/internal/memstream/sharedcache.go`) fixes that: a persistent, host-local, per-seed-generation chunk store layered *between* the resolver and the GCS range source. It implements `ChunkSource`, so the resolver is unchanged — its "upstream" is simply the shared cache instead of GCS.
+
+- **Layout**: `<root>/<key>/chunks.dat` (a sparse file of the seed's full `TotalSize`) plus `present.psc` (magic `PSC1`), a bitmap of which chunks are locally durable. The key is the first 8 bytes of `sha256(bucket + "/" + object)` — content-addressed by the GCS object, so publishing a new seed generation naturally lands in a fresh cache dir and old generations age out via LRU.
+- **Fill path**: a resolver miss calls into the shared cache; if the chunk bit is set, it's read from `chunks.dat` (local disk / page cache). Otherwise the cache single-flights one range GET (concurrent restores of the same seed coalesce), writes the chunk sparsely, and marks it present in memory.
+- **Crash safety**: the on-disk bitmap only advances in `Flush()` (2 s ticker + close): snapshot the in-memory bits → `fdatasync(chunks.dat)` → write bitmap to a temp file → atomic rename. Invariant: *a set bit in a readable bitmap always points at durable chunk data*. Any geometry drift (chunk size, total size, chunk count) or unreadable bitmap resets the cache to empty rather than serving torn data.
+- **Lifecycle**: caches are process-lifetime singletons in a registry (`AcquireSharedCache`); per-restore handles are refs whose `Close` is a no-op, so a sandbox teardown never yanks the cache out from under a concurrent restore. Acquire also kicks a background **LRU sweep** of the cache root (by bitmap mtime, sparse-aware via allocated blocks, in-use keys exempt) against the size budget.
+- **Net effect**: the *first* restore of a seed on a host streams from GCS; every later restore of that seed — including prefetch replay — is served from local disk. Combined with the prefetch trace this turns the steady-state restore into a purely local operation while keeping seeds thin.
+
+Tuning (agent env):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PANDASTACK_MEMCACHE` | enabled | `0` disables the shared cache (resolver talks straight to GCS) |
+| `PANDASTACK_MEMCACHE_DIR` | `/var/lib/pandastack/memcache` | Cache root directory |
+| `PANDASTACK_MEMCACHE_MAX_GB` | `20` | Size budget (GiB) before LRU eviction |
+
+If the shared cache fails to open (bad disk, permissions), the agent logs and falls back to a direct GCS source for that restore — streaming never hard-fails on the cache.
+
+## 2 MiB hugepages: 512× fewer faults
+
+With `PANDASTACK_HUGEPAGES=1` the agent backs cold-booted guest memory with 2 MiB hugetlbfs pages instead of 4 KiB pages (`agent/internal/firecracker/hugepages.go`). On a streaming restore each userfaultfd fault then installs 2 MiB at once — a 4 GiB guest needs at most ~2,048 faults instead of ~1,048,576 — and the running guest keeps far less EPT/TLB pressure.
+
+Two Firecracker rules shape the design:
+
+- **`huge_pages` is boot-time only.** It lives in `/machine-config` and cannot change at restore: a snapshot taken from a hugepage VM is hugepage-backed forever, and a 4 KiB snapshot stays 4 KiB. Enabling the flag therefore requires a template **re-bake**. (The pinned Go SDK predates the field, so the agent re-PUTs `/machine-config` raw via an FcInit handler injected right after `CreateMachine`.)
+- **Hugepage snapshots restore ONLY via UFFD.** Firecracker rejects `mem_file_path` for them. To make this self-describing, every snapshot taken from a hugepage VM gets a `hugepages` marker file in its snapshot directory. The marker travels in seed tarballs (`seed.optionalFiles`) and in snapstore uploads, and **every** restore path checks it and forces the UFFD backend — even on agents with `PANDASTACK_STREAM_RESTORE` off (a local `vm.mem` is then served through `NewFileSource`).
+
+The fault handler is page-size aware: Firecracker's handoff JSON reports each region's `page_size` in bytes (2097152 for hugepage snapshots), and the handler aligns the faulting address to the region's page size and `UFFDIO_COPY`s a whole 2 MiB page. The 4 MiB chunk geometry is untouched — a 2 MiB-aligned page never straddles a chunk boundary.
+
+Host prerequisite: `vm.nr_overcommit_hugepages` must be raised (cloud-init sets it to half of RAM in 2 MiB pages). Overcommit lets the kernel assemble hugepages on demand, so there is no boot-time reservation to size or leak when no microVMs run.
+
+## No local seed pre-sync
+
+The agent seeds templates from a fleet-shared GCS bucket so a freshly-provisioned host is fast from second zero ([seed package](https://github.com/pandastack/agent/tree/main/internal/seed)). Originally a seed was a single `seed.tar.gz` that included `vm.mem` — meaning a cold host still had to download the *entire* memory image before it could restore anything. Streaming makes that download unnecessary, so schema **v3** splits the seed:
+
+- **`seed.tar.gz`** — a *thin* sparse tarball of just the restore-essential files: `clone.ext4`, `vm.state`, `identity.json`, `snap-meta.json`, `flavor`, `ready`, and (optionally) `vm.mem.header`. It deliberately **omits `vm.mem`**.
+- **`vm.mem`** — published as a standalone, *uncompressed* object at `gs://<bucket>/seeds/<template>/<generation>/vm.mem`. Uncompressed because gzip is not range-seekable; the streaming path needs HTTP Range GETs.
+
+The manifest records the object's key (`mem_object`) and byte length (`mem_bytes`).
+
+At restore-install time (`seed.Sync` → `syncOne`) the agent extracts the thin tarball and then decides what to do about `vm.mem`:
+
+- **Streaming agent** (`PANDASTACK_STREAM_RESTORE=1`, a baked header present, `mem_bytes > 0`): it writes the `vm.mem.gcs` sidecar and **downloads nothing** — `vm.mem` is never copied to the host.
+- **Non-streaming agent**: it `gcloud storage cp`s the standalone `vm.mem` into the snapshot dir, reproducing the classic local-file layout.
+
+Because the rootfs (`clone.ext4`) is a reflink clone and `vm.state` is opened by Firecracker by path, those *must* stay local — only `vm.mem` is streamable. `beginUffdRestore` picks the source per restore: a local `vm.mem` → `NewFileSource`; otherwise the `vm.mem.gcs` sidecar → `NewGCSRangeSource`, with the header's `TotalSize` pinned to the sidecar's recorded `size` so a drifted header can never stream the wrong bytes. See `agent/internal/seed/` and `uffdSource` in `agent/internal/firecracker/uffd_restore.go`.
+
+## Self-learning prefetch recorder
+
+The first streaming restore of a template has no `vm.mem.prefetch`, so it faults purely on demand. At teardown (`closeUffd`), if no trace existed, the agent records the working set this restore actually faulted in and persists it for the *next* restore:
+
+- Writes only when the snapshot directory is known and **no prefetch list already exists** (first restore wins — we don't churn the trace on every restore).
+- Skips trivially thin traces: a restore that faulted fewer than `minPrefetchChunks` (8) chunks isn't worth replaying.
+- The write is **atomic** (temp file + rename) so a concurrent restore sees either the complete list or none.
+
+On subsequent restores, `serveUffd` replays the list in the background via `memstream.Prefault` with a worker fan-out (`uffdPrefaultWorkers = 16` — the shared chunk cache makes most prefault work a local-disk hit, so wide fan-out is cheap). This races the guest's own faults harmlessly — the resolver single-flights each chunk, so whichever side touches a chunk first wins and the other becomes a no-op.
+
+## Scheduler tiebreaker
+
+A streaming-capable agent advertises the fact in its heartbeat. `registry.Capacity` carries `StreamRestoreEnabled`, set from `PANDASTACK_STREAM_RESTORE=1` in `currentCapacity` (`agent/cmd/agent/tcp.go`), refreshed every 5 s and reported every 10 s.
+
+The scheduler consumes it as a **tiebreaker** on top of the load-spreading score:
+
+```
+score = 0.6 × free_cpu + 0.3 × free_mem_gib
+if stream_restore_enabled:
+    score += streamBoost   // 5.0
+```
+
+A streaming agent can boot a template it has never seen without first downloading the whole `vm.mem`, so among otherwise comparable hosts it wins — but a host with substantially more free capacity still outranks it. Two scheduler tests lock the behavior in: `TestPickPrefersStreamingHost` and `TestPickPrefersIdleHost`. See `api/internal/scheduler/scheduler.go` and the [scheduler internals](/docs/internals/scheduler).
+
+## Metrics
+
+The agent's `/metrics` endpoint exposes four Prometheus series, emitted at restore teardown from the resolver's lifetime `Stats()`:
+
+| Metric                              | Type     | Meaning                                                          |
+| ----------------------------------- | -------- | ---------------------------------------------------------------- |
+| `pandastack_uffd_restore_total`     | counter  | Streaming-restore outcomes, by `result` (e.g. `served`).         |
+| `pandastack_uffd_page_faults_total` | counter  | Guest page faults served by the resolver.                        |
+| `pandastack_uffd_chunk_fetches_total`| counter | Chunks pulled from source into the cache (lower vs faults = more warm-cache hits). |
+| `pandastack_uffd_zero_fill_total`   | counter  | Faults served as zero pages with no I/O.                         |
+
+The ratio `chunk_fetches / page_faults` tells you how much of the working set the prefetcher warmed ahead of demand; `zero_fill` shows how much of the guest's address space was untouched/zero. See `agent/internal/obs/obs.go`.
+
+## Files
+
+- `agent/internal/firecracker/uffd_restore.go` — the `beginUffdRestore` / `serveUffd` / `closeUffd` lifecycle, the `uffdSource` local-vs-GCS source selection, and the self-learning recorder.
+- `agent/internal/uffd/` — the `userfaultfd` handler (`//go:build linux`): socket handoff, page-fault loop, `UFFDIO_COPY`.
+- `agent/internal/memstream/` — header (`PSM1`), prefetch (`PSP1`), resolver single-flight cache, file + GCS range sources, and the `vm.mem.gcs` sidecar (`memref.go`).
+- `agent/internal/seed/` — schema-v3 seed split: `upload.go` publishes the thin tarball + standalone `vm.mem`; `sync.go` does the stream-vs-download decision and writes the sidecar.
+- `api/internal/scheduler/scheduler.go` — cold-tier `streamColdBoost`.
+- `agent/internal/obs/obs.go` — the four `uffd_*` collectors.

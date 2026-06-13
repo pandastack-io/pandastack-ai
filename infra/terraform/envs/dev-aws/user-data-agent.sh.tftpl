@@ -1,0 +1,58 @@
+#!/bin/bash
+# cloud-init for pandastack-agent nodes (AWS multi-node mode).
+# Runs Firecracker microVMs. Requires a *.metal instance (bare-metal KVM).
+# Fetches secrets from AWS Secrets Manager (prefix "${secret_prefix}-").
+set -euo pipefail
+exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
+export DEBIAN_FRONTEND=noninteractive
+
+REGION="${region}"
+SECRET_PREFIX="${secret_prefix}"
+AGENT_BINARY_URL="${agent_binary_url}"
+S3_BUCKET="${s3_bucket_name}"
+
+apt-get update -y
+apt-get install -y awscli jq curl ca-certificates
+
+# Verify KVM is available (bare-metal required).
+if [ ! -e /dev/kvm ]; then
+  echo "FATAL: /dev/kvm missing — agent requires a *.metal instance type." >&2
+  exit 1
+fi
+
+secret() { aws --region "$REGION" secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
+
+NODE_TOKEN="$(secret "$${SECRET_PREFIX}-node-token")"
+DATABASE_URL="$(secret "$${SECRET_PREFIX}-database-url")"
+CLICKHOUSE_URL="$(secret "$${SECRET_PREFIX}-clickhouse-url" || echo '')"
+
+# Stable agent id from the EC2 instance id (IMDSv2).
+TOKEN="$(curl -sX PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')"
+IID="$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)"
+
+mkdir -p /etc/pandastack /var/lib/pandastack
+{
+  echo "PANDASTACK_AGENT_ID=$${IID}"
+  echo "PANDASTACK_NODE_TOKEN=$${NODE_TOKEN}"
+  echo "PANDASTACK_DB_DRIVER=sqlite"
+  echo "PANDASTACK_DATA_DIR=/var/lib/pandastack"
+  echo "PANDASTACK_LISTEN_TCP=0.0.0.0:7070"
+  echo "PANDASTACK_REGION=$${REGION}"
+  echo "PANDASTACK_NATID=1"
+  echo "PANDASTACK_CLICKHOUSE_URL=$${CLICKHOUSE_URL}"
+  echo "PANDASTACK_GCS_BUCKET="            # n/a on AWS; seeds synced from S3 below
+  echo "PANDASTACK_S3_BUCKET=$${S3_BUCKET}"
+} > /etc/pandastack/agent.env
+chmod 600 /etc/pandastack/agent.env
+
+# TODO: install Firecracker + the pandastack-agent binary, lay down the XFS
+# reflink loopback data volume, and sync template seeds from S3. See
+# cloud-init/user-data-agent.sh for the canonical (GCP) provisioning steps to
+# port. If the AMI is pre-baked, this block is a no-op.
+if [ -n "$AGENT_BINARY_URL" ]; then
+  curl -fsSL "$AGENT_BINARY_URL" -o /usr/local/bin/pandastack-agent
+  chmod +x /usr/local/bin/pandastack-agent
+fi
+systemctl daemon-reload || true
+systemctl enable --now pandastack-agent 2>/dev/null || \
+  echo "pandastack-agent unit not present — bake it into the AMI or extend this script."

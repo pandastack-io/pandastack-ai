@@ -1,0 +1,265 @@
+{
+  "started_at": "2026-05-26T23:15:06.802979+05:30",
+  "finished_at": "2026-05-26T23:15:37.37115+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 30,
+  "successes": 30,
+  "failures": 0,
+  "boot_p50_ms": 686,
+  "boot_p90_ms": 768.1999999999999,
+  "boot_p99_ms": 804.26,
+  "boot_p99_9_ms": 805.826,
+  "boot_min_ms": 369,
+  "boot_max_ms": 806,
+  "wall_p50_ms": 841,
+  "wall_p99_ms": 989.49,
+  "boot_modes": {
+    "snapshot-natid": 30
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 452,
+      "wall_ms": 609,
+      "delete_ms": 114,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 688,
+      "wall_ms": 848,
+      "delete_ms": 106,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 500,
+      "wall_ms": 669,
+      "delete_ms": 122,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 619,
+      "wall_ms": 785,
+      "delete_ms": 149,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 806,
+      "wall_ms": 995,
+      "delete_ms": 159,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 760,
+      "wall_ms": 916,
+      "delete_ms": 114,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 768,
+      "wall_ms": 925,
+      "delete_ms": 123,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 766,
+      "wall_ms": 976,
+      "delete_ms": 115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 770,
+      "wall_ms": 950,
+      "delete_ms": 113,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 800,
+      "wall_ms": 951,
+      "delete_ms": 131,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 743,
+      "wall_ms": 919,
+      "delete_ms": 121,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 722,
+      "wall_ms": 880,
+      "delete_ms": 118,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 717,
+      "wall_ms": 876,
+      "delete_ms": 115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 369,
+      "wall_ms": 527,
+      "delete_ms": 128,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 14,
+      "boot_ms": 753,
+      "wall_ms": 939,
+      "delete_ms": 115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 686,
+      "wall_ms": 836,
+      "delete_ms": 111,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 16,
+      "boot_ms": 379,
+      "wall_ms": 525,
+      "delete_ms": 116,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 674,
+      "wall_ms": 828,
+      "delete_ms": 113,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 691,
+      "wall_ms": 843,
+      "delete_ms": 118,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 686,
+      "wall_ms": 841,
+      "delete_ms": 112,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 20,
+      "boot_ms": 692,
+      "wall_ms": 844,
+      "delete_ms": 115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 21,
+      "boot_ms": 685,
+      "wall_ms": 841,
+      "delete_ms": 110,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 22,
+      "boot_ms": 675,
+      "wall_ms": 833,
+      "delete_ms": 130,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 23,
+      "boot_ms": 673,
+      "wall_ms": 832,
+      "delete_ms": 115,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 24,
+      "boot_ms": 728,
+      "wall_ms": 889,
+      "delete_ms": 110,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 25,
+      "boot_ms": 546,
+      "wall_ms": 709,
+      "delete_ms": 118,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 26,
+      "boot_ms": 557,
+      "wall_ms": 717,
+      "delete_ms": 118,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 27,
+      "boot_ms": 377,
+      "wall_ms": 528,
+      "delete_ms": 111,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 28,
+      "boot_ms": 631,
+      "wall_ms": 788,
+      "delete_ms": 126,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 29,
+      "boot_ms": 612,
+      "wall_ms": 772,
+      "delete_ms": 131,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

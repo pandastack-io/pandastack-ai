@@ -1,0 +1,149 @@
+---
+title: Volumes
+description: Named, persistent ext4 block devices you can attach to sandboxes — for datasets, model weights, and durable workspaces.
+---
+
+A **volume** is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies — the data stays.
+
+## Lifecycle
+
+```bash
+# Create
+curl -X POST https://api.pandastack.ai/v1/volumes \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"shared-models","size_mb":4096}'
+# {"name":"shared-models","size_mb":4096,"created_at":"2026-06-01T15:30:18Z"}
+
+# List
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" https://api.pandastack.ai/v1/volumes
+
+# Get one
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/volumes/shared-models
+
+# Delete (data gone, irreversible)
+curl -X DELETE -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/volumes/shared-models
+```
+
+Backing layout: one file per volume at `<data-dir>/volumes/ws/<workspace>/<name>.ext4`. Maximum size **65,536 MB** (64 GiB) per volume on every plan. Names are workspace-scoped.
+
+## Attach to a sandbox
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/sandboxes \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template": "code-interpreter",
+    "volumes": [
+      {"name": "shared-models", "read_only": false},
+      {"name": "datasets",      "read_only": true}
+    ]
+  }'
+```
+
+Each entry adds a `virtio-blk` device to the VM. Volumes appear in the guest in attach-order:
+
+| Attach position | Guest device |
+| --------------- | ------------ |
+| 1st volume      | `/dev/vdb`   |
+| 2nd             | `/dev/vdc`   |
+| 3rd             | `/dev/vdd`   |
+| ...             | ...          |
+
+(`/dev/vda` is always the sandbox's own rootfs.)
+
+## Mounting inside the guest
+
+The platform attaches the block device; **the guest is responsible for mounting it**. Either do it manually:
+
+```bash
+sudo mkdir -p /mnt/models
+sudo mount /dev/vdb /mnt/models           # rw mount
+sudo mount -o ro /dev/vdc /mnt/datasets   # ro mount
+```
+
+…or bake it into your template's init so it happens automatically on every boot. Example for the `code-interpreter` template (in `cloud-init/user-data-guest.sh` or your own template init):
+
+```bash
+cat >>/etc/fstab <<'EOF'
+/dev/vdb  /mnt/models    ext4  defaults,noatime              0 2
+/dev/vdc  /mnt/datasets  ext4  defaults,ro,noatime           0 2
+EOF
+mkdir -p /mnt/models /mnt/datasets
+mount -a
+```
+
+This is intentional: the platform doesn't know what path your application expects, so it doesn't pick one for you.
+
+## Concurrency
+
+- **Read-only attach is safe across many sandboxes.** Attach the same volume `read_only: true` to 100 sandboxes — they all see the same dataset, no conflict.
+- **Writable attach is exclusive.** Attaching `read_only: false` to more than one running sandbox at a time will corrupt ext4 — the kernel has no idea another VM is mutating its blocks. The agent does not enforce this; it's a footgun by design (matches Linux's normal block-device semantics).
+- For shared writes, use one writer + many readers, or run a small server inside one sandbox and have peers talk to it over the [preview URL](/docs/concepts/preview-urls) network path.
+
+## Hibernation and forks
+
+| Operation     | Volume behavior                                                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `pause`       | Volume stays attached, no I/O while paused.                                                                                              |
+| `hibernate`   | Volume stays attached; on `wake`, the guest sees the same device with whatever in-flight kernel state was flushed to disk pre-snapshot.  |
+| `fork`        | Children attach the **same** volume by name. If the parent's volume is rw, you almost certainly want the children's attach to be `ro` to avoid corruption. |
+| `delete`      | Volume detached. Data persists.                                                                                                          |
+| Volume `delete` | Refused if any running sandbox has it attached. Stop sandboxes first.                                                                  |
+
+## Use cases
+
+**Shared model weights for an LLM workspace.** Mount a 30 GB volume of `huggingface/transformers` weights read-only across every inference sandbox. Cold-boot a sandbox in 180 ms; `transformers` finds the cache on `/mnt/models`, skips re-download, runs in seconds.
+
+**Per-user persistent workspace.** One volume per dashboard user, attached rw to whichever sandbox they currently have running. Close the sandbox, come back tomorrow, attach the volume to a fresh one — your `node_modules`, `~/.cache`, `~/.bashrc` are still there.
+
+**Reusable datasets for batch jobs.** Pre-load `imagenet-train` into a volume once, fan out 50 forks for hyperparameter search, each attaches the volume ro. No copy cost, no per-sandbox download.
+
+**Result staging.** Job sandbox writes outputs to `/mnt/results` on a rw volume. After the sandbox is destroyed, a small "shipper" sandbox attaches the volume ro and uploads the results to S3. Decouples compute from upload.
+
+## Why ext4 (not NFS, not S3 backing)?
+
+- **Local NVMe block device** = full POSIX semantics, mmap, fsync, sub-millisecond latency. Matches what your code already expects from `/workspace`.
+- **No network in the data path** = no S3 throttling, no NFS server to babysit, no slowdown when you write 10k small files.
+- **Snapshot-compatible**: ext4 over virtio-blk plays nicely with Firecracker's snapshot machinery, so hibernated sandboxes restore with their volume state intact.
+- **Self-contained file** = trivially backed up (`cp`/`rsync`), versioned (XFS reflink), or shipped to GCS.
+
+The tradeoff: volumes are **host-local**. A sandbox restored on a different agent host can't see a volume that exists only on the original host. The roadmap item to make volumes "follow" cross-host moves uses GCS-backed staging on attach, same mechanism as cross-host snapshot restore — but as of v1, schedule sandboxes that need a specific volume to the host that has it (the scheduler honors this hint automatically when `volumes` is set on create).
+
+## Plan quotas
+
+Volume quotas come from your subscription tier. Every plan's quota is included at no extra charge:
+
+| Plan       | Max volumes | Max size / volume | Total provisioned storage |
+| ---------- | ----------- | ----------------- | ------------------------- |
+| Free       | 1           | 1 GiB             | 1 GiB                     |
+| Pro        | 10          | 10 GiB            | 100 GiB                   |
+| Team       | 50          | 50 GiB            | 2.5 TiB                   |
+| Enterprise | Unlimited   | 64 GiB            | Unlimited                 |
+
+- A hard ceiling of **64 GiB per volume** applies on every plan.
+- Creating a volume that would exceed any quota returns **HTTP 429** with the limit details.
+- If the target host has no headroom left for the requested size, create returns **HTTP 507** — retry or pick a smaller size.
+- The live quota catalog is served at `GET /v1/pricing` (`tiers[].max_volumes`, `tiers[].max_volume_size_gib`, `tiers[].max_volume_total_gib`).
+
+## Pricing
+
+Storage **within your plan's quota is free**. Provisioned storage beyond the quota bills at **$0.15 per GiB-month**, metered continuously (per-second granularity, same pipeline as compute) and drawn from the same monthly usage credit.
+
+- Billing is on **provisioned** size (what you asked for at create), not bytes written — sparse files don't reduce your bill.
+- **Managed database volumes count against the same workspace storage meter** — there is no separate database storage rate.
+- The live rate is exposed at `GET /v1/pricing` as `rates.volume_usd_per_gib_month`.
+- Month-to-date storage spend appears in `GET /v1/orgs/{id}/billing` as `mtd_storage_gib_seconds` and `mtd_storage_cost_usd` (a subset of `mtd_cost_usd`).
+
+## Limits
+
+| Limit               | Value                                          |
+| ------------------- | ---------------------------------------------- |
+| Max size per volume | 64 GiB (hard ceiling; plan quota may be lower) |
+| Max volumes / sandbox | 14 (24 minus rootfs minus reserved slots)    |
+| Max volumes / workspace | plan quota (see table above)                |
+| Filesystem          | ext4 only in v1                                |
+| Cross-host          | Host-local in v1 (use scheduler affinity)      |

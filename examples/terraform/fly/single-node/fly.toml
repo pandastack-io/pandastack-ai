@@ -1,0 +1,13 @@
+app = "pandastack-agent-single-node"
+primary_region = "ord"
+
+[build]
+  image = "ghcr.io/pandastack-io/pandastack/agent:latest"
+
+[env]
+  PANDASTACK_CONTROL_PLANE_URL = "https://api.pandastack.ai"
+
+[[vm]]
+  cpu_kind = "performance"
+  cpus = 4
+  memory = "8192mb"

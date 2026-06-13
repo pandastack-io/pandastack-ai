@@ -1,0 +1,287 @@
+---
+title: Databases
+description: Managed PostgreSQL 16 running inside dedicated Firecracker microVMs — a real, durable database provisioned in seconds.
+---
+
+<Callout type="warn">
+**Beta.** Managed Databases are in public beta. The API is stable for create / list / get / delete, but advanced features (branching, read replicas, point-in-time restore) are still in progress — see [Coming soon](#coming-soon). Don't yet rely on a single beta database as the only copy of irreplaceable production data.
+</Callout>
+
+A **database** is a managed PostgreSQL 16 instance running in its own dedicated [Firecracker microVM](/docs/concepts/sandbox-lifecycle) — not a shared schema on a multi-tenant cluster. Each database gets its own kernel, its own `postgres` process, a connection pooler, and a durable data volume. You get a native `postgres://` connection string in one API call.
+
+Unlike ordinary sandboxes, databases are **persistent**: the idle reaper never deletes them, and only an explicit `DELETE` destroys the data.
+
+## Create a database
+
+**REST**
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/databases \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"my-app-db"}'
+```
+
+**Python**
+
+```python
+import pandastack
+
+client = pandastack.Client(api_key="pds_...")
+db = client.databases.create(label="my-app-db")
+print(db["connection_url"])
+# postgres://pandastack:<pw>@<id>.db.pandastack.ai:5432/pandastack
+```
+
+**TypeScript**
+
+```typescript
+import { Client } from "@pandastack/sdk";
+
+const client = new Client({ apiKey: "pds_..." });
+const db = await client.databases.create({ label: "my-app-db" });
+console.log(db.connection_url);
+```
+
+**CLI**
+
+```bash
+pandastack db create --label my-app-db
+# → prints id + connection_url
+```
+
+Create provisions a fresh PostgreSQL VM and waits for it to publish credentials — typically 60–180s end to end (VM boot ~30–60s, then PostgreSQL bootstrap). If PostgreSQL hasn't come up within the wait window, the call still returns with `"status": "provisioning"` and an `error` hint instead of failing — poll `GET /v1/databases/{id}` until `status` is `running` and the credentials appear. On success the response includes everything you need to connect:
+
+```json
+{
+  "id": "3f95041e-0ba0-4068-8302-512e811edd60",
+  "status": "running",
+  "template": "postgres-16",
+  "label": "my-app-db",
+  "host": "3f95041e-0ba0-4068-8302-512e811edd60.db.pandastack.ai",
+  "port": 5432,
+  "database": "pandastack",
+  "username": "pandastack",
+  "password": "nUf0NrDb4zm_gQXBKhVRn-b77RKllFLq",
+  "connection_url": "postgres://pandastack:...@3f95041e-....db.pandastack.ai:5432/pandastack",
+  "broker_token": "pds_pg_M6rRbwNPp0Ed14PBEsTxw8ksDcX2jt7F",
+  "broker_url": "https://api.pandastack.ai/v1/databases/3f95041e-.../proxy"
+}
+```
+
+<Callout type="info">
+The **password is only returned at creation and from `GET /v1/databases/{id}` while the database is running**. Store the connection string in your secret manager — there is no "reset password" endpoint in beta.
+</Callout>
+
+Create fields (all optional):
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `label` | — | Human-friendly tag surfaced in `list`/`get`. |
+| `cpu` | `2` | vCPU for the database VM. |
+| `memory_mb` | `1024` | RAM for the database VM. |
+
+<Callout type="info">
+`cpu`/`memory_mb` set the VM's requested size, but the **baked `postgres-16` snapshot governs the actual guest RAM** — Firecracker can't change a snapshot's memory at restore. For larger databases, [build a custom `postgres-16`-based template](/docs/concepts/templates) baked at the size you need. PgBouncer is tuned for the default footprint.
+</Callout>
+
+## Connect
+
+There are two ways to talk to your database.
+
+### 1. Native `postgres://` (recommended)
+
+Use the `connection_url` directly with any PostgreSQL client or driver. Traffic is routed to your VM by SNI on `<id>.db.pandastack.ai` — TLS is required.
+
+```bash
+psql "postgres://pandastack:<pw>@<id>.db.pandastack.ai:5432/pandastack?sslmode=require"
+```
+
+```python
+import psycopg
+with psycopg.connect(db["connection_url"]) as conn:
+    conn.execute("CREATE TABLE IF NOT EXISTS t (id serial, name text)")
+    conn.execute("INSERT INTO t (name) VALUES (%s)", ["hello"])
+    print(conn.execute("SELECT count(*) FROM t").fetchone())
+```
+
+Connections go through **PgBouncer in transaction-pooling mode** — a good fit for serverless and many short-lived agent connections (it accepts up to 500 client connections and multiplexes them onto a small PostgreSQL pool). Because pooling is transaction-scoped, session-level features (e.g. `SET` that must persist across statements, `LISTEN`/`NOTIFY`, advisory-lock sessions, prepared statements across transactions) may not behave as on a direct connection — keep state within a single transaction.
+
+### 2. REST query broker (HTTP)
+
+For environments where you can't open a raw TCP connection (edge functions, browsers via a backend), each database exposes an HTTP query broker. The broker lives **under** the `broker_url` from your create response — query at `<broker_url>/v1/query`. Authenticate with the `broker_token` you got at creation, and pass the **`database`** name in the body (use `"pandastack"`, the database created for you — it's also the `database` field in your create response):
+
+```bash
+# $BROKER_URL is the broker_url from your create response, e.g.
+#   https://api.pandastack.ai/v1/databases/<id>/proxy
+curl -X POST "$BROKER_URL/v1/query" \
+  -H "Authorization: Bearer $BROKER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"database":"pandastack","sql":"SELECT now()"}'
+```
+
+A successful response returns the result set:
+
+```json
+{
+  "columns": [{ "name": "now", "type": "TIMESTAMPTZ" }],
+  "rows": [["2026-06-13T00:00:00Z"]],
+  "count": 1,
+  "duration_ms": 6
+}
+```
+
+<Callout type="info">
+Both `database` and `sql` are **required**. Omitting `database` returns `{"error":"database required"}` (HTTP 400); the default database provisioned with every managed instance is named **`pandastack`**.
+</Callout>
+
+All broker routes live under the same `broker_url` base and use the same `Bearer broker_token` (except `/v1/health`, which is unauthenticated):
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v1/query` | Run SQL that returns rows. Body: `{database, sql, params?, timeout_ms?, max_rows?}`. |
+| `POST /v1/exec` | Run a statement that returns no rows. Returns `{rows_affected, duration_ms}`. |
+| `POST /v1/transaction` | Run a batch of statements atomically: `{database, statements:[{sql, params?}], timeout_ms?}`. |
+| `GET /v1/health` | Liveness (no auth): `{status, postgres, ts}`. |
+| `GET /v1/info` | PostgreSQL version, installed extensions, broker version. |
+| `GET /v1/databases` | List databases in the cluster (name, encoding, size). |
+| `POST /v1/databases` | Create a database: `{name, owner?}`. |
+| `DELETE /v1/databases/{name}` | Drop a database. |
+
+Broker defaults: up to **10,000 rows** per query, **30s** query timeout (60s for transactions, max 100 statements), and a 1 MiB max SQL size — all overridable per request via `max_rows`/`timeout_ms`. The broker connects to PostgreSQL through PgBouncer, so it shares the pooled connection budget.
+
+## List, get, delete
+
+**REST**
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" https://api.pandastack.ai/v1/databases
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" https://api.pandastack.ai/v1/databases/<id>
+curl -X DELETE -H "Authorization: Bearer $PANDASTACK_TOKEN" https://api.pandastack.ai/v1/databases/<id>
+```
+
+**Python**
+
+```python
+client.databases.list()           # [{id, status, label, created_at}, ...]
+client.databases.get(db_id)       # full record incl. connection_url
+client.databases.delete(db_id)    # irreversible
+```
+
+**TypeScript**
+
+```typescript
+await client.databases.list();
+await client.databases.get(id);
+await client.databases.delete(id);
+```
+
+`list` returns metadata only (no credentials). Call `get` to retrieve the connection string for a specific database.
+
+<Callout type="warn">
+`DELETE` is **irreversible**. It destroys the VM and its data volume, and automatically deletes any GCS backup archives (WAL segments and base backups). Export anything you need with `pg_dump` first.
+</Callout>
+
+### Connection, stats, and logs
+
+Three read endpoints complement the core CRUD:
+
+```bash
+# Connection details only (host/port/database/username/password/connection_url)
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/databases/<id>/connection
+
+# Live PostgreSQL stats (connection counts, database size, activity)
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/databases/<id>/stats
+
+# Tail the PostgreSQL server log
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/databases/<id>/logs
+```
+
+## Persistence and durability
+
+- Databases are created with `persistent: true`. The idle reaper that recycles ordinary sandboxes **skips databases** — they keep running until you delete them.
+- Data lives on a dedicated volume attached to the database VM, separate from the ephemeral rootfs.
+- The database volume **counts against your workspace's plan storage quota** — same meter as [persistent volumes](/docs/concepts/volumes#plan-quotas). Storage within the quota is free; provisioned storage beyond it bills at $0.15 per GiB-month. There is no separate database storage rate.
+- In beta, a database is **pinned to the agent host it was created on** (same model as host-local [volumes](/docs/concepts/volumes)). Cross-host durability (GCP Persistent Disk + scheduler affinity) is on the roadmap.
+
+## Backups and recovery
+
+On managed deployments (where `PANDASTACK_SNAPSHOT_BUCKET` is configured), every database is **continuously and automatically protected** — no setup required:
+
+- **Continuous WAL archiving.** Each write-ahead-log segment is shipped off the host as PostgreSQL fills it (via `archive_command`), spooled, and uploaded to `gs://<bucket>/db/<id>/wal/`.
+- **Daily base backups.** A self-contained `pg_basebackup` runs every 24h to `gs://<bucket>/db/<id>/base/`, so a restore never depends on WAL older than the latest base backup.
+
+This means a failed database can be rebuilt from object storage on another host — you are not relying on the single VM's disk. (`pg_dump` is still useful for portable, point-in-time exports you control, but it is **not** the backup mechanism — archiving is automatic.)
+
+### Failover
+
+If a database enters a `failed` state (agent host crash, kernel panic), restore it onto a healthy host from the latest GCS backup. **Failover requires a multi-node deployment** — on a single-node deployment the endpoint returns `501 Not Implemented` (there's no second host to move to).
+
+**REST**
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/databases/<id>/failover \
+  -H "Authorization: Bearer $PANDASTACK_TOKEN"
+```
+
+**Python**
+
+```python
+restored_db = client.databases.failover(db_id)
+print(restored_db["connection_url"])  # same ID, new sandbox
+```
+
+**TypeScript**
+
+```typescript
+const restoredDb = await client.databases.failover(id);
+console.log(restoredDb.connection_url);
+```
+
+The database retains the same ID and connection URL — only the underlying sandbox changes. Expected recovery time is ~3 minutes (base backup download + WAL replay).
+
+**Failover availability**
+
+Before calling `failover()`, check whether a restore is possible by inspecting the `failover_available`, `failover_reason`, and `failover_eta_seconds` fields in the `GET /databases/{id}` response (only populated when `status="failed"`).
+
+Failover is available when:
+- The database status is `failed`
+- GCS archiving is enabled (`PANDASTACK_SNAPSHOT_BUCKET` configured)
+- At least one healthy agent is available in the multi-node deployment
+- A base backup archive exists in `gs://<bucket>/db/<id>/base/`
+
+If failover is unavailable (e.g., no GCS archive, single-node deployment), the `failover_reason` field explains why.
+
+## Limits (beta)
+
+| Limit                 | Value                                        |
+| --------------------- | -------------------------------------------- |
+| Engine                | PostgreSQL 16                                |
+| Default size          | 2 vCPU · 1 GiB RAM (`cpu`/`memory_mb` on create) |
+| Connection pooling    | PgBouncer (transaction mode) — up to 500 client connections |
+| Storage               | Durable per-DB volume (host-local in beta)   |
+| Connection encryption | TLS required (`sslmode=require`)             |
+| Backups               | Automatic — continuous WAL archiving + daily base backups (on managed deployments) |
+| Recovery              | Failover to latest backup (multi-node); ~3 min RTO |
+| Extensions            | pgvector, pg_stat_statements, pg_trgm, ltree, hstore, uuid-ossp, pgcrypto, unaccent (pre-installed) |
+
+## Automatic cleanup on delete
+
+When you delete a database, PandaStack automatically cleans up any GCS backup archives (WAL segments and base backups) stored in `gs://<bucket>/db/<id>/`. This ensures GDPR/data-privacy compliance — no orphaned sensitive data remains after a database is deleted.
+
+## Coming soon
+
+These database features are in progress and not yet available:
+
+- **Branching** — instant copy-on-write database branches for previews and tests (fork a database the way you [fork a sandbox](/docs/concepts/snapshots-and-forks)).
+- **Point-in-time restore** — restore to any second within the WAL retention window (failover currently restores to the latest base backup + WAL replay).
+- **Read replicas & autoscaling** — scale reads horizontally; scale compute up/down without recreating.
+- **Storage autoscaling** — volumes that grow on demand instead of a fixed size.
+- **Cross-host durability** — databases that survive agent-host replacement (GCP PD + affinity).
+- **More engines** — MySQL and Redis-compatible managed instances.
+- **Dashboard SQL console** — run queries from the [dashboard](https://app.pandastack.ai) without a local client.
+
+Want one of these sooner? Tell us in [GitHub Discussions](https://github.com/pandastack/pandastack/discussions).

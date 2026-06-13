@@ -1,0 +1,204 @@
+@import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
+
+@source "../node_modules/fumadocs-ui/dist/**/*.js";
+
+/*
+ * PandaStack brand theme (matches marketing + dashboard):
+ * light = warm off-white surfaces, ink text, electric-violet accent;
+ * dark  = ink surfaces, dark-tuned violet. Overrides the fumadocs
+ * neutral preset's --color-fd-* variables.
+ */
+:root {
+  --color-fd-background: #fafaf8;
+  --color-fd-foreground: #16161c;
+  --color-fd-muted: #f0efea;
+  --color-fd-muted-foreground: #5b5b66;
+  --color-fd-popover: #ffffff;
+  --color-fd-popover-foreground: #16161c;
+  --color-fd-card: #ffffff;
+  --color-fd-card-foreground: #16161c;
+  --color-fd-border: rgba(22, 22, 28, 0.09);
+  --color-fd-primary: #6d4aff;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #f0efea;
+  --color-fd-secondary-foreground: #16161c;
+  --color-fd-accent: rgba(22, 22, 28, 0.055);
+  --color-fd-accent-foreground: #16161c;
+  --color-fd-ring: rgba(109, 74, 255, 0.5);
+
+  /* Brand companions (marketing gradient + ink panels) */
+  --brand: #6d4aff;
+  --brand-soft: #8d6bff;
+  --brand-dim: #ece6ff;
+  --brand-pink: #d44bff;
+  --brand-amber: #ff8a3d;
+  --ink: #0e0e16;
+  --ink-border: #26263a;
+  --grid-line: rgba(22, 22, 28, 0.045);
+}
+
+.dark {
+  --color-fd-background: #09090b;
+  --color-fd-foreground: #fafafa;
+  --color-fd-muted: #18181b;
+  --color-fd-muted-foreground: #a1a1aa;
+  --color-fd-popover: #111113;
+  --color-fd-popover-foreground: #d4d4d8;
+  --color-fd-card: #111113;
+  --color-fd-card-foreground: #fafafa;
+  --color-fd-border: rgba(255, 255, 255, 0.08);
+  --color-fd-primary: #8d6bff;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #18181b;
+  --color-fd-secondary-foreground: #e4e4e7;
+  --color-fd-accent: rgba(255, 255, 255, 0.07);
+  --color-fd-accent-foreground: #e4e4e7;
+  --color-fd-ring: rgba(141, 107, 255, 0.5);
+
+  --brand: #8d6bff;
+  --brand-dim: rgba(141, 107, 255, 0.14);
+  --ink: #09090b;
+  --ink-border: #26263a;
+  --grid-line: rgba(255, 255, 255, 0.04);
+}
+
+/* neutral.css pins sidebar surfaces in dark mode — re-pin to our ink scale */
+.dark #nd-sidebar {
+  --color-fd-muted: #18181b;
+  --color-fd-secondary: #1f1f23;
+  --color-fd-muted-foreground: #a1a1aa;
+}
+
+/* Selection color */
+::selection {
+  background: rgba(109, 74, 255, 0.22);
+  color: var(--color-fd-foreground);
+}
+
+/* ---------- landing-page atoms (ported from marketing) ---------- */
+
+/* Signature brand gradient: violet → fuchsia → amber */
+.text-gradient-brand {
+  background: linear-gradient(
+    92deg,
+    var(--brand) 0%,
+    var(--brand-pink) 48%,
+    var(--brand-amber) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Subtle blueprint grid */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 56px 56px;
+}
+
+.fade-mask-b {
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+}
+
+/* Soft aurora orbs behind the hero */
+@keyframes float-orb {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50%      { transform: translate3d(0, -22px, 0) scale(1.06); }
+}
+.orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(70px);
+  pointer-events: none;
+  animation: float-orb 12s ease-in-out infinite;
+}
+
+/* Elevated cards */
+.pcard {
+  background: var(--color-fd-card);
+  border: 1px solid var(--color-fd-border);
+  border-radius: 16px;
+  box-shadow:
+    0 1px 2px rgba(22, 22, 28, 0.04),
+    0 10px 30px -12px rgba(22, 22, 28, 0.08);
+  transition: box-shadow 200ms ease, border-color 200ms ease, transform 200ms ease;
+}
+.pcard:hover {
+  border-color: rgba(109, 74, 255, 0.35);
+  box-shadow:
+    0 2px 4px rgba(22, 22, 28, 0.05),
+    0 18px 44px -14px rgba(22, 22, 28, 0.14);
+  transform: translateY(-2px);
+}
+
+/* Dark ink panel (terminal) — stays ink in both themes */
+.ink-panel {
+  background: var(--ink);
+  border: 1px solid var(--ink-border);
+  border-radius: 16px;
+  color: #e9e9f1;
+  box-shadow:
+    0 1px 2px rgba(22, 22, 28, 0.12),
+    0 24px 60px -20px rgba(22, 22, 28, 0.35);
+}
+
+/* mono pill */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: var(--brand);
+  background: var(--brand-dim);
+  border: 1px solid rgba(109, 74, 255, 0.25);
+}
+
+/* Terminal caret blink */
+@keyframes caret {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.caret { animation: caret 1.1s steps(2) infinite; }
+
+/* Animated dashed connector strokes (lifecycle diagram) */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -12; }
+}
+.flow-dash {
+  stroke-dasharray: 5 5;
+  animation: dash-flow 1.1s linear infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50%      { opacity: 1;   transform: scale(1.1); }
+}
+.pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* Soft violet glow for key numbers */
+.glow-brand {
+  text-shadow:
+    0 0 28px rgba(109, 74, 255, 0.25),
+    0 0 90px rgba(212, 75, 255, 0.12);
+}
+
+/* Section header rule */
+.rule {
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(to right, transparent, var(--color-fd-border), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb, .caret, .flow-dash, .pulse-dot { animation: none; }
+}

@@ -1,0 +1,143 @@
+---
+title: Observability
+description: Per-sandbox metrics, workspace-wide aggregates, and the ClickHouse schema behind the dashboard charts.
+---
+
+PandaStack ships first-class observability — every sandbox emits process-level metrics and lifecycle events that flow into ClickHouse, then back out through the dashboard as charts. No Grafana, no Prometheus to operate; it's built in.
+
+## What gets collected
+
+Five tables in ClickHouse, all partitioned by workspace and retained per the SLA below.
+
+| Table                      | Cardinality       | Retention | What's in it                                  |
+| -------------------------- | ----------------- | --------- | --------------------------------------------- |
+| `pandastack.sandbox_metrics` | 1 row / 10 s / sandbox | 90 days | CPU %, memory bytes, net rx/tx, disk rd/wr.   |
+| `pandastack.sandbox_events`  | 1 row / event     | 90 days | Lifecycle (`sandbox.running`, `paused`, `hibernated`, `forked`, etc.). |
+| `pandastack.boot_events`     | 1 row / create    | 90 days | `boot_ms`, `boot_mode`, `template`, `from_snapshot`. |
+| `pandastack.audit_log`       | 1 row / mutating call | 365 days | Who did what, from where, when.            |
+| `pandastack.http_requests`   | 1 row / API call  | 30 days  | Route, status, duration, request ID.          |
+
+Every row is tagged with `workspace_id`; the API rewrites every query to add `WHERE workspace_id = $jwt.workspace_id` so workspaces never see each other's data.
+
+## Per-sandbox metrics
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/metrics"
+```
+
+```json
+{
+  "pid": 12345,
+  "uptime_seconds": 482,
+  "host_cpu_percent": 4.7,
+  "host_rss_bytes": 248123392,
+  "host_vsz_bytes": 1029531648,
+  "threads": 8
+}
+```
+
+This is the live, in-the-moment view served by the agent reading `/proc/<pid>/stat` — not from ClickHouse. P95 latency ~3 ms. Useful for autoscaling decisions and dashboards.
+
+## Workspace-wide aggregates
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/metrics/overview?range=24h"
+```
+
+Returns time-series buckets for sandboxes-running, vCPU-hours used, memory-GB-hours, p50/p99 `boot_ms`. Backed by ClickHouse — works across all your hosts, not just one.
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/metrics/sandbox/$SID?range=1h"
+```
+
+Single-sandbox time series — what the dashboard's per-sandbox detail page draws.
+
+## Events stream
+
+Each lifecycle change is one row in `sandbox_events`. The full set:
+
+| Event                  | When                                            |
+| ---------------------- | ----------------------------------------------- |
+| `sandbox.running`      | Reached running state, sshd accepting.          |
+| `sandbox.ssh_ready`    | First successful SSH probe (includes `ssh_ready_ms`). |
+| `sandbox.paused`       | `pause` succeeded.                              |
+| `sandbox.resumed`      | `resume` succeeded.                             |
+| `sandbox.hibernated`   | Memory written to disk, VM stopped.             |
+| `sandbox.woken`        | Hibernated sandbox restored.                    |
+| `sandbox.forked`       | A fork child reached running.                   |
+| `sandbox.warmforked`   | A warm-fork child reached running (faster path). |
+| `sandbox.deleted`      | Rootfs purged, slot released.                   |
+| `fork.staged` / `fork.completed` / `fork.child_failed` | fork-tree progress. |
+| `fork_tree.completed` / `fork_tree.promoted` | fork-tree finished, winner picked. |
+| `vm.died`              | Firecracker process disappeared unexpectedly.   |
+| `recover.orphaned`     | Manager found a sandbox row whose VM was gone — marked failed. |
+| `recover.unmanaged`    | Manager found a Firecracker socket with no row — cleaned up. |
+
+Subscribe live:
+
+```bash
+curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/events?follow=1&tail=20"
+```
+
+Returns SSE: 20 most recent past events, then any new ones as they happen. Perfect for "wait for fork to finish" or "is the snapshot done yet" UX flows. See [Events](/docs/concepts/events) for the full schema.
+
+## Dashboard tour
+
+Three pages drive the entire UX, all backed by the above:
+
+| Page             | What it shows                                          | Data source                                |
+| ---------------- | ------------------------------------------------------ | ------------------------------------------ |
+| `/observability` | Workspace charts: sandboxes over time, p50/p99 boot, vCPU-hours, success/fail rate. | `/v1/metrics/overview` |
+| `/sandboxes/[id]`| Per-sandbox CPU / mem / net / disk time series + lifecycle event log. | `/v1/metrics/sandbox/{id}` + `/events` |
+| `/audit`         | Full audit trail with filter by actor / action / time. | `audit_log` table                          |
+| `/usage`         | Aggregated billing-grade usage: vCPU-hours, GB-hours, count of creates per template. | rollups on `sandbox_metrics` + `boot_events` |
+| `/stats`         | Boot-time histogram with template breakdown. | `boot_events` table |
+
+The charts are pure SVG (no Chart.js / D3 monster) — one Go binary, one Next.js app, no third-party telemetry stack to babysit.
+
+## Bring-your-own observability
+
+The agent also exposes a Prometheus `/metrics` endpoint on its admin port:
+
+```
+pandastack_sandboxes_total{template="code-interpreter",status="running"}  3
+pandastack_boot_ms_bucket{template="code-interpreter",le="200"}         418
+pandastack_boot_ms_sum{template="code-interpreter"}                   78213.4
+pandastack_natid_slots_used                                              42
+```
+
+OpenTelemetry traces are emitted on every API request when `OTEL_EXPORTER_OTLP_ENDPOINT` is set — point them at Tempo / Honeycomb / Datadog as you see fit. No vendor lock.
+
+## Query the warehouse directly
+
+If you self-host, every workspace can read `pandastack.*` tables directly via the ClickHouse HTTP interface:
+
+```bash
+echo "SELECT toStartOfHour(ts) h, quantile(0.5)(boot_ms) p50, quantile(0.99)(boot_ms) p99
+      FROM pandastack.boot_events
+      WHERE workspace_id = '$WS' AND ts > now() - INTERVAL 7 DAY
+      GROUP BY h ORDER BY h" \
+  | curl --data-binary @- "$CH_URL?database=pandastack"
+```
+
+This is the same query the dashboard runs. The ClickHouse cluster doubles as your analytics backplane — no separate warehouse export needed for product analytics on PandaStack usage.
+
+## Use cases
+
+**Autoscaling agent worker pools.** Subscribe to per-sandbox metrics; when p95 CPU stays >70 % for 5 min, fork a worker. The same primitives Kubernetes HPA uses, without the YAML.
+
+**Cost attribution by team.** Tag sandboxes with `metadata.team=…` at create; group ClickHouse rollups by metadata to get a per-team vCPU-hour invoice. Already wired in the `/usage` page.
+
+**SLO dashboards.** Watch p99 `boot_ms` over a 28-day window. Alert when it crosses your budget.
+
+**Post-incident forensics.** A customer's sandbox crashed at 03:14 UTC. Pull the events stream around that time, cross-reference with audit_log to see what API call preceded it, look at sandbox_metrics for the memory curve.
+
+## Limits
+
+- ClickHouse retention is the table TTL. After that, rows are deleted server-side; if you need 5-year SLA evidence, dump to S3 with `INSERT INTO FUNCTION s3(...) SELECT * FROM pandastack.audit_log` on a schedule.
+- Charts in the dashboard query buckets, not raw rows. For >1 M-row analytical queries, prefer the direct CH interface.
+- Metric write path is best-effort: if ClickHouse is down, the agent buffers ~5 min then drops the oldest. Critical events go to `events.jsonl` on the host as a backup.

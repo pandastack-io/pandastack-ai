@@ -1,0 +1,18 @@
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY api/go.mod api/go.sum ./api/
+RUN cd api && go mod download
+COPY api ./api
+ARG SEMVER=v0.0.0-docker
+ARG COMMIT=unknown
+ARG BTIME=unknown
+RUN cd api && CGO_ENABLED=0 go build \
+    -ldflags "-X main.semver=${SEMVER} -X main.commit=${COMMIT} -X main.buildTime=${BTIME}" \
+    -o /out/pandastack-api ./cmd/api
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates wget
+COPY --from=build /out/pandastack-api /usr/local/bin/pandastack-api
+ENV PANDASTACK_LISTEN=0.0.0.0:8080
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/pandastack-api"]

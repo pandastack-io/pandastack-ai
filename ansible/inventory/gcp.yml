@@ -1,0 +1,44 @@
+---
+# Dynamic inventory: discover the live agent fleet from GCP at runtime so the
+# playbooks always target whatever VMs the MIG/autoscaler currently has — no
+# hand-maintained host list, survives scale-out/scale-in and VM recreation.
+#
+# Auth: Application Default Credentials.
+#   - local : `gcloud auth application-default login` (already present here)
+#   - CI    : Workload Identity Federation via google-github-actions/auth@v2
+#
+# Verify with:  ansible-inventory -i inventory/gcp.yml --graph
+plugin: google.cloud.gcp_compute
+
+projects:
+  - 
+
+zones:
+  - us-central1-a
+  - us-central1-b
+
+auth_kind: application
+
+# Only RUNNING agent VMs. The name prefix matches the MIG base instance name
+# (pandastack-agent-*) — same filter release.yml uses to roll the fleet.
+filters:
+  - status = RUNNING
+
+# Address each host by its instance name; the IAP ProxyCommand resolves the
+# rest. (We never rely on a public IP — agents don't have one.)
+hostnames:
+  - name
+
+keyed_groups:
+  - key: zone
+    prefix: zone
+    separator: _
+
+groups:
+  agents: "'pandastack-agent' in name"
+
+compose:
+  ansible_host: name
+  # Surfaced to the IAP ProxyCommand (3rd arg) so we skip a per-connection
+  # zone lookup. May arrive as a full URL; iap-proxy.sh trims it.
+  pandastack_zone: zone

@@ -1,0 +1,27 @@
+---
+# Connectivity smoke test: proves the dynamic inventory + IAP tunnel + SSH key
+# + sudo all work, and reports each node's current firecracker/agent state.
+# Run:  ansible-playbook playbooks/ping.yml
+- name: Agent fleet connectivity check
+  hosts: agents
+  gather_facts: false
+  tasks:
+    - name: Ping over IAP
+      ansible.builtin.ping:
+
+    - name: Collect versions
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "host=$(hostname)"
+        echo "fc=$(firecracker --version 2>/dev/null | head -1)"
+        echo "agent_sha=$(sha256sum /usr/local/bin/pandastack-agent 2>/dev/null | cut -d' ' -f1)"
+        echo "agent_state=$(systemctl is-active pandastack-agent 2>/dev/null)"
+        echo "fc_running=$(pgrep -c firecracker || true)"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: ver
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: "{{ ver.stdout_lines }}"

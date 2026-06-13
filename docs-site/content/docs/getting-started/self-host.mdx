@@ -1,0 +1,41 @@
+---
+title: Self-host overview
+description: Run PandaStack on your own infrastructure — GCP, AWS, Mac M1, or bare metal.
+---
+
+PandaStack is split into a control plane, agents, and Firecracker-based sandbox hosts. Self-hosting means running those services yourself and pointing clients at your API endpoint.
+
+## Client configuration
+
+Use the same SDKs and CLI against your endpoint:
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+For a private deployment, replace `PANDASTACK_API` with your HTTPS API origin.
+
+## Build the CLI
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack/cmd/pandastack
+go build -o /usr/local/bin/pandastack ./
+```
+
+## Smoke test
+
+```bash
+pandastack auth whoami
+pandastack template list
+pandastack sandbox create --template base --ttl 1h
+pandastack sandbox list
+```
+
+## Related deployment guides
+
+- [Deploy on-prem](/docs/deploy/deploy-on-prem)
+- [Deploy on Mac (M1/M2/M3)](/docs/deploy/deploy-mac-m1)
+
+The CLI does not include `deploy` subcommands; deployment automation lives outside the `pandastack` command surface.

@@ -1,0 +1,98 @@
+---
+title: Fork & Copy-on-Write
+description: How a fork-tree of 10 children boots in ~400 ms each — memory CoW via Firecracker, rootfs CoW via XFS reflink.
+---
+
+`POST /v1/sandboxes/{id}/fork` produces a new sandbox whose initial state is a byte-perfect copy of the parent — same processes, same open file descriptors, same `pip`-installed packages, same in-memory variables. We do it in ~400–750 ms per child, in parallel.
+
+Two CoW layers make it possible.
+
+## Layer 1: memory CoW (Firecracker snapshot)
+
+We don't actually duplicate the parent's RAM. We:
+
+1. Pause the parent (~5 ms).
+2. Write the parent's memory to `vm.mem` (this is a copy of the RAM out to disk — the only expensive step, ~30 ms for 256 MiB to NVMe).
+3. Capture device state to `vm.state`.
+4. Resume the parent (~5 ms).
+5. For each child, fork+exec a fresh Firecracker process and `mmap` `vm.mem` with `MAP_PRIVATE`.
+
+`MAP_PRIVATE` is the magic. The child's address space shares physical pages with `vm.mem` until it *writes*, at which point the kernel does a single-page copy (CoW). Two children writing different parts of memory don't fight each other; they each pay only for the pages they actually modify.
+
+A 256-MiB parent that has 60 MiB of "warm" working set produces N children that collectively cost roughly `60 MiB × N` of RSS, not `256 MiB × N`. On `n2-standard-4` (16 GiB), this lets you fan out a fork-tree of 20–40 children comfortably.
+
+## Layer 2: rootfs CoW (XFS reflink)
+
+The parent's disk image is `<data-dir>/vms/<parent>/rootfs.ext4`. For each child:
+
+```
+cp --reflink=always parent/rootfs.ext4 child/rootfs.ext4
+```
+
+XFS reflink (also works on btrfs, and on macOS APFS — but our production hosts are XFS) creates a new inode that *shares all blocks* with the original. Writes go through CoW at the block level. The `cp --reflink` itself is O(metadata), measured in single-digit milliseconds for multi-GB images.
+
+The child sees an identical filesystem; its writes are private. The parent's writes are also private to it. Neither can observe the other after the fork.
+
+## Time-travel fork (cross-host)
+
+The above describes same-host fork. PandaStack also supports **cross-host fork-from-snapshot** — fork a parent that lives on agent A into a child on agent B, by:
+
+1. Uploading the parent's snapshot tuple `(vm.mem, vm.state, rootfs.ext4, meta.json)` to GCS during the parent's snapshot creation (sync, ~8 s).
+2. On the destination agent, lazy-download the tuple under a per-snapshot mutex (so 20 concurrent forks of the same parent download once).
+3. Build the network around the snapshot's *baked* identity (see [snapshot & restore](/docs/internals/snapshot-restore)).
+4. `mmap` and resume.
+
+Cross-host fork takes ~1.2–3.5 s end-to-end including download. Same-host fork is ~400–750 ms because there's no GCS round-trip.
+
+This is "time-travel" because you can fork from a snapshot taken **N hours ago** — a true time-travel debugger or "what if I had taken branch B 10 min ago" exploration.
+
+## Fork-tree
+
+`POST /v1/sandboxes/{id}/fork-tree {count: N}` does the parent snapshot **once**, then spawns N children in parallel. The single snapshot capture amortizes; children share GCS-download work via the per-snapshot mutex.
+
+Each child is created with `metadata.fork_tree_id = <uuid>` so you can:
+
+1. Run an experiment in each child (`pip install candidate-version-X; pytest`).
+2. Pick the winner.
+3. `POST /v1/sandboxes/<winner>/promote {tree_id, cleanup_siblings:true}` — winner survives, siblings are deleted in one call.
+
+Production-verified: 10 concurrent forks across 2 agents, 10/10 success, marker file preserved on every child.
+
+## Warm-fork
+
+If the parent's template has a baked seed on the agent, "fork" doesn't even need a parent snapshot — the warm-fork path restores a fresh VM from the template seed, then `rsync`s the parent's `/workspace` delta into it. This is ~300 ms (mostly the rsync), because the seed restore is the same fast path as every create.
+
+Used automatically when:
+
+- The parent and the requested child are the same template.
+- The template's baked seed is present on the agent.
+- The parent has been modified less than ~64 MiB of files since boot.
+
+Falls back to memory-CoW fork transparently otherwise.
+
+## What this enables
+
+- **Speculative LLM exploration.** Run 10 candidate code-edits in parallel, pick the one whose tests pass.
+- **Multi-tenant agent scratch space.** Per-conversation forks of a "warm Python with packages installed" parent — child cleanup is just `Delete`.
+- **Time-travel debugging.** Snapshot before each agent decision; rewind by forking from any past snapshot.
+- **Hyperparameter sweeps.** 50 forks, each with a different `learning_rate`, all from one parent that already loaded the dataset.
+
+## Why CoW is the only sane primitive
+
+The naïve alternative ("just create 10 new sandboxes from the template") loses everything the parent did since boot — installed packages, downloaded data, in-memory caches. Re-running setup 10× is wasteful and slow.
+
+Snapshotting + CoW lets you bottle the post-setup state and pour copies of it as fast as you can fork+exec FC.
+
+## Files
+
+- `agent/internal/api/fork.go` — `/fork` and `/fork-tree` handlers.
+- `agent/internal/sandbox/manager.go` — `forkFromSnapshot`, `warmFork`, the reflink rootfs step.
+- `agent/internal/snapstore/` — per-snapshot download mutex (the thing that prevents 10 concurrent forks from racing on `gsutil cp`).
+- `infra/cloud-init/user-data-agent.sh` — `mkfs.xfs -m reflink=1` on the data partition (this is the prereq).
+
+## Limits
+
+- Each child is its own VM — costs an FC process, a netns, a NATID slot.
+- Memory CoW shares pages until written; if your workload mutates the entire working set immediately, you'll pay almost `N×` memory.
+- Reflink requires XFS (with `reflink=1`) or btrfs. ext4 will fall back to a full `cp`, which is multi-second for big rootfs.
+- The parent must be paused for the snapshot duration. We unpause as soon as `vm.state` is written (~35 ms), so this is rarely user-visible.

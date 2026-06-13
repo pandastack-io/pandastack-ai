@@ -1,0 +1,139 @@
+# Pandastack on Linux+KVM — single host self-host.
+#
+# Usage:
+#   1. Host must be Linux x86_64/arm64 with /dev/kvm available.
+#   2. Drop a Firecracker kernel at ./data/kernels/vmlinux-aarch64 (or x86_64).
+#   3. Drop at least one template at ./data/templates/<name>/{rootfs.ext4,kernel}.
+#   4. docker compose up -d
+#   5. Open http://localhost:3000
+#
+# This composition is intentionally minimal — production deployments will
+# split agent and api onto separate hosts and add TLS + reverse proxy.
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.agent
+    image: pandastack/agent:latest
+    container_name: pandastack-agent
+    privileged: true  # needs CAP_NET_ADMIN + /dev/kvm + tap creation
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    volumes:
+      - ./data:/var/lib/pandastack
+      - /var/run/pandastack:/var/run/pandastack
+    environment:
+      - PANDASTACK_AGENT_LISTEN=0.0.0.0:9090
+      - PANDASTACK_DATA_DIR=/var/lib/pandastack
+      - PANDASTACK_METRICS_LISTEN=0.0.0.0:9100
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=pandastack-agent
+    ports:
+      - "9090:9090"
+      - "9100:9100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    image: pandastack/api:latest
+    container_name: pandastack-api
+    depends_on:
+      agent:
+        condition: service_healthy
+    environment:
+      - PANDASTACK_AGENT_URL=http://agent:9090
+      - PANDASTACK_LISTEN=0.0.0.0:8080
+      - PANDASTACK_METRICS_LISTEN=0.0.0.0:9101
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_SERVICE_NAME=pandastack-api
+      # Bootstrap a single admin token at first boot; rotate via /v1/admin/tokens.
+      - FCSANDBOX_ADMIN_TOKEN=${PANDASTACK_ADMIN_TOKEN:-changeme-admin}
+    volumes:
+      - ./data/api:/root/.fcsandbox
+    ports:
+      - "8080:8080"
+      - "9101:9101"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.dashboard
+    image: pandastack/dashboard:latest
+    container_name: pandastack-dashboard
+    depends_on:
+      - api
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8080
+      - NEXT_PUBLIC_GRAFANA_URL=http://localhost:3030
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: pandastack-otel-collector
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./deploy/monitoring/otel-collector/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter (otelcol_* metrics)
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pandastack-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./deploy/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: pandastack-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_SECURITY_COOKIE_SAMESITE=none
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/pandastack.json
+    volumes:
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3030:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

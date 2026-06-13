@@ -1,0 +1,21 @@
+name: Local E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 9 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  mac-local-e2e:
+    name: mac-local-e2e
+    runs-on: macos-13
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run local E2E
+        run: |
+          echo "GitHub-hosted macOS runners may be Intel. Apple Silicon runners should be used when available; Intel runs are best-effort and may only validate orchestration."
+          bash scripts/mac-local-e2e.sh

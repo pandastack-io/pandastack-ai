@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PANDASTACK_CONTROL_PLANE_URL='${control_plane_url}'
+export PANDASTACK_NODE_TOKEN='${node_token}'
+
+apt-get update
+apt-get install -y curl ca-certificates jq linux-tools-common
+
+install -d -m 0755 /opt/pandastack
+cat >/opt/pandastack/agent.env <<ENV
+PANDASTACK_CONTROL_PLANE_URL=${control_plane_url}
+PANDASTACK_NODE_TOKEN=${node_token}
+ENV
+chmod 0600 /opt/pandastack/agent.env
+
+# Replace this placeholder with a pinned release artifact once published.
+curl -fsSL https://raw.githubusercontent.com/pandastack-io/pandastack/main/scripts/install-agent.sh | bash || true
+
+systemctl enable --now pandastack-agent || true

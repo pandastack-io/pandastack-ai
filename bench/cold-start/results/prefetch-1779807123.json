@@ -1,0 +1,185 @@
+{
+  "started_at": "2026-05-26T20:22:03.93506+05:30",
+  "finished_at": "2026-05-26T20:23:12.902833+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 20,
+  "successes": 20,
+  "failures": 0,
+  "boot_p50_ms": 0,
+  "boot_p90_ms": 0,
+  "boot_p99_ms": 0,
+  "boot_p99_9_ms": 0,
+  "boot_min_ms": 0,
+  "boot_max_ms": 0,
+  "wall_p50_ms": 2,
+  "wall_p99_ms": 104.66999999999999,
+  "boot_modes": {
+    "warmpool": 20
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3148,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3103,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3187,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3092,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 0,
+      "wall_ms": 4,
+      "delete_ms": 3200,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 0,
+      "wall_ms": 4,
+      "delete_ms": 3119,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 0,
+      "wall_ms": 125,
+      "delete_ms": 3120,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3110,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3124,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3082,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3147,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3091,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 3109,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3094,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 14,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3070,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 3151,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 16,
+      "boot_ms": 0,
+      "wall_ms": 6,
+      "delete_ms": 3098,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3178,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 0,
+      "wall_ms": 18,
+      "delete_ms": 3095,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 3139,
+      "boot_mode": "warmpool",
+      "ok": true
+    }
+  ]
+}

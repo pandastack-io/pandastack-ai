@@ -1,0 +1,131 @@
+---
+title: Templates
+description: Pre-baked rootfs images used to boot sandboxes — from a universal apps runtime to a 4 GB browser-automation stack.
+---
+
+A **template** is a snapshot-ready root filesystem with a pinned kernel. When you `Sandbox.create({ template: "..." })`, the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at [~179 ms](/docs/concepts/performance) instead of "boot a kernel from scratch".
+
+Templates are immutable and content-addressed: once a snapshot exists for `code-interpreter@v3`, every sandbox boots from the same bytes.
+
+## Official catalog
+
+PandaStack ships 5 production templates. All names are stable and accepted by `template:` in the SDKs and `--template` in the CLI.
+
+CPU and memory are **baked into each template** at build time — they are a property of the snapshot, not a per-launch knob. Pick a template that matches the size you want, or [bake your own](#bake-your-own) with `--cpu` and `--memory-mb`.
+
+| Template            | Base                          | vCPU | Memory | Size   | What's inside                                                                                       |
+| ------------------- | ----------------------------- | ---- | ------ | ------ | --------------------------------------------------------------------------------------------------- |
+| `base`              | Ubuntu 24.04 + mise           | 2    | 2 GB   | 2 GB   | Universal apps runtime — Node 22, Python 3.12, Go, Bun via mise. The default for apps & general use. |
+| `code-interpreter`  | Python 3.11 + Node 22         | 2    | 2 GB   | 2 GB   | pandas, numpy, matplotlib, scipy, scikit-learn, jupyter, playwright, openai-agents. LLM tool-use, data analysis, Functions, agents. |
+| `agent`             | Ubuntu 24.04 + Node 22        | 2    | 2 GB   | 2 GB   | Every public coding-agent CLI in one image: `claude-code`, `codex`, `opencode`. Pick one via its API key. |
+| `browser`           | Ubuntu 24.04 + Chromium       | 4    | 4 GB   | 4 GB   | Headless Chromium + Playwright + crawl4ai. Scraping, RPA, screenshots, LLM-friendly web extraction.  |
+| `postgres-16`       | Ubuntu 24.04 + PGDG           | 2    | 1 GB   | 2 GB   | Managed PostgreSQL 16 + pgvector + pgbouncer on a durable volume.                                    |
+
+Every template autostarts `sshd` and the `pandastack-agent` systemd unit. When you deploy an app on the `base` runtime, its dev/start command runs via `pandastack-autostart.service`, so the [preview URL](/docs/concepts/preview-urls) works the instant the sandbox is `running`.
+
+<Callout type="warn">
+  Older SDKs accepted `cpu` and `memory_mb` arguments on `Sandbox.create(...)`. Those arguments are now **deprecated and ignored** — the server always uses the template's baked size. Pass them and you'll get a deprecation warning; the sandbox will still launch at the template's size. To run at a different size, bake a new template.
+</Callout>
+
+## Picking a template
+
+| If you're doing…                                  | Use…                  |
+| ------------------------------------------------- | --------------------- |
+| Running apps — Node / Python / Go / Bun            | `base`                |
+| LLM tool calling, data analysis, Jupyter-style    | `code-interpreter`    |
+| Running Claude Code / Codex / OpenCode as an agent | `agent`              |
+| Browser automation, scraping, screenshots, crawling | `browser`           |
+| Managed PostgreSQL 16 with pgvector               | `postgres-16`         |
+| Anything custom                                    | bake your own (below) |
+
+## Bake your own
+
+Templates are just Dockerfiles plus a CPU/memory spec and a size limit. Start from any Dockerfile (e.g. fork `templates/base/Dockerfile`), edit, and run:
+
+```bash
+pandastack template build \
+  -f Dockerfile \
+  -n my-template \
+  --cpu 4 \
+  --memory-mb 4096 \
+  --size-mb 2048
+```
+
+`--cpu` and `--memory-mb` are baked into the snapshot and will be the size of every sandbox launched from this template. To change them later, rebuild with `--replace`.
+
+```python
+from pandastack import Client
+client = Client()
+build = client.templates.build(
+    name="my-template",
+    rootfs=open("Dockerfile.tar", "rb"),
+    cpu=4,
+    memory_mb=4096,
+    size_mb=2048,
+)
+print(build.id, build.status)
+```
+
+```ts
+const build = await client.templates.build({
+  name: "my-template",
+  rootfs: "/path/to/Dockerfile.tar",
+  cpu: 4,
+  memoryMb: 4096,
+  sizeMb: 2048,
+});
+```
+
+The build pipeline:
+
+1. Snapshots your Dockerfile context.
+2. Runs the build inside a privileged sandbox (Buildah).
+3. Exports the rootfs to a sparse ext4 image of `size_mb` MB.
+4. Boots the image once under Firecracker, takes a memory + disk snapshot.
+5. Registers the snapshot under `my-template` — instantly available for `Sandbox.create`.
+
+Track progress:
+
+```bash
+pandastack template build-status <build_id>
+```
+
+```python
+client.templates.get_build(build_id)
+```
+
+A typical 2 GB template takes 60–90 s end-to-end; a 4 GB one takes 2–3 min.
+
+## Versioning and pinning
+
+`template: "code-interpreter"` resolves to the latest snapshot tagged `code-interpreter`. To pin, pass the snapshot ID directly:
+
+```ts
+await Sandbox.create({ fromSnapshot: "snap-019fe18f-…" });
+```
+
+Useful for reproducibility: tie a release of your agent to a known template snapshot, regardless of what the cloud rolls out later.
+
+## CLI
+
+```bash
+pandastack template list
+pandastack template get code-interpreter
+pandastack template build -f Dockerfile -n my-template --size-mb 2048
+pandastack template delete my-template
+pandastack template builds                 # all recent build jobs
+pandastack template build-status <id>      # poll a single one
+
+pandastack sandbox create --template code-interpreter --ttl 1h
+```
+
+## REST equivalents
+
+```http
+GET    /v1/templates
+GET    /v1/templates/{name}
+POST   /v1/templates/build               (multipart: name, size_mb, cpu, memory_mb, kernel?, rootfs; ?replace=true to overwrite)
+DELETE /v1/templates/{name}              (also clears the cached snapshot)
+GET    /v1/templates/builds
+GET    /v1/templates/builds/{id}
+```

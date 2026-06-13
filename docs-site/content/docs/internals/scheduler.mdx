@@ -1,0 +1,97 @@
+---
+title: Scheduler
+description: How the API picks an agent for each create — load-spreading score, streaming tiebreaker, leases, NATID partitioning, and zombie reaping.
+---
+
+PandaStack has a tiny global scheduler — a handful of SQL queries plus a deterministic scoring function — that picks the right agent host for every create. It's not Kubernetes; it doesn't need to be. The whole thing fits in one file.
+
+## The decision
+
+```
+score(agent) =
+    0.6 × free_cpu(agent)
+  + 0.3 × free_mem_gb(agent)
+  + 5.0 × (stream_restore_enabled ? 1 : 0)
+```
+
+Whichever agent scores highest wins the create. Agents that fail the resource floor (requested CPU/RAM doesn't fit in free capacity) are excluded before scoring.
+
+Every create takes the same snapshot-restore fast path on any agent that has the template's seed, so placement is purely a **load-spreading** decision: prefer the host with the most free CPU (memory as a secondary term). The `+5.0` streaming bonus is a tiebreaker — an agent with UFFD streaming restore boots a template it has never seen without first downloading the whole `vm.mem`, so among otherwise-equal hosts it wins.
+
+## Inputs (all from Postgres)
+
+| Field                     | Source                                              | Freshness      |
+| ------------------------- | --------------------------------------------------- | -------------- |
+| `cpu_total` / `cpu_used`  | `agents.capacity_json`                              | 10 s heartbeat |
+| `memory_mb_total` / `memory_mb_used` | `agents.capacity_json`                   | 10 s           |
+| `stream_restore_enabled`  | `agents.capacity_json`                              | 10 s           |
+| stale heartbeat           | `now() - last_heartbeat > 30 s` → agent excluded    | computed       |
+
+An in-memory cache sits in front of the agents query. At 1000 RPS we don't want to slam Postgres for the same answer.
+
+## Leases (sandbox ownership)
+
+Once a sandbox is created, a row in the `leases` table records which agent owns it. Subsequent requests for that sandbox bypass scoring entirely: the edge looks up the lease (in-memory cache first, then Postgres) and proxies straight to the owning agent. Expired leases are swept by the agent's lease sweeper, which also flips orphaned sandbox rows to `failed`.
+
+This is **the** mechanism for "an agent went away (host died, network partition, OOM kill)" — stale agents drop out of the candidate list in ≤30 s, and their dead sandboxes are reconciled by the sweeper.
+
+## NATID partitioning
+
+NATID slots are a per-agent resource (16,384 per agent, see [networking](/docs/internals/networking)). The scheduler doesn't move sandboxes between agents to balance NATID — the binding constraint in practice is host memory/CPU, which the score already spreads.
+
+## Zombie reaping
+
+A reconciliation loop in each agent compares its DB rows to its live Firecracker processes (see [snapshot & restore: recovery](/docs/internals/snapshot-restore)), and a startup sweep removes leases pointing at sandboxes the agent no longer has. The scheduler trusts these — it never tries to second-guess what's actually running on a host.
+
+## Affinity
+
+Two affinities exist:
+
+1. **Volume affinity.** If `create` references a volume by name, the scheduler restricts candidates to agents that already have that volume file on disk. (Volumes are host-local in v1.)
+2. **Fork affinity.** `POST /fork` defaults to placing the child on the parent's agent (memory + rootfs are already there). Pass `?cross_host=1` to opt into the cross-host path; the scheduler picks the best other agent.
+
+No labels, no taints, no node selectors. Either the volume is here, or it isn't.
+
+## Walked example
+
+A `code-interpreter` create (2 vCPU / 2 GiB) lands on the API gateway. The scheduler lists fresh agents:
+
+| agent_id  | free_cpu | free_mem_gb | streaming |
+| --------- | -------- | ----------- | --------- |
+| `pz20`    | 2        | 6           | yes       |
+| `n1v2`    | 14       | 24          | yes       |
+
+Scores:
+
+- `pz20`: `0.6×2  + 0.3×6  + 5 = 1.2 + 1.8 + 5 = 8.0`
+- `n1v2`: `0.6×14 + 0.3×24 + 5 = 8.4 + 7.2 + 5 = 20.6`
+
+Pick `n1v2`. POST `/v1/sandboxes` is forwarded to its admin endpoint. Done — ~1 ms of scheduling, then the snapshot restore runs inside the agent.
+
+## What can go wrong
+
+| Failure                  | What scheduler does                                       |
+| ------------------------ | --------------------------------------------------------- |
+| Picked agent 5xxs        | Gateway retries on the next-best agent (one retry max).   |
+| All agents stale         | 503 to caller; autoscaler should bring up a new host.     |
+| Capacity view stale (heartbeat lag) | Worst case: a slightly busier host gets picked. Restore cost is identical everywhere, so it's a latency non-event. |
+| Network partition        | Scheduler keeps using its cached view, agent keeps serving locally; stale-heartbeat exclusion catches it within 30 s. |
+
+## Why so simple
+
+Two reasons:
+
+1. **The hard part isn't picking the right host — it's making every create fast.** When every agent restores the same seed through the same fast path, scheduling is a 1 ms load-spreading preference, not a contract.
+2. **State is the bottleneck, not compute.** A million-line scheduler with thousands of node features doesn't help when the actual constraints are "does the request fit?" and "is the seed here?".
+
+## Files
+
+- `api/internal/scheduler/scheduler.go` — score function + candidate query + lease cache.
+- `api/cmd/api/multinode.go` — retry logic, agent dispatch.
+- `infra/terraform/modules/gcp-agent-mig/main.tf` — `google_compute_region_autoscaler.agent` (the layer above the scheduler — adds/removes hosts).
+
+## Known limits
+
+- Single global scheduler shard (it's a stateless function over a Postgres view; sharding is trivial when needed but not yet useful).
+- 10 s heartbeat means the capacity view is up to 10 s stale. Acceptable: a mis-pick costs nothing because every host restores at the same speed.
+- No bin-packing of large `(cpu, mem)` requests. Edge cases visible only at >70 % cluster fullness; autoscaler keeps us well under.

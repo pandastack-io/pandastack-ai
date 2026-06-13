@@ -1,0 +1,59 @@
+---
+# Idempotent Firecracker install — mirrors cloud-init/user-data-agent.sh so a
+# NEW node (cloud-init) and an EXISTING node (this role) converge on the exact
+# same binaries. Only does work when the installed version differs.
+
+- name: Check installed firecracker version
+  ansible.builtin.command: "{{ firecracker_bin }} --version"
+  register: fc_current
+  changed_when: false
+  failed_when: false
+
+- name: Install/upgrade firecracker {{ firecracker_version }}
+  when: "firecracker_version not in (fc_current.stdout | default(''))"
+  block:
+    - name: Ensure source dir exists
+      ansible.builtin.file:
+        path: "{{ firecracker_src_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download firecracker release tarball
+      ansible.builtin.get_url:
+        url: "{{ firecracker_release_url }}"
+        dest: "{{ firecracker_src_dir }}/firecracker-v{{ firecracker_version }}-{{ firecracker_arch }}.tgz"
+        mode: "0644"
+      register: fc_download
+      retries: 5
+      delay: 5
+      until: fc_download is succeeded
+
+    - name: Extract firecracker tarball
+      ansible.builtin.unarchive:
+        src: "{{ firecracker_src_dir }}/firecracker-v{{ firecracker_version }}-{{ firecracker_arch }}.tgz"
+        dest: "{{ firecracker_src_dir }}"
+        remote_src: true
+
+    - name: Install firecracker binary
+      ansible.builtin.copy:
+        src: "{{ firecracker_src_dir }}/release-v{{ firecracker_version }}-{{ firecracker_arch }}/firecracker-v{{ firecracker_version }}-{{ firecracker_arch }}"
+        dest: "{{ firecracker_bin }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install jailer binary
+      ansible.builtin.copy:
+        src: "{{ firecracker_src_dir }}/release-v{{ firecracker_version }}-{{ firecracker_arch }}/jailer-v{{ firecracker_version }}-{{ firecracker_arch }}"
+        dest: "{{ jailer_bin }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+- name: Verify firecracker reports the expected version
+  ansible.builtin.command: "{{ firecracker_bin }} --version"
+  register: fc_verify
+  changed_when: false
+  failed_when: "firecracker_version not in fc_verify.stdout"

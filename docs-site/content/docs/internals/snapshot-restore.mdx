@@ -1,0 +1,92 @@
+---
+title: Snapshot & Restore
+description: How a sandbox boots in 179 ms — the path from snapshot file on disk to sshd accepting connections.
+---
+
+PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux **once** at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we `mmap` that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is **179 ms** and p99 is **203 ms** on bare-metal Intel Cascade Lake.
+
+This page walks the full path, end to end.
+
+## The artifacts on disk
+
+For each template (e.g., `code-interpreter`) we keep three files on the host:
+
+| File                    | What it is                                                   | Size                |
+| ----------------------- | ------------------------------------------------------------ | ------------------- |
+| `template/rootfs.ext4`  | Per-template root filesystem.                                | 1–4 GB              |
+| `template-snaps/<t>/vm.mem`   | Raw memory image of the booted VM.                     | = VM RAM (e.g. 256 MiB) |
+| `template-snaps/<t>/vm.state` | Firecracker device + CPU state.                        | ~20 KiB             |
+| `template-snaps/<t>/meta.json` | Baked guest identity (IP/MAC/tap-host-IP).            | ~200 B              |
+
+The triple `(rootfs, vm.mem, vm.state)` is a frozen, "post-boot" snapshot. We took it once with `PauseVM` + `CreateSnapshot` against a real boot of `vmlinux + rootfs`.
+
+## What "baked identity" means
+
+A Firecracker snapshot captures the kernel's view of the world — including the tap device's MAC, the guest's IP address, the default gateway. If you restore that snapshot into a new tap with a *different* MAC or IP, the kernel doesn't notice — it just keeps using the old ones, ARP fails, networking is dead.
+
+Solution: bake the identity at snapshot time, and on every restore, build the network around the snapshot. `meta.json` records:
+
+```json
+{
+  "baked_tap_host_ip": "172.20.6.1",
+  "baked_guest_ip":    "172.20.6.118",
+  "baked_mac":         "06:00:AC:14:06:76"
+}
+```
+
+We pre-allocate the tap, configure it with the baked host IP, set the tap MAC to match, then start the snapshot. The kernel inside the VM never knows it's on a different host than it booted on.
+
+This is the trick that makes cross-host time-travel fork work — see [fork-cow](/docs/internals/fork-cow).
+
+## The 179 ms walk
+
+```
+t=0       create request enters agent
+   │
+   ├──── pick a slot (NATID pool)            ~1 ms
+   ├──── create netns + veth /30             ~6 ms
+   ├──── add iptables NAT rules              ~3 ms
+   ├──── create tap inside netns             ~2 ms
+   ├──── reflink-copy rootfs.ext4            ~4 ms
+   │
+   ├──── fork() + exec firecracker binary    ~25 ms
+   ├──── HTTP POST /machine-config           ~3 ms
+   ├──── HTTP PUT  /snapshot/load            ~80 ms  (mmap vm.mem; load CPU state)
+   ├──── HTTP PUT  /snapshot/state Resume    ~6 ms
+   ├──── poll TCP :22 on guest IP            ~40 ms  (sshd was already up in the snapshot)
+   │
+   └── return sandbox JSON  (boot_ms ≈ 179)
+```
+
+This is the path **every create** takes — there is no warm pool of idle VMs and no separate fast/slow tier. The only slower case is the very first create of a template on a host, which does a full cold boot (~3 s) and bakes the snapshot as a side effect; every subsequent create restores it.
+
+## Why `/snapshot/load` is so cheap
+
+`vm.mem` is just a file. Firecracker `mmap`s it with `MAP_PRIVATE` — no copy happens, the kernel will page-in 4 KiB chunks lazily on first access. For our 256 MiB code-interpreter snapshot, the entire load is the cost of one syscall plus configuring the vCPU registers.
+
+**Counter-intuitive corollary**: a 1 GiB snapshot loads in the same wall-clock time as a 256 MiB one. You pay the cost as the guest *executes* and touches new pages. Production workloads that re-use the same hot pages over and over (web servers, interpreters) have effectively no resident-set difference.
+
+## Recovery and crash safety
+
+After a host reboot or agent crash, we have rootfs files and snapshot files on disk but no live VMs. The reconciliation loop:
+
+1. Read sandbox rows from Postgres.
+2. For each, attempt to `kill -0 <fc_pid>` from the row.
+3. If the process is gone, emit `recover.orphaned` (mark sandbox `failed`).
+4. Walk `<data-dir>/vms/*` for any Firecracker socket with no matching DB row → emit `recover.unmanaged` and kill it.
+
+State is durable, processes are not. We rely on the snapshot-restore primitive to bring back anything you ask for via `wake`.
+
+## Single biggest win
+
+In a traditional VM stack, "cold start" is `~1 s` and "warm start" is "you keep VMs around". We made cold start = warm start, because the snapshot **is** the warm state.
+
+The result that surprises people: under heavy load, our p99 is *better* than our p50 on competitors — because we're not running any boot-time code at all. There's no kernel init, no `systemd-fstab-generator`, no `cloud-init`. Those all ran once at bake; the snapshot captures the universe afterward.
+
+## Files
+
+- `agent/internal/sandbox/manager.go` — the orchestration `createImpl` and `restoreFromSnapshot*` functions.
+- `agent/internal/snapstore/` — meta.json round-trip + per-id download mutex for cross-host fetch.
+- `agent/internal/network/natid.go` — pre-allocated NATID slots (the reason netns+tap take 11 ms not 200 ms).
+
+Read those if you want the canonical answers. This page is a walkthrough; the code is the spec.

@@ -1,0 +1,24 @@
+# Multi-stage build for the Pandastack guest agent (Linux only).
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY agent/go.mod agent/go.sum ./agent/
+RUN cd agent && go mod download
+COPY agent ./agent
+ARG SEMVER=v0.0.0-docker
+ARG COMMIT=unknown
+ARG BTIME=unknown
+RUN cd agent && CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/pandastack/agent/internal/api.semver=${SEMVER} \
+              -X github.com/pandastack/agent/internal/api.commit=${COMMIT} \
+              -X github.com/pandastack/agent/internal/api.buildTime=${BTIME}" \
+    -o /out/pandastack-agent ./cmd/agent
+
+FROM alpine:3.20
+RUN apk add --no-cache iproute2 iptables e2fsprogs util-linux tar gzip wget firecracker || \
+    apk add --no-cache iproute2 iptables e2fsprogs util-linux tar gzip wget
+COPY --from=build /out/pandastack-agent /usr/local/bin/pandastack-agent
+RUN mkdir -p /var/lib/pandastack /var/run/pandastack
+ENV PANDASTACK_AGENT_LISTEN=0.0.0.0:9090
+ENV PANDASTACK_DATA_DIR=/var/lib/pandastack
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/pandastack-agent"]

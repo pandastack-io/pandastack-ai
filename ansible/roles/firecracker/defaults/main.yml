@@ -1,0 +1,7 @@
+---
+firecracker_version: "1.16.0"
+firecracker_arch: x86_64
+firecracker_release_url: "https://github.com/firecracker-microvm/firecracker/releases/download/v{{ firecracker_version }}/firecracker-v{{ firecracker_version }}-{{ firecracker_arch }}.tgz"
+firecracker_src_dir: /usr/local/src/pandastack-firecracker
+firecracker_bin: /usr/local/bin/firecracker
+jailer_bin: /usr/local/bin/jailer

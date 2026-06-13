@@ -1,0 +1,91 @@
+---
+title: Quickstart
+description: Spawn your first sandbox in 30 seconds — CLI, Python, and TypeScript.
+---
+
+## 1. Authenticate
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai
+```
+
+Or sign in with the CLI:
+
+```bash
+pandastack auth login
+pandastack auth whoami
+```
+
+## 2. Create a sandbox
+
+```bash
+pandastack sandbox create --template code-interpreter --ttl 1h
+pandastack sandbox list
+```
+
+Available templates are `base`, `code-interpreter`, `agent`, `browser`, and `postgres-16`.
+
+## 3. Run a command
+
+```bash
+pandastack sandbox exec <sandbox-id> -- python -c 'print("hello from PandaStack")'
+pandastack sandbox logs <sandbox-id> --no-follow --stream both
+```
+
+## Python
+
+```bash
+pip install pandastack
+```
+
+```python
+from pandastack import Sandbox
+
+sandbox = Sandbox.create(
+    template="code-interpreter",
+    ttl_seconds=3600,
+    metadata={"purpose": "quickstart"},
+)
+
+result = sandbox.exec("python -c 'print(1 + 1)'", timeout_seconds=30)
+print(result.stdout)
+
+sandbox.filesystem.write("/workspace/hello.py", "print('hi')\n")
+print(sandbox.filesystem.read("/workspace/hello.py"))
+
+sandbox.kill()
+```
+
+## TypeScript
+
+```bash
+npm install @pandastack/sdk
+```
+
+```ts
+import { Sandbox } from "@pandastack/sdk";
+
+const sandbox = await Sandbox.create({
+  template: "code-interpreter",
+  ttlSeconds: 3600,
+  metadata: { purpose: "quickstart" },
+});
+
+const result = await sandbox.exec("python -c 'print(1 + 1)'", { timeoutSeconds: 30 });
+console.log(result.stdout);
+
+await sandbox.filesystem.write("/workspace/hello.js", "console.log('hi')\n");
+console.log(await sandbox.filesystem.read("/workspace/hello.js"));
+
+await sandbox.kill();
+```
+
+## Preview a service
+
+```bash
+pandastack sandbox exec <sandbox-id> -- python -m http.server 3000
+pandastack sandbox preview-url <sandbox-id> 3000 --ttl 1h
+```
+
+SDK equivalents are `sandbox.preview_url(3000)` in Python and `sandbox.previewUrl(3000)` in TypeScript.

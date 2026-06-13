@@ -1,0 +1,425 @@
+{
+  "started_at": "2026-05-31T11:42:54.510632+05:30",
+  "finished_at": "2026-05-31T11:44:09.821395+05:30",
+  "api_base": "https://api.pandastack.ai",
+  "workspace": "default",
+  "template": "code-interpreter",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 50,
+  "successes": 50,
+  "failures": 0,
+  "boot_p50_ms": 101.5,
+  "boot_p90_ms": 124,
+  "boot_p99_ms": 128,
+  "boot_p99_9_ms": 128,
+  "boot_min_ms": 79,
+  "boot_max_ms": 128,
+  "wall_p50_ms": 569,
+  "wall_p99_ms": 1662.9699999999993,
+  "boot_modes": {
+    "snapshot-natid": 50
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 98,
+      "wall_ms": 561,
+      "delete_ms": 785,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 90,
+      "wall_ms": 520,
+      "delete_ms": 487,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 118,
+      "wall_ms": 779,
+      "delete_ms": 507,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 128,
+      "wall_ms": 571,
+      "delete_ms": 509,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 93,
+      "wall_ms": 558,
+      "delete_ms": 572,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 124,
+      "wall_ms": 659,
+      "delete_ms": 524,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 112,
+      "wall_ms": 610,
+      "delete_ms": 483,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 122,
+      "wall_ms": 541,
+      "delete_ms": 515,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 117,
+      "wall_ms": 571,
+      "delete_ms": 613,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 116,
+      "wall_ms": 550,
+      "delete_ms": 578,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 104,
+      "wall_ms": 515,
+      "delete_ms": 570,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 102,
+      "wall_ms": 545,
+      "delete_ms": 556,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 99,
+      "wall_ms": 562,
+      "delete_ms": 482,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 109,
+      "wall_ms": 554,
+      "delete_ms": 502,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 14,
+      "boot_ms": 94,
+      "wall_ms": 557,
+      "delete_ms": 496,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 128,
+      "wall_ms": 580,
+      "delete_ms": 501,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 16,
+      "boot_ms": 119,
+      "wall_ms": 644,
+      "delete_ms": 584,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 103,
+      "wall_ms": 545,
+      "delete_ms": 558,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 101,
+      "wall_ms": 550,
+      "delete_ms": 631,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 125,
+      "wall_ms": 820,
+      "delete_ms": 595,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 20,
+      "boot_ms": 89,
+      "wall_ms": 549,
+      "delete_ms": 489,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 21,
+      "boot_ms": 93,
+      "wall_ms": 618,
+      "delete_ms": 612,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 22,
+      "boot_ms": 95,
+      "wall_ms": 614,
+      "delete_ms": 761,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 23,
+      "boot_ms": 99,
+      "wall_ms": 672,
+      "delete_ms": 1677,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 24,
+      "boot_ms": 98,
+      "wall_ms": 782,
+      "delete_ms": 524,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 25,
+      "boot_ms": 91,
+      "wall_ms": 534,
+      "delete_ms": 551,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 26,
+      "boot_ms": 127,
+      "wall_ms": 671,
+      "delete_ms": 581,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 27,
+      "boot_ms": 85,
+      "wall_ms": 529,
+      "delete_ms": 552,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 28,
+      "boot_ms": 101,
+      "wall_ms": 524,
+      "delete_ms": 576,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 29,
+      "boot_ms": 120,
+      "wall_ms": 664,
+      "delete_ms": 580,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 30,
+      "boot_ms": 114,
+      "wall_ms": 543,
+      "delete_ms": 575,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 31,
+      "boot_ms": 123,
+      "wall_ms": 920,
+      "delete_ms": 522,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 32,
+      "boot_ms": 104,
+      "wall_ms": 561,
+      "delete_ms": 589,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 33,
+      "boot_ms": 124,
+      "wall_ms": 578,
+      "delete_ms": 576,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 34,
+      "boot_ms": 96,
+      "wall_ms": 546,
+      "delete_ms": 579,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 35,
+      "boot_ms": 79,
+      "wall_ms": 524,
+      "delete_ms": 554,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 36,
+      "boot_ms": 98,
+      "wall_ms": 925,
+      "delete_ms": 588,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 37,
+      "boot_ms": 94,
+      "wall_ms": 633,
+      "delete_ms": 573,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 38,
+      "boot_ms": 97,
+      "wall_ms": 636,
+      "delete_ms": 586,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 39,
+      "boot_ms": 96,
+      "wall_ms": 665,
+      "delete_ms": 659,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 40,
+      "boot_ms": 121,
+      "wall_ms": 611,
+      "delete_ms": 720,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 41,
+      "boot_ms": 117,
+      "wall_ms": 568,
+      "delete_ms": 519,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 42,
+      "boot_ms": 124,
+      "wall_ms": 573,
+      "delete_ms": 552,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 43,
+      "boot_ms": 88,
+      "wall_ms": 525,
+      "delete_ms": 505,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 44,
+      "boot_ms": 92,
+      "wall_ms": 544,
+      "delete_ms": 502,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 45,
+      "boot_ms": 98,
+      "wall_ms": 545,
+      "delete_ms": 691,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 46,
+      "boot_ms": 110,
+      "wall_ms": 766,
+      "delete_ms": 668,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 47,
+      "boot_ms": 89,
+      "wall_ms": 2372,
+      "delete_ms": 591,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 48,
+      "boot_ms": 109,
+      "wall_ms": 570,
+      "delete_ms": 827,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 49,
+      "boot_ms": 96,
+      "wall_ms": 541,
+      "delete_ms": 625,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

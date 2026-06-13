@@ -1,0 +1,138 @@
+---
+title: REPL
+description: Stateful, Jupyter-style code execution inside a sandbox. Variables and imports persist across cells.
+---
+
+PandaStack ships two REPL modes:
+
+|                     | One-shot REPL                                    | REPL sessions                                          |
+| ------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| Endpoint            | `POST /sandboxes/{id}/repl`                      | `POST /sandboxes/{id}/repl/sessions[/{sid}/run]`       |
+| State               | None — fresh interpreter per call.               | Persistent — variables, imports, state live across cells. |
+| Latency             | ~50 ms (one process spawn).                      | First call ~150 ms (kernel boot), subsequent ~5 ms.    |
+| Right tool for…     | Stateless code execution, agent tools.           | Notebook-style workflows, data analysis, REPL frontends. |
+
+Both share the same `language` dispatch table.
+
+## Supported languages
+
+| `language`            | Interpreter                                |
+| --------------------- | ------------------------------------------ |
+| `python`, `py`        | `python3` (3.10+, 3.12 on the default template) |
+| `node`, `js`          | `node` (Node 22 on Node-based templates)   |
+| `bash`                | `bash`                                     |
+| `sh`                  | `sh`                                       |
+| `ruby`                | `ruby`                                     |
+
+Query at runtime:
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  https://api.pandastack.ai/v1/repl/languages
+# {"languages":["python","py","node","js","bash","sh","ruby"]}
+```
+
+The set is determined by what's installed in the running template — `python` and `bash` are guaranteed everywhere; `node` requires a Node-based template; `ruby` requires you to bake it in.
+
+## One-shot REPL
+
+```python
+import requests
+r = requests.post(
+    f"https://api.pandastack.ai/v1/sandboxes/{sid}/repl",
+    headers={"Authorization": f"Bearer {tok}"},
+    json={"language": "python", "code": "print(sum(range(100)))"},
+)
+print(r.json())
+# {"stdout": "4950\n", "stderr": "", "exit_code": 0, "duration_ms": 41}
+```
+
+```ts
+const r = await fetch(`https://api.pandastack.ai/v1/sandboxes/${sid}/repl`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ language: "python", code: "print(sum(range(100)))" }),
+});
+console.log(await r.json());
+```
+
+Under the hood this just wraps your code in the appropriate heredoc and runs it via [exec](/docs/concepts/exec). There's no kernel; each call is a fresh interpreter. Great for stateless code-tools in LLM tool calling — predictable, no leakage between calls.
+
+## REPL sessions (Jupyter-style)
+
+Sessions spawn a long-lived interpreter that survives across calls. Variables, imports, function defs all persist — like a Jupyter kernel.
+
+```python
+import requests
+
+base = f"https://api.pandastack.ai/v1/sandboxes/{sid}"
+hdr  = {"Authorization": f"Bearer {tok}"}
+
+# 1. Start a session
+sess = requests.post(f"{base}/repl/sessions", headers=hdr,
+                     json={"language": "python"}).json()
+sid_repl = sess["session_id"]
+
+# 2. Run cells against it
+def cell(code):
+    r = requests.post(f"{base}/repl/sessions/{sid_repl}/run", headers=hdr,
+                      json={"code": code, "timeout_ms": 30_000}).json()
+    print(r["stdout"], end="")
+
+cell("import pandas as pd; df = pd.read_csv('/workspace/sales.csv')")
+cell("df.head(3)")                          # → printed repr, like Jupyter
+cell("df['revenue'].sum()")                 # state from cell 1 still here
+
+# 3. List + clean up
+print(requests.get(f"{base}/repl/sessions", headers=hdr).json())
+requests.delete(f"{base}/repl/sessions/{sid_repl}", headers=hdr)
+```
+
+### Endpoints
+
+```http
+POST   /v1/sandboxes/{id}/repl/sessions               -> { "session_id": "...", "language": "..." }
+POST   /v1/sandboxes/{id}/repl/sessions/{sid}/run     -> { "stdout","stderr","exit","duration_ms" }
+GET    /v1/sandboxes/{id}/repl/sessions               -> [{"id","language","created_at","cells"}, ...]
+DELETE /v1/sandboxes/{id}/repl/sessions/{sid}         -> 204
+```
+
+### Cell semantics
+
+For `python` specifically, the kernel mimics Jupyter:
+
+- The cell is parsed as AST.
+- If the **last** statement is an expression, it's evaluated and `repr()`'d (just like the trailing-expression behavior of `In[]` / `Out[]`).
+- All other statements run sequentially.
+- Tracebacks go to `stderr`, exit code becomes `1`.
+
+Other languages run the whole cell as a script — no implicit print.
+
+### Timeouts
+
+Pass `timeout_ms` per cell. The kernel survives the timeout — only that cell is killed.
+
+```python
+cell("import time; time.sleep(10)")   # default timeout 30 s
+# next cell still works on the same kernel
+```
+
+## Use cases
+
+**Code interpreter for LLM tool calling.** Expose `run_cell(code) -> {stdout,stderr}` as an MCP/tool. Use a session per conversation — the model can incrementally build state without re-importing pandas each turn.
+
+**Notebook-as-a-Service.** Frontend speaks REPL sessions; each session = a notebook kernel. Your UI keeps cell history; PandaStack keeps interpreter state.
+
+**Long-running data analysis from an agent.** Read CSV once into a session, run 20 different aggregations, drop the session when the agent's task ends — vs. paying 600 ms of pandas import on every cell.
+
+**Educational / coding-challenge platform.** Each user has a sandbox + a Python session. Code grader posts assertions as cells; correct/wrong falls out of `exit`.
+
+## Limits
+
+- A sandbox can hold **up to 8 simultaneous REPL sessions**. The 9th `POST /repl/sessions` returns 429.
+- Sessions die when the sandbox hibernates and are **not** auto-restored on wake (state is in-memory only). Track session IDs in your app and recreate on `wake`.
+- Per-cell stdout/stderr is capped at 1 MiB each — output beyond that is silently truncated. For larger output, write to a file and [download](/docs/concepts/filesystem) it.
+
+## SDK status
+
+The current SDKs ship `Sandbox.run_code()` / `Sandbox.runCode()` (one-shot only). Stateful session bindings are tracked in [GitHub issues](https://github.com/pandastack-io/pandastack/issues) — for now, call the REST endpoints directly.

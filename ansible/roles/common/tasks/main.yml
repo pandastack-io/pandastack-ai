@@ -1,0 +1,18 @@
+---
+# Safety gate: refuse to do anything unless this really is an agent node.
+# Protects against a mis-scoped inventory ever pointing the binary push or a
+# service restart at the wrong VM.
+- name: Assert this host is a pandastack agent node
+  ansible.builtin.assert:
+    that:
+      - "'pandastack-agent' in inventory_hostname"
+    fail_msg: "{{ inventory_hostname }} does not look like a pandastack agent — refusing to proceed."
+    success_msg: "{{ inventory_hostname }} confirmed as agent node."
+
+- name: Ensure pandastack config dir exists
+  ansible.builtin.file:
+    path: /etc/pandastack
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

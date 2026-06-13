@@ -1,0 +1,429 @@
+{
+  "started_at": "2026-05-26T20:43:56.409609+05:30",
+  "finished_at": "2026-05-26T20:44:14.763139+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 50,
+  "successes": 47,
+  "failures": 3,
+  "boot_p50_ms": 0,
+  "boot_p90_ms": 934.8,
+  "boot_p99_ms": 1521.1399999999999,
+  "boot_p99_9_ms": 1765.814,
+  "boot_min_ms": 0,
+  "boot_max_ms": 1793,
+  "wall_p50_ms": 3,
+  "wall_p99_ms": 1540.1799999999998,
+  "boot_modes": {
+    "snapshot-natid": 13,
+    "warmpool": 34
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 1,
+      "wall_ms": 8,
+      "delete_ms": 107,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 15,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 0,
+      "wall_ms": 27,
+      "delete_ms": 64,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 0,
+      "wall_ms": 4,
+      "delete_ms": 68,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 35,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 919,
+      "wall_ms": 922,
+      "delete_ms": 20,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 88,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 8,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 9,
+      "boot_ms": 592,
+      "wall_ms": 596,
+      "delete_ms": 52,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 70,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 0,
+      "wall_ms": 16,
+      "delete_ms": 6,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 705,
+      "wall_ms": 809,
+      "delete_ms": 41,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 0,
+      "wall_ms": 4,
+      "delete_ms": 164,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 14,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 65,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network re-allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 16,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 163,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 62,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 928,
+      "wall_ms": 1015,
+      "delete_ms": 5,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 147,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 20,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 33,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 21,
+      "boot_ms": 754,
+      "wall_ms": 908,
+      "delete_ms": 199,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 22,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 57,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 23,
+      "boot_ms": 0,
+      "wall_ms": 9,
+      "delete_ms": 13,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 24,
+      "boot_ms": 951,
+      "wall_ms": 1061,
+      "delete_ms": 27,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 25,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 133,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 26,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 19,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 27,
+      "boot_ms": 794,
+      "wall_ms": 926,
+      "delete_ms": 38,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 28,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 218,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 29,
+      "boot_ms": 0,
+      "wall_ms": 11,
+      "delete_ms": 104,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 30,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 179,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 31,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 87,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 32,
+      "boot_ms": 765,
+      "wall_ms": 1012,
+      "delete_ms": 75,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 33,
+      "boot_ms": 0,
+      "wall_ms": 7,
+      "delete_ms": 108,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 34,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 17,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 35,
+      "boot_ms": 948,
+      "wall_ms": 1058,
+      "delete_ms": 38,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 36,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 202,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 37,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 34,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 38,
+      "boot_ms": 1793,
+      "wall_ms": 1801,
+      "delete_ms": 78,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 39,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 255,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 40,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 50,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 41,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 66,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 42,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 43,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 43,
+      "boot_ms": 883,
+      "wall_ms": 1003,
+      "delete_ms": 44,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 44,
+      "boot_ms": 0,
+      "wall_ms": 1,
+      "delete_ms": 166,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 45,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 27,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 46,
+      "boot_ms": 1202,
+      "wall_ms": 1234,
+      "delete_ms": 41,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 47,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 142,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 48,
+      "boot_ms": 0,
+      "wall_ms": 3,
+      "delete_ms": 34,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 49,
+      "boot_ms": 945,
+      "wall_ms": 1099,
+      "delete_ms": 8,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

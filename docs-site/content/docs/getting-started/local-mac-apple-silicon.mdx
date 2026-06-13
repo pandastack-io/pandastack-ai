@@ -1,0 +1,570 @@
+---
+title: Local Apple Silicon development
+---
+
+# Local Apple Silicon development
+
+> **Single-tenant dev mode. Do not expose to the network.**
+>
+> This guide uses stub auth, local databases, and a local Lima VM. It is designed for one developer on one Mac.
+
+This guide gets PandaStack running locally on an Apple Silicon Mac with the API, dashboard, Postgres, ClickHouse, a Lima VM, the agent, and real Firecracker microVM smoke tests.
+
+## 60-second path
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack
+bash scripts/mac-local-e2e.sh
+open http://localhost:3000
+```
+
+The script is intentionally opinionated. It installs or checks local dependencies, starts data services, boots a Lima VM, launches the agent inside the VM, starts the API and dashboard on the host, and runs a smoke test.
+
+## Step-by-step install
+
+If you prefer to walk through the install manually, or you want to know exactly what `scripts/mac-local-e2e.sh` does, follow these eight steps. Each step is independently verifiable.
+
+### Step 1 — Confirm hardware and macOS
+
+```bash
+uname -sm
+sw_vers -productVersion
+```
+
+You should see `Darwin arm64` and macOS 13 or newer. Intel Macs are not supported on this path; use the [Linux guide](/docs/getting-started/local-linux) instead.
+
+### Step 2 — Install Homebrew
+
+If Homebrew is not already installed:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Verify:
+
+```bash
+brew --version
+```
+
+### Step 3 — Install host prerequisites
+
+```bash
+brew install lima jq curl go node pnpm
+brew install --cask docker
+```
+
+Open Docker Desktop once and wait for the whale icon to settle, then verify:
+
+```bash
+docker info >/dev/null && echo "docker ok"
+go version
+node --version
+limactl --version
+```
+
+You need Go 1.22+, Node 20+, and a running Docker daemon.
+
+### Step 4 — Clone the repository
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack
+```
+
+### Step 5 — Run the bootstrap script
+
+```bash
+bash scripts/mac-local-e2e.sh
+```
+
+The script performs Steps 6 through 11 below in order. Re-running it is idempotent: it skips work that is already done and exits non-zero if any step fails.
+
+### Step 6 — Start data services
+
+What the script runs:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d postgres clickhouse
+```
+
+Verify Postgres and ClickHouse are healthy:
+
+```bash
+docker exec pandastack-dev-postgres-1 pg_isready -U pandastack
+curl -fsS http://localhost:8123/ping
+```
+
+### Step 7 — Create the Lima VM
+
+```bash
+limactl create --name pandastack-lima-vm .local-state/mac-local-e2e/lima.yaml
+limactl start pandastack-lima-vm
+```
+
+Verify nested KVM:
+
+```bash
+limactl shell pandastack-lima-vm -- test -e /dev/kvm && echo "kvm ok"
+```
+
+If `/dev/kvm` is missing, your macOS or Lima version does not expose nested virtualization. Update both, or use a Linux KVM host.
+
+### Step 8 — Install Firecracker inside Lima
+
+The script downloads Firecracker `v1.16.0` aarch64, the public CI kernel, and a base Ubuntu rootfs into `/var/lib/pandastack/` inside the VM. Verify:
+
+```bash
+limactl shell pandastack-lima-vm -- firecracker --version
+```
+
+### Step 9 — Build and start the agent in Lima
+
+The script cross-compiles the agent for `linux/arm64`, installs it as a systemd unit, and waits for `/healthz`:
+
+```bash
+curl -fsS http://localhost:7070/healthz
+```
+
+(The agent inside Lima is reachable from the Mac host at `localhost:7070` because Lima forwards the port.)
+
+### Step 10 — Start the API and dashboard on macOS
+
+The script builds the API (`api/cmd/api`) and starts the dashboard with `npm run dev`. Verify:
+
+```bash
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:3000 >/dev/null && echo "dashboard ok"
+```
+
+### Step 11 — Smoke test
+
+The script creates a sandbox, runs `echo hello` inside it, and confirms the dashboard renders the new sandbox in its list page. On success you will see:
+
+```text
+✓ smoke test passed
+╰─ PandaStack local E2E is up
+```
+
+Open `http://localhost:3000` in your browser. You will be auto-logged-in as `dev@local.pandastack` (stub mode).
+
+### Step 12 — Tear down when finished
+
+```bash
+bash scripts/mac-local-e2e-down.sh
+```
+
+This stops the API/dashboard, the Lima VM, and the database containers without deleting any state. To wipe everything (Lima image, Docker volumes, local state), see [Complete uninstall](#complete-uninstall) below.
+
+## System requirements
+
+Minimum:
+
+- macOS 13 or newer
+- Apple Silicon M1, M2, or M3
+- 8 GB RAM
+- 15 GB free disk
+- Homebrew
+- Docker Desktop or a compatible Docker engine
+- `curl`, `jq`, `git`, and standard macOS developer tools
+
+Recommended:
+
+- macOS 14 or newer
+- 16 GB RAM or more
+- 25 GB free disk
+- wired power while building templates or running many sandboxes
+
+Intel Macs are not supported for this local path. The Lima configuration relies on Apple Virtualization.framework behavior that is best supported on Apple Silicon.
+
+## Architecture
+
+```text
++--------------------------------------------------------------------------------+
+| Mac host                                                                       |
+|                                                                                |
+|  +-----------+     +-----------+     +-----------+     +--------------------+  |
+|  | Dashboard | --> |    API    | --> | Postgres  |     | ClickHouse         |  |
+|  | :3000     |     | :8080     |     | Docker    |     | Docker             |  |
+|  +-----------+     +-----------+     +-----------+     +--------------------+  |
+|        |                 |                                                    |
+|        |                 v                                                    |
+|        |          host.lima.internal                                          |
+|        |                 |                                                    |
+|        v                 v                                                    |
+|  +--------------------------------------------------------------------------+ |
+|  | Lima VM: pandastack-lima-vm                                              | |
+|  |                                                                          | |
+|  |  +----------------+       +----------------+       +------------------+  | |
+|  |  | Agent :7070    | ----> | Firecracker    | ----> | microVMs         |  | |
+|  |  | KVM access     |       | jailer/tap     |       | tap interfaces   |  | |
+|  |  +----------------+       +----------------+       +------------------+  | |
+|  +--------------------------------------------------------------------------+ |
++--------------------------------------------------------------------------------+
+```
+
+The API and dashboard run on the Mac host so frontend iteration stays fast. Firecracker runs inside Lima where Linux KVM is available. The agent owns microVM lifecycle, networking, snapshots, and local capacity reporting.
+
+## What gets written where
+
+| Path | Purpose | Safe to delete? |
+| --- | --- | --- |
+| `.local-state/mac-local-e2e/` | script state, logs, pid files, local generated config | yes, after stopping services |
+| `~/.lima/pandastack-lima-vm/` | Lima VM image and runtime data, roughly 10 GB | yes, with `limactl delete` |
+| Docker volume `pandastack-dev_pg-data` | local Postgres data | yes, destroys local data |
+| Docker volume `pandastack-dev_ch-data` | local ClickHouse data | yes, destroys local metrics/events |
+| Homebrew packages | Lima and small helper tools such as `jq` | optional |
+| Go and npm caches | normal language build caches | optional |
+
+The script keeps PandaStack-specific state inside the repository when possible. Lima and Docker keep VM and volume data in their normal platform locations.
+
+## Idle resource footprint
+
+On an M3 Mac after the stack is started and no sandbox is running, expect roughly:
+
+| Component | CPU idle | RAM idle |
+| --- | --- | --- |
+| API | near 0% | 30-80 MB |
+| Dashboard dev server | near 0-2% | 200-500 MB |
+| Postgres | near 0% | 80-200 MB |
+| ClickHouse | near 0-2% | 300-900 MB |
+| Lima VM + agent | near 0-3% | 1-2 GB reserved/used depending on Lima state |
+
+Numbers vary by macOS version, Docker Desktop settings, active browser tabs, and whether Next.js is compiling. First startup is noisier because packages and VM artifacts may be built or downloaded.
+
+## Authentication mode
+
+Local mode uses stub auth:
+
+```bash
+PANDASTACK_AUTH_MODE=stub
+PANDASTACK_STUB_USER_EMAIL=dev@local.pandastack
+PANDASTACK_STUB_USER_ID=00000000-0000-0000-0000-000000000001
+PANDASTACK_STUB_ORG_ID=00000000-0000-0000-0000-000000000002
+PANDASTACK_STUB_WORKSPACE=local-dev
+```
+
+The development bearer token is:
+
+```text
+pds_local_dev_token
+```
+
+For multi-user self-hosting, use [Supabase auth](/docs/self-host/auth-supabase).
+
+## First sandbox from curl
+
+```bash
+curl -sS http://localhost:8080/v1/sandboxes \
+  -H 'Authorization: Bearer pds_local_dev_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"template":"ubuntu-22.04","ttl_seconds":600}' | jq .
+```
+
+Then list sandboxes:
+
+```bash
+curl -sS http://localhost:8080/v1/sandboxes \
+  -H 'Authorization: Bearer pds_local_dev_token' | jq .
+```
+
+## First sandbox in TypeScript
+
+```ts
+import { PandaStack } from "@pandastack/sdk";
+
+const panda = new PandaStack({
+  apiKey: "pds_local_dev_token",
+  baseUrl: "http://localhost:8080",
+});
+
+const sandbox = await panda.sandboxes.create({ template: "node-20" });
+const result = await sandbox.exec("node", ["-e", "console.log(process.version)"]);
+console.log(result.stdout);
+```
+
+## First sandbox in Python
+
+```python
+from pandastack import PandaStack
+
+client = PandaStack(api_key="pds_local_dev_token", base_url="http://localhost:8080")
+sandbox = client.sandboxes.create(template="python-3.12")
+result = sandbox.exec("python", ["-c", "print('hello from PandaStack')"])
+print(result.stdout)
+```
+
+## Customization knobs
+
+| Variable | Default | Used by | Description |
+| --- | --- | --- | --- |
+| `PANDASTACK_AUTH_MODE` | `stub` | API | Selects local stub auth for this guide. |
+| `PANDASTACK_STUB_USER_EMAIL` | `dev@local.pandastack` | API/dashboard/script | Email displayed for the local user. |
+| `PANDASTACK_STUB_USER_ID` | `00000000-0000-0000-0000-000000000001` | API/dashboard/script | Stable local user ID. |
+| `PANDASTACK_STUB_ORG_ID` | `00000000-0000-0000-0000-000000000002` | API/dashboard/script | Stable local organization ID. |
+| `PANDASTACK_STUB_WORKSPACE` | `local-dev` | API/dashboard/script | Workspace attached to the local token. |
+| `NEXT_PUBLIC_PANDASTACK_API` | `http://localhost:8080` | dashboard | Browser-visible API URL. |
+| `NEXT_PUBLIC_PANDASTACK_AUTH_MODE` | `stub` | dashboard | Dashboard auth UI mode. |
+| `PANDASTACK_AGENT_URL` | script-managed | API | Agent HTTP URL or host path. |
+| `PANDASTACK_AGENT_ID` | `mac-local-lima` | agent | Stable agent identity for local scheduling and metrics. |
+| `PANDASTACK_AGENT_ENDPOINT` | `http://127.0.0.1:7070` | agent | Endpoint advertised by the agent. |
+| `PANDASTACK_CLICKHOUSE_URL` | local ClickHouse URL | API/agent | Metrics and audit event sink. |
+| `PANDASTACK_BAKE_TEMPLATES` | unset | agent | Comma-separated templates to pre-bake snapshots for at startup. |
+| `PANDASTACK_BAKE_CONCURRENCY` | `1` | agent | Parallelism for startup snapshot baking. |
+
+Example:
+
+```bash
+PANDASTACK_STUB_USER_EMAIL=you@example.com \
+bash scripts/mac-local-e2e.sh
+```
+
+## Differences from production
+
+| Area | Local Apple Silicon | Production-style self-host |
+| --- | --- | --- |
+| Auth | Stub auth and `pds_local_dev_token` | Supabase or another JWT/OIDC provider |
+| Billing | Disabled/no-op | Stripe or internal metering integration |
+| Multi-region | Single Mac and one Lima VM | Multiple regions, zones, or host pools |
+| Snapshots | Local disk | Object storage or dedicated snapshot store |
+| Observability | Local ClickHouse | Managed or clustered ClickHouse/metrics stack |
+| Availability | Developer process supervision | systemd, Kubernetes, Nomad, or managed supervisors |
+| Secrets | Local env vars | Secret manager and CI/CD secret injection |
+| Networking | Local tap interfaces | Host routing, egress policy, and firewall controls |
+
+## Updating
+
+Stop the stack, pull new code, and restart:
+
+```bash
+git pull
+bash scripts/mac-local-e2e-down.sh
+bash scripts/mac-local-e2e.sh
+```
+
+If the Lima VM or local data schema changed significantly, remove local state and rebuild:
+
+```bash
+bash scripts/mac-local-e2e-down.sh
+limactl delete pandastack-lima-vm
+rm -rf .local-state/mac-local-e2e
+bash scripts/mac-local-e2e.sh
+```
+
+## Complete uninstall
+
+Stop services first:
+
+```bash
+bash scripts/mac-local-e2e-down.sh
+```
+
+Delete the Lima VM:
+
+```bash
+limactl delete pandastack-lima-vm
+```
+
+Delete repository-local state:
+
+```bash
+rm -rf .local-state/
+```
+
+Delete Docker volumes if you no longer need local database data:
+
+```bash
+docker volume rm pandastack-dev_pg-data pandastack-dev_ch-data
+```
+
+Optionally remove helper packages:
+
+```bash
+brew uninstall lima jq
+```
+
+Only uninstall shared tools if you do not use them for other projects.
+
+
+## Day-two local workflow
+
+Use the local stack as a disposable development environment. Keep important templates, tests, and code in git; treat databases, VM images, and metrics as rebuildable.
+
+### Start of day
+
+1. Pull the latest repository changes.
+2. Run `bash scripts/mac-local-e2e.sh`.
+3. Open the dashboard at `http://localhost:3000`.
+4. Run one sandbox create/list command to confirm the API and agent are connected.
+5. Check `.local-state/mac-local-e2e/` if any process exits early.
+
+### During development
+
+- API changes usually require restarting the API process through the script.
+- Dashboard changes should hot reload through Next.js.
+- Agent changes require rebuilding and restarting the process inside Lima.
+- Migration changes should be tested from a clean local database volume.
+- Runtime changes should include at least one real Firecracker smoke test.
+
+### End of day
+
+1. Stop the stack with `bash scripts/mac-local-e2e-down.sh`.
+2. Keep `.local-state/` if you want logs for later debugging.
+3. Remove the Lima VM only when you want a clean VM image.
+4. Remove Docker volumes only when you are ready to lose local data.
+
+## Logs and health checks
+
+Useful commands:
+
+```bash
+curl -sS http://localhost:8080/healthz | jq .
+curl -sS http://localhost:8080/v1/sandboxes -H 'Authorization: Bearer pds_local_dev_token' | jq .
+limactl list
+limactl shell pandastack-lima-vm -- uname -a
+docker ps --filter name=pandastack
+```
+
+Common places to inspect:
+
+| Signal | Where to look |
+| --- | --- |
+| API startup failure | `.local-state/mac-local-e2e/` API logs |
+| Dashboard compile failure | terminal output from the script and Next.js logs |
+| Agent registration failure | Lima shell and agent logs |
+| Postgres connection failure | Docker container logs and `PANDASTACK_DATABASE_URL` |
+| ClickHouse connection failure | Docker container logs and `PANDASTACK_CLICKHOUSE_URL` |
+| Firecracker boot failure | agent logs inside Lima |
+| Missing audit events | ClickHouse logs and API/agent ClickHouse config |
+
+## Performance notes
+
+Local mode optimizes for correctness and developer feedback, not benchmark purity.
+
+- First boot includes package installs, image setup, and VM warmup.
+- Sub-second boot targets assume a baked template snapshot and host capacity.
+- Docker Desktop memory limits can affect Postgres, ClickHouse, and dashboard compilation.
+- macOS power mode and thermal state can change observed boot times.
+
+If you are measuring performance, record:
+
+1. Mac model and chip.
+2. macOS version.
+3. Docker Desktop memory and CPU settings.
+4. Lima VM CPU and memory settings.
+5. Template name and image size.
+6. Whether the template snapshot was already baked (`boot_mode` in the create response).
+7. Number of concurrent sandboxes.
+8. Whether ClickHouse and dashboard were running.
+
+## Safe local defaults
+
+The script chooses conservative defaults for a first run:
+
+- single local user
+- no billing side effects
+- no external auth provider
+- no production control-plane URL
+- local Postgres and ClickHouse
+- local VM-only Firecracker execution
+- localhost dashboard/API access
+
+Change one variable at a time when debugging. If multiple subsystems change at once, reset local state before assuming a code regression.
+
+## When to reset local state
+
+Reset state when:
+
+- migrations changed and you want to verify first-boot behavior
+- the stub org/user IDs changed
+- Lima networking is stale
+- the agent cannot create tap devices after a macOS or Lima update
+- Docker volumes contain old schema/data you no longer need
+- stale baked snapshots are confusing a lifecycle test
+
+Prefer the smallest reset first:
+
+1. Restart API/dashboard processes.
+2. Restart the Lima VM.
+3. Delete `.local-state/mac-local-e2e/`.
+4. Delete Docker volumes.
+5. Delete and recreate the Lima VM.
+
+## Contributor checklist for local runtime PRs
+
+Before opening a PR that changes runtime behavior:
+
+- [ ] Run `go test ./...` in changed Go modules.
+- [ ] Run dashboard or docs builds if frontend/docs changed.
+- [ ] Run `bash scripts/mac-local-e2e.sh` on Apple Silicon when agent/API integration changed.
+- [ ] Include logs for failures you fixed.
+- [ ] Document new environment variables in this page.
+- [ ] Keep stub auth warnings intact.
+- [ ] Avoid adding production URLs, tokens, or price IDs to examples.
+
+## Troubleshooting
+
+### The dashboard loads but API calls fail
+
+Check the API process logs in `.local-state/mac-local-e2e/`. Confirm the dashboard has `NEXT_PUBLIC_PANDASTACK_API=http://localhost:8080` and the API is listening on port 8080.
+
+### The API starts but cannot reach the agent
+
+Confirm the Lima VM is running:
+
+```bash
+limactl list
+```
+
+Then check the agent endpoint inside the VM and from the host. The local script normally wires this through `host.lima.internal` and port `7070`.
+
+### Firecracker fails to start
+
+The most common causes are insufficient Lima privileges, a stale VM, or a kernel/KVM capability mismatch. Recreate the Lima VM after stopping the stack.
+
+### Docker says the database ports are already in use
+
+Another local Postgres or ClickHouse may be using the same ports. Stop the other service or adjust the script before starting PandaStack.
+
+### The dashboard recompiles slowly
+
+First run includes Next.js dependency installation and compilation. Subsequent runs are faster. Keep the repository on the internal SSD rather than a network drive.
+
+### I changed `PANDASTACK_STUB_*` values and now the org looks wrong
+
+The script seeds local org state using the stub IDs. Stop the stack and delete local Postgres data if you want a completely fresh identity.
+
+## FAQ
+
+### Can I use an Intel Mac?
+
+No for this local path. Use a Linux machine or VM with nested virtualization instead.
+
+### Can I use Colima instead of Lima?
+
+Lima is preferred because this path is about raw Linux virtualization and KVM access for Firecracker. Colima is excellent for Docker-focused workflows, but PandaStack needs a VM shape where the agent can manage Firecracker directly.
+
+### Why Lima?
+
+Lima provides a predictable Apple Virtualization.framework-backed Linux VM with host integration that works well for local development. It keeps the Firecracker-specific pieces inside Linux while leaving the API and dashboard on macOS.
+
+### What about Linux local development?
+
+On Linux, install Firecracker natively and run the agent directly. You can skip Lima and point the API at the Linux agent endpoint.
+
+### What about Windows local development?
+
+Use WSL2 and follow the Linux path. Firecracker support depends on nested virtualization and host configuration.
+
+### Is this safe to expose on my LAN?
+
+No. The local path is single-tenant development mode. It uses stub auth and development defaults. Keep it bound to localhost.
+
+### Does local mode require signup?
+
+No. The dashboard uses the stub user and the local API accepts `pds_local_dev_token`.
+
+### Where should I look first when something fails?
+
+Start with `.local-state/mac-local-e2e/` logs, then `limactl shell pandastack-lima-vm` for agent-side diagnostics, then Docker logs for Postgres and ClickHouse.

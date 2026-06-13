@@ -1,0 +1,202 @@
+---
+title: Claude Managed Agents
+description: Run Anthropic's Claude Managed Agents in your own PandaStack microVMs — Claude drives the agent loop, your sandboxes execute the tool calls.
+---
+
+[Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview) let Anthropic run the agent loop — the model, the reasoning, the multi-turn session state — while the agent's **tool calls execute in infrastructure you control**. Anthropic calls this a *self-hosted sandbox*, and a PandaStack microVM is an ideal one: every session gets a fresh, isolated Firecracker VM that boots from a snapshot in ~180 ms and can hibernate between turns.
+
+This guide wires the two together. By the end you'll have an agent whose `bash`, file, and code tool calls run inside PandaStack, with the agent's filesystem, processes, and network egress never leaving your environment.
+
+## How it fits together
+
+Anthropic's self-hosted environment is a **work queue**. When you create a session that targets it, Anthropic enqueues the session as a work item. A small orchestrator you run claims the item, spins up a PandaStack sandbox, and launches Anthropic's pre-built in-guest runner (`ant beta:worker run`) inside it. The runner executes the agent's tool calls locally and streams results back.
+
+```
+Anthropic (agent loop)  ──work queue──▶  your orchestrator  ──create + exec──▶  PandaStack microVM
+        ▲                                       │                                      │
+        └────────────── tool results ───────────┴────────── stdout / outputs ──────────┘
+```
+
+Only tool **execution** is yours. Tool inputs and outputs still flow to Anthropic so Claude can reason over results and decide the next step — see Anthropic's [security model](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes-security) for the exact data boundary.
+
+Why PandaStack is a good host for this:
+
+- **Per-session isolation, instantly.** Each session is its own microVM, created on the snapshot-restore fast path (p50 ~179 ms) — no warm pool, no shared kernel.
+- **Stateful multi-turn for free.** [Hibernate](/docs/concepts/sandbox-lifecycle) the sandbox between turns; the next turn auto-wakes it with memory and filesystem intact.
+- **Real egress control.** Each sandbox runs in its own network namespace, so you decide what the agent can reach.
+
+## Prerequisites
+
+- A PandaStack API token (`pds_...`) and the **`claude-agent`** template available on your hosts (it ships in the first-party catalog — check `GET /v1/templates`).
+- An Anthropic account with Managed Agents access (the `managed-agents-2026-04-01` beta).
+- An [agent](https://platform.claude.com/docs/en/managed-agents/agent-setup) defined in Anthropic's Console or API.
+
+## The template
+
+PandaStack ships a first-party **`claude-agent`** template: Ubuntu 24.04 with the [`ant` CLI](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes) (Anthropic's pre-built environment worker) plus [mise](https://mise.jdx.dev)-managed Node 22 and Python 3.12 so agent-authored code runs immediately. It exposes the working directory Anthropic expects:
+
+- `/workspace` — where the runner downloads the agent's [skills](https://platform.claude.com/docs/en/managed-agents/skills) and where tools read and write files.
+- `/mnt/session/outputs` — where the agent is told to write final deliverables.
+
+You don't normally build this yourself; it's part of the catalog. If you want to customize it (extra system packages, a different runtime), copy `templates/claude-agent/Dockerfile`, add what you need, and bake it like any other [custom template](/docs/concepts/templates).
+
+## 1. Create a self-hosted environment
+
+A `self_hosted` environment is the work queue your orchestrator drains.
+
+```bash
+curl https://api.anthropic.com/v1/environments \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01" \
+  -H "content-type: application/json" \
+  -d '{"name": "pandastack-self-hosted", "config": {"type": "self_hosted"}}'
+# { "id": "env_...", ... }
+```
+
+Then generate an **environment key** in the Console (this step is Console-only): **Workspace → Environments → your environment → Generate environment key**. It looks like `sk-ant-oat01-...`.
+
+<Callout type="warn">
+The orchestrator host only ever needs the **environment key**, never your organization API key. The environment key authenticates polling for this one environment and nothing else in your account — keep your `sk-ant-api03-...` key off the worker host.
+</Callout>
+
+## 2. Run the orchestrator
+
+The orchestrator polls the queue, creates a sandbox per session, launches the runner, and collects outputs. A complete, runnable reference lives in [`examples/claude-managed-agents`](https://github.com/pandastack/pandastack/tree/main/examples/claude-managed-agents) — the essence is:
+
+```python
+import os, shlex, requests
+from pandastack import Sandbox
+
+ENV_ID = os.environ["ANTHROPIC_ENVIRONMENT_ID"]
+ENV_KEY = os.environ["ANTHROPIC_ENVIRONMENT_KEY"]
+ANTHROPIC = "https://api.anthropic.com"
+H = {
+    "Authorization": f"Bearer {ENV_KEY}",
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "managed-agents-2026-04-01",
+    "Anthropic-Worker-ID": "pandastack-worker-1",
+}
+
+def get_or_create_sandbox(session_id: str) -> Sandbox:
+    for sb in Sandbox.list():
+        if (sb.metadata or {}).get("cma.session_id") == session_id:
+            return sb  # returning turn: reuse (auto-wakes on first exec)
+    return Sandbox.create(
+        template="claude-agent",
+        metadata={"cma.session_id": session_id},
+    )
+
+def launch_runner(sb: Sandbox, session_id: str, work_id: str) -> None:
+    # Write the env + launch script via the filesystem API (keeps the
+    # environment key out of command logs), then start the runner detached.
+    script = f"""#!/bin/sh
+export ANTHROPIC_ENVIRONMENT_ID={shlex.quote(ENV_ID)}
+export ANTHROPIC_ENVIRONMENT_KEY={shlex.quote(ENV_KEY)}
+export ANTHROPIC_SESSION_ID={shlex.quote(session_id)}
+export ANTHROPIC_WORK_ID={shlex.quote(work_id)}
+rm -f /tmp/cma.exit
+{{ setsid sh -c 'ant beta:worker run --workdir /workspace; echo $? > /tmp/cma.exit' </dev/null >/var/log/cma.log 2>&1 & }}
+echo launched
+"""
+    sb.filesystem.write("/tmp/launch.sh", script)
+    sb.exec("sh /tmp/launch.sh; rm -f /tmp/launch.sh", timeout_seconds=30)
+
+while True:
+    r = requests.get(f"{ANTHROPIC}/v1/environments/{ENV_ID}/work/poll",
+                     params={"block_ms": 999}, headers=H, timeout=30)
+    work = r.json() if r.status_code == 200 and r.content else None
+    if not work or not work.get("id"):
+        continue
+    work_id = work["id"]
+    session_id = work["data"]["id"]
+    requests.post(f"{ANTHROPIC}/v1/environments/{ENV_ID}/work/{work_id}/ack",
+                  headers=H, timeout=30)
+    sb = get_or_create_sandbox(session_id)
+    launch_runner(sb, session_id, work_id)
+    # then watch /tmp/cma.exit, pull /mnt/session/outputs, hibernate or delete
+```
+
+The reference adds the parts trimmed here for clarity: a watcher that polls the runner's exit sentinel, output download via the filesystem API, hibernate-vs-delete on idle, graceful shutdown, and per-session bookkeeping. Run it with:
+
+```bash
+cd examples/claude-managed-agents
+pip install -r requirements.txt
+export ANTHROPIC_ENVIRONMENT_ID=env_... ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
+export PANDASTACK_TOKEN=pds_...
+python orchestrator.py
+```
+
+## 3. Start a session
+
+With the orchestrator polling, create a session that targets the environment and send it a task. This uses your organization API key (session creation is an operator-side call):
+
+```bash
+SESSION=$(curl -s https://api.anthropic.com/v1/sessions \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01" \
+  -H "content-type: application/json" \
+  -d "{\"agent\": \"$AGENT_ID\", \"environment_id\": \"$ENV_ID\"}")
+SESSION_ID=$(echo "$SESSION" | jq -r .id)
+
+curl -s "https://api.anthropic.com/v1/sessions/$SESSION_ID/events" \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01" \
+  -H "content-type: application/json" \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Write a haiku about microVMs to /mnt/session/outputs/haiku.txt"}]}]}'
+```
+
+The session enters the work queue; the orchestrator claims it, creates a `claude-agent` sandbox, and the agent's tool calls run there. [Stream the session events](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) to watch the agent work in real time. Anything the agent writes to `/mnt/session/outputs` is pulled back by the orchestrator when the session goes idle.
+
+## Multi-turn sessions
+
+Managed Agents sessions are multi-turn: after the agent goes idle (`end_turn`), sending another `user.message` to the same `SESSION_ID` re-queues work, and the orchestrator routes it back to the same sandbox. What happens to that sandbox *between* turns is controlled by `CMA_ON_IDLE`:
+
+| `CMA_ON_IDLE` | Between turns | Next-turn latency | `/workspace` state | Best for |
+|---|---|---|---|---|
+| `hibernate` (default) | Snapshot + stop; frees CPU/RAM | Sub-second [auto-wake](/docs/concepts/sandbox-lifecycle) | Preserved | Stateful multi-turn at scale |
+| `running` | Left up, holds CPU/RAM | Instant (VM already up) | Preserved | Low-concurrency / latency-sensitive |
+| `delete` | Torn down | ~180 ms recreate | Lost | One-shot / stateless agents |
+
+`hibernate` is the default because it's the only mode that is both stateful and resource-efficient at rest: the sandbox isn't holding a VM's CPU/RAM while the user thinks, yet the agent resumes — process memory and `/workspace` files intact — in under a second. This is the payoff of running on PandaStack: stateful multi-turn agent sessions with sub-second resume, instead of rebuilding a fresh container and re-cloning state on every turn.
+
+The reference orchestrator self-heals across all modes: if a hibernated sandbox can't be woken on a later turn, it recreates a fresh one rather than stranding the session, and a safety-net TTL reaps abandoned sandboxes.
+
+## Monitoring and scaling
+
+Read the queue depth and worker liveness (uses your organization API key, from outside the worker host):
+
+```bash
+curl -s "https://api.anthropic.com/v1/environments/$ENV_ID/work/stats" \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01" | jq
+# { "depth": 0, "pending": 0, "workers_polling": 1, "oldest_queued_at": null }
+```
+
+- `depth` — items waiting to be claimed. Scale orchestrator processes (each with a distinct `Anthropic-Worker-ID`) on backlog.
+- `pending` — items claimed and in flight.
+- `workers_polling` — workers that polled in the last 30 s; alert if this drops to 0.
+
+## Production notes
+
+- **Webhook instead of polling.** This guide uses an always-on poller (only needs outbound HTTPS). To skip the idle poller, drive the same create-and-launch logic from a [webhook](https://platform.claude.com/docs/en/managed-agents/webhooks) handler that fires on `session.status_run_started` — a [PandaStack function](/docs/functions/overview) is a good home for it.
+- **Staging files into a session.** Anthropic doesn't mount files or repos into self-hosted sandboxes. Pass references (an S3 path, a commit SHA) in the session `metadata`; your orchestrator reads them off the claimed work item and stages the files into `/workspace` before launching the runner.
+- **Outputs at rest.** The reference pulls `/mnt/session/outputs` to local disk. For durable storage, push to a bucket. (Mounting a [volume](/docs/concepts/volumes) at that path would force a cold boot and forfeit the snapshot-restore fast path, so copy via the filesystem API instead.)
+- **Stopping a session.** To end a session from your ops tooling, call `work/stop` on its work item (`POST /v1/environments/{env}/work/{work_id}/stop`, org API key). The runner finishes its in-flight tool call, posts a final status, and exits; pass `{"force": true}` to interrupt immediately.
+- **Customizing the template.** If you build your own image instead of the catalog `claude-agent`, the worker harness requires a **Linux** guest with `/bin/bash` at that exact path. `ant` is a single static binary needing only bash; agent **skills** may ship executables, which the `ant` runner marks executable automatically on download.
+
+## Limitations
+
+- **Memory.** Managed Agents [memory](https://platform.claude.com/docs/en/managed-agents/memory) is not currently supported with self-hosted environments.
+- **No file/repo mounting.** Anthropic does not mount files or GitHub repositories into self-hosted sandboxes — stage them yourself via session `metadata` (see above).
+- **Empty tool output.** The current `ant` worker (1.12.1, on `anthropic-sdk-go` v1.50.1) posts an empty-text tool result when a `bash` command succeeds with no stdout (e.g. `cd`, a redirect, a file write), which Anthropic's API rejects (`minimum string length is 1`) and which stalls the session. This is an upstream SDK bug pending a fix. The demo agent works around it with a system-prompt instruction to append a confirmation (`&& echo done`) to commands that would print nothing; add the same line to your own agent's system prompt.
+
+## See also
+
+- [Sandbox lifecycle](/docs/concepts/sandbox-lifecycle) — create, hibernate, wake.
+- [Templates](/docs/concepts/templates) — customize the `claude-agent` image.
+- [AI agents](/docs/guides/ai-agents) — the inverse pattern, where *you* run the agent loop and give it a sandbox tool.
+- Anthropic's [self-hosted sandboxes guide](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes).

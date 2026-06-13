@@ -1,0 +1,155 @@
+---
+title: Exec — running commands
+description: Run shell commands and code inside a sandbox. Timeouts, exit codes, streaming, environment.
+---
+
+`exec` is the bread-and-butter call on a PandaStack sandbox: send a command, get back stdout, stderr, an exit code, and how long it took. Everything else (notebooks, code interpreters, agent tools) is built on top.
+
+## Anatomy of a call
+
+```ts
+const result = await sandbox.exec("echo hello && echo bye 1>&2; exit 7");
+// {
+//   stdout: "hello\n",
+//   stderr: "bye\n",
+//   exit_code: 7,
+//   exitCode: 7,
+//   duration_ms: 18
+// }
+```
+
+| Field         | Type   | Meaning                                                       |
+| ------------- | ------ | ------------------------------------------------------------- |
+| `stdout`      | string | Everything written to file descriptor 1.                      |
+| `stderr`      | string | Everything written to file descriptor 2.                      |
+| `exit_code`   | int    | Process exit code. `0` is success; anything else is a failure your code chose to surface. |
+| `duration_ms` | int    | Wall-clock time the command ran inside the guest.             |
+
+Both `exit_code` (snake) and `exitCode` (camel) are populated in the TypeScript SDK for ergonomics.
+
+## Command shape — `cmd` is a string, not a list
+
+PandaStack's exec wire format takes a single string and runs it under `sh -c`. The SDKs match.
+
+```python
+# ✅ correct
+sandbox.exec("python3 -c 'print(2 + 2)'")
+sandbox.exec("ls -la /workspace | head -20")
+```
+
+```ts
+// ✅ correct
+await sandbox.exec("python3 -c 'print(2 + 2)'");
+await sandbox.exec("ls -la /workspace | head -20");
+```
+
+Because it's `sh -c`, all shell features work: pipes, redirections, env-var expansion, here-docs, command substitution.
+
+If you have user-supplied arguments, quote them like you would in a shell — or use `runCode` (next section) which handles the heredoc for you.
+
+## `runCode` — language-aware shortcut
+
+Most agent use cases come down to "run this snippet of Python" or "run this shell script". `runCode` wraps `exec` for you.
+
+```python
+# Python — uses heredoc internally
+out = sandbox.run_code("print(sum(range(100)))", language="python")
+print(out.stdout)  # 4950
+
+# Shell (the default)
+sandbox.run_code("ls /workspace")
+```
+
+```ts
+const py = await sandbox.runCode("print(sum(range(100)))", "python");
+const sh = await sandbox.runCode("ls /workspace");        // language defaults to "shell"
+```
+
+Under the hood, `language: "python"` becomes:
+
+```sh
+python3 - <<'PY'
+print(sum(range(100)))
+PY
+```
+
+so multi-line code, quotes, and `$` are all safe.
+
+## Timeouts
+
+A sandbox is a real VM with a real process tree, so commands can block forever. Always pass a timeout for anything you don't fully trust.
+
+```python
+# Kill the command after 10 s — the SDK raises ServerError.
+sandbox.exec("sleep 30", timeout_seconds=10)
+```
+
+```ts
+await sandbox.exec("sleep 30", { timeoutSeconds: 10 });
+```
+
+When the deadline is hit, the in-guest agent sends `SIGTERM` then `SIGKILL`, and the API returns a non-zero `exit_code` with the partial output captured so far.
+
+## Working directory and environment
+
+Pass through with normal shell tools — there is no separate `cwd` / `env` field.
+
+```ts
+await sandbox.exec("cd /workspace/repo && pnpm install");
+await sandbox.exec("OPENAI_API_KEY=$KEY python3 agent.py");
+```
+
+For long-lived env vars, bake them into your [template](/docs/concepts/templates) (`ENV KEY=value` in the Dockerfile) or write them to `/etc/profile.d/agent.sh` once at sandbox start.
+
+## Streaming output with `logs`
+
+`exec` is synchronous: you get the full output only after the command exits. For long-running processes (a `next dev` server, an `ffmpeg` job, an agent loop), use `logs` instead — it's an async iterator over the sandbox's full stdout / stderr stream.
+
+```python
+for line in sandbox.logs(stream="both", follow=True):
+    print(line)
+    if "Ready" in line:
+        break
+```
+
+```ts
+for await (const line of sandbox.logs({ stream: "both", follow: true })) {
+  console.log(line);
+  if (line.includes("Ready")) break;
+}
+```
+
+`stream` is one of `stdout`, `stderr`, or `both`. With `follow: false` you get a single snapshot of everything captured so far; with `follow: true` the connection stays open as Server-Sent Events.
+
+## Exit-code conventions
+
+| Code        | Meaning                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `0`         | Success.                                                             |
+| `1`–`125`   | Program-defined failure (the command chose to exit non-zero).         |
+| `126`       | Command found but not executable.                                    |
+| `127`       | Command not found.                                                   |
+| `128 + N`   | Killed by signal `N`. `137` (`128+9`) is `SIGKILL`, typical for OOM or timeout. |
+| `143`       | Killed by `SIGTERM`, typical for a clean shutdown.                   |
+
+If the API itself fails (sandbox gone, network blip), the SDK raises `NotFoundError` / `ServerError` rather than returning an `ExecResult` with a fake exit code — so you can `try/except` to distinguish "your code failed" from "PandaStack failed".
+
+## Boot warm-up retries
+
+Right after a sandbox reaches `running`, the in-guest SSH socket can briefly 5xx with `connection refused` while sshd finishes binding. Both SDKs transparently retry the first few `exec` calls with exponential backoff, so you generally don't need to.
+
+If you've subclassed or wrapped the client, the retry helper lives in `Sandbox._retryOnWarmup` (TS) / `Sandbox._retry_on_warmup` (Python).
+
+## REST equivalent
+
+```http
+POST /v1/sandboxes/{id}/exec
+Content-Type: application/json
+
+{
+  "cmd": "python3 -c 'print(2+2)'",
+  "timeout_seconds": 30
+}
+```
+
+Returns `200 OK` with the `ExecResult` JSON shown above. See the [REST reference](/docs/reference/rest-api) for the full schema.

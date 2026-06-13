@@ -1,0 +1,27 @@
+---
+agent_env_file: /etc/pandastack/env.agent
+
+# Fleet-wide, non-secret knobs this role is allowed to manage.
+agent_env_managed:
+  PANDASTACK_STREAM_RESTORE: "1"
+  PANDASTACK_HUGEPAGES: "1"
+  PANDASTACK_NATID: "1"
+  PANDASTACK_NATID_POOL_SIZE: "24"
+
+# Hard guard: keys this role must NEVER write (secrets + per-host identity).
+# If a managed key ever collides with this list the play fails loudly.
+agent_env_denylist:
+  - PANDASTACK_DB_DSN
+  - PANDASTACK_DB_DRIVER
+  - PANDASTACK_NODE_TOKEN
+  - PANDASTACK_SHARED_KEY
+  - SUPABASE_JWKS_URL
+  - CLICKHOUSE_URL
+  - PANDASTACK_CLICKHOUSE_URL
+  - PANDASTACK_AGENT_ID
+  - PANDASTACK_AGENT_ENDPOINT
+  - PANDASTACK_REGION
+  - PANDASTACK_ZONE
+  - PANDASTACK_INTERNAL_IP
+  - PANDASTACK_GCS_BUCKET
+  - PANDASTACK_NATID_SLOT

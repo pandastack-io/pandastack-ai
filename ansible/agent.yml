@@ -1,0 +1,16 @@
+---
+# Push just the agent binary to the fleet (the common case on a code release).
+# Serial 1 so at most one node restarts its agent at a time.
+- name: Push pandastack-agent binary
+  hosts: agents
+  gather_facts: false
+  serial: 1
+  handlers:
+    - name: restart pandastack-agent
+      ansible.builtin.systemd:
+        name: "{{ agent_service }}"
+        state: restarted
+      when: agent_restart_on_change | bool
+  roles:
+    - common
+    - agent

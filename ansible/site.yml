@@ -1,0 +1,21 @@
+---
+# Full config-push: converge the whole fleet (firecracker + agent + env knobs)
+# WITHOUT recreating any VM. Idempotent — re-running with no upstream change is
+# a no-op. Serial + max_fail_percentage keeps a bad push from taking out the
+# whole fleet at once.
+- name: Converge agent fleet
+  hosts: agents
+  gather_facts: true
+  serial: 1
+  max_fail_percentage: 0
+  handlers:
+    - name: restart pandastack-agent
+      ansible.builtin.systemd:
+        name: "{{ agent_service }}"
+        state: restarted
+      when: agent_restart_on_change | bool
+  roles:
+    - common
+    - firecracker
+    - agent
+    - agent_env

@@ -1,0 +1,136 @@
+---
+title: Events
+description: Per-sandbox lifecycle events — snapshot the last N or follow live over SSE.
+---
+
+Every meaningful state change a sandbox goes through is published as a JSON event with a stable schema. You can either snapshot the recent history or subscribe to the live tail.
+
+```bash
+GET /v1/sandboxes/{id}/events?tail=50            # snapshot (JSON array)
+GET /v1/sandboxes/{id}/events?tail=20&follow=1   # SSE stream
+```
+
+## Event schema
+
+```json
+{
+  "ts": "2026-06-01T15:30:18.482Z",
+  "sandbox_id": "6be92de4-…",
+  "agent_id": "pandastack-agent-pz20",
+  "type": "sandbox.running",
+  "code": "ok",
+  "message": "tap=tap0 guest_ip=172.20.6.118 boot_ms=183",
+  "metadata": { "boot_ms": 183, "from_snapshot": true, "warm": true }
+}
+```
+
+- `ts` — server timestamp (millisecond precision, UTC).
+- `type` — string from the catalog below.
+- `code` — `ok` / `error` / `warn`. Driven by the event type.
+- `metadata` — type-specific structured fields (often duplicates of what's in `message`).
+
+## Event catalog
+
+### Lifecycle
+
+| `type`                | When                                                                  | Notable metadata                    |
+| --------------------- | --------------------------------------------------------------------- | ----------------------------------- |
+| `sandbox.running`     | Firecracker booted, agent reached `running` state.                    | `boot_ms`, `boot_mode`, `from_snapshot`, `warm` |
+| `sandbox.ssh_ready`   | First successful SSH probe (sshd accepting connections).              | `ssh_ready_ms`                      |
+| `sandbox.paused`      | `POST /pause` succeeded (VM CPU stopped, memory live).                | —                                   |
+| `sandbox.resumed`     | `POST /resume` succeeded.                                             | —                                   |
+| `sandbox.hibernated`  | Memory written to disk, FC process exited, slot retained.             | `snap_ms`, `mem_mib`                |
+| `sandbox.woken`       | Hibernated sandbox restored from snapshot.                            | `wake_ms`                           |
+| `sandbox.deleted`     | Rootfs purged, slot released back to the pool.                        | `lifetime_seconds`                  |
+
+### Forks
+
+| `type`                  | When                                                                    |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `sandbox.forked`        | A child VM produced by `POST /fork` reached running.                    |
+| `sandbox.warmforked`    | Same but via the [warm-fork](/docs/internals/fork-cow) path (no FC start). |
+| `fork.staged`           | Parent snapshot captured, children begin spawning in parallel.          |
+| `fork.completed`        | Single fork child reached running.                                      |
+| `fork.child_failed`     | One child in a fork-tree failed to boot.                                |
+| `fork_tree.completed`   | All N children of a `fork-tree` request reached running (or failed).    |
+| `fork_tree.promoted`    | A winner was promoted via `POST /promote`, siblings cleaned up.         |
+| `warmfork.staged`       | A warm-fork child was restored from the template seed, mid-spawn.       |
+
+### Crash & recovery
+
+| `type`              | When                                                                                                                                                                              |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vm.died`           | Firecracker process exited unexpectedly. Sandbox transitions to `failed`. `metadata.exit_code`, `metadata.signal` populated when available.                                       |
+| `recover.orphaned`  | Reconciliation found a sandbox row whose VM had vanished (host reboot, crash). Row is marked `failed`.                                                                            |
+| `recover.unmanaged` | Reconciliation found a Firecracker socket with no matching row (orphaned VM after dirty shutdown). The orphan VM is killed and its slot released.                                 |
+
+## Snapshot example
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/events?tail=10"
+```
+
+```json
+[
+  {"ts":"2026-06-01T15:30:18.302Z","type":"sandbox.running",  "metadata":{"boot_ms":183,"warm":true}},
+  {"ts":"2026-06-01T15:30:18.482Z","type":"sandbox.ssh_ready","metadata":{"ssh_ready_ms":180}},
+  {"ts":"2026-06-01T15:33:42.001Z","type":"sandbox.paused"},
+  {"ts":"2026-06-01T15:34:11.917Z","type":"sandbox.hibernated","metadata":{"snap_ms":214,"mem_mib":256}}
+]
+```
+
+## Follow (SSE)
+
+```bash
+curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  "https://api.pandastack.ai/v1/sandboxes/$SID/events?follow=1&tail=5"
+```
+
+```
+event: ev
+data: {"ts":"…","type":"sandbox.running","metadata":{…}}
+
+event: ev
+data: {"ts":"…","type":"sandbox.ssh_ready","metadata":{"ssh_ready_ms":180}}
+```
+
+Standard SSE; `event:` is always `ev`, `data:` is the JSON envelope. Reconnect by passing the timestamp of the last seen event as `?since=…`.
+
+```python
+import sseclient, requests
+resp = requests.get(url, headers=hdr, params={"follow": 1, "tail": 0}, stream=True)
+for ev in sseclient.SSEClient(resp).events():
+    payload = json.loads(ev.data)
+    if payload["type"] == "fork_tree.completed":
+        break
+```
+
+## Where it's stored
+
+- **Hot, in-memory**: per-sandbox ring buffer, ~512 events. Always the source of truth for the `?tail=` snapshot.
+- **On-disk**: appended to `<data-dir>/vms/<sandbox-id>/events.jsonl`. Survives agent restarts.
+- **ClickHouse `sandbox_events`**: 90-day retention, workspace-partitioned. Backs the dashboard, `/v1/metrics/*` endpoints, and any analytical queries you run yourself.
+
+## Use cases
+
+**Wait for a specific transition.** Don't poll `GET /sandboxes/{id}` every 100 ms — open the events stream once and react.
+
+```python
+for ev in sandbox.events(follow=True):
+    if ev["type"] == "sandbox.ssh_ready":
+        break
+sandbox.exec("python train.py")
+```
+
+**Build a fork-tree completion bar.** Stream events, count `fork.completed`/`fork.child_failed`, show progress; on `fork_tree.completed` pick the winner and call `promote`.
+
+**Operational alerting.** `vm.died` and `recover.orphaned` are your "something is wrong" signal. Pipe the SSE into PagerDuty / Slack via a tiny relay.
+
+**Audit reconstruction.** Combined with [audit log](/docs/concepts/observability), you can answer "user X called pause, then who/what unpaused it 4 seconds later?" — the events show the resume, audit_log shows the actor.
+
+## Limits
+
+- Ring buffer: 512 events. If you let the SSE backlog grow beyond that without consuming, old events are dropped (oldest first). The on-disk JSONL still has them — fall back to `?since=` to backfill.
+- Single subscriber pattern works best; the broadcast fan-out is O(subscribers) per event.
+- `metadata` is intentionally schemaless per event-type. Treat unknown keys as future-additive.

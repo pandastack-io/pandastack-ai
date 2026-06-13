@@ -1,0 +1,61 @@
+---
+title: Snapshots and forks
+description: Capture VM state in seconds. Fork running VMs in milliseconds.
+---
+
+Snapshots capture a sandbox state. Forks create a new sandbox from an existing sandbox. The supported API works from a live sandbox ID; SDK helpers that construct directly from a snapshot are not available today.
+
+## CLI
+
+```bash
+pandastack sandbox snapshot <id>
+pandastack sandbox fork <id>
+pandastack sandbox pause <id>
+pandastack sandbox resume <id>
+pandastack sandbox hibernate <id>
+pandastack sandbox wake <id>
+pandastack sandbox set-ttl <id> 1h
+```
+
+## Python
+
+```python
+snapshot = sandbox.snapshot()
+fork = sandbox.fork(metadata={"branch": "experiment"})
+forks = sandbox.fork_tree(3, metadata={"batch": "fanout"})
+
+sandbox.promote()
+sandbox.hibernate()
+sandbox.wake()
+sandbox.set_ttl(3600)
+sandbox.set_persistent(True)
+print(sandbox.lifecycle())
+```
+
+## TypeScript
+
+```ts
+const snapshot = await sandbox.snapshot();
+const fork = await sandbox.fork({ branch: "experiment" });
+const forks = await sandbox.forkTree(3, { batch: "fanout" });
+
+await sandbox.promote();
+await sandbox.hibernate();
+await sandbox.wake();
+await sandbox.setTtl(3600);
+await sandbox.setPersistent(true);
+console.log(await sandbox.lifecycle());
+```
+
+## API
+
+```http
+POST /v1/sandboxes/{id}/snapshots
+POST /v1/sandboxes/{id}/fork
+POST /v1/sandboxes/{id}/fork-tree
+POST /v1/sandboxes/{id}/promote
+POST /v1/sandboxes/{id}/hibernate
+POST /v1/sandboxes/{id}/wake
+GET /v1/sandboxes/{id}/lifecycle
+PATCH /v1/sandboxes/{id}/lifecycle
+```

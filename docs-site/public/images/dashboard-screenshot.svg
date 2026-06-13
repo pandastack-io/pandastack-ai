@@ -1,0 +1,29 @@
+<svg width="1200" height="720" viewBox="0 0 1200 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">PandaStack dashboard screenshot placeholder</title>
+  <desc id="desc">A stylized dashboard showing sandbox health, boot metrics, and audit events.</desc>
+  <rect width="1200" height="720" rx="28" fill="#0b1020"/>
+  <rect x="32" y="32" width="1136" height="656" rx="24" fill="#111827" stroke="#253044"/>
+  <text x="72" y="92" fill="#f8fafc" font-family="Inter,Arial" font-size="34" font-weight="700">PandaStack</text>
+  <text x="72" y="130" fill="#94a3b8" font-family="Inter,Arial" font-size="18">Firecracker microVM sandboxes</text>
+  <rect x="72" y="174" width="312" height="142" rx="18" fill="#172033"/>
+  <text x="96" y="222" fill="#cbd5e1" font-family="Inter,Arial" font-size="16">Running sandboxes</text>
+  <text x="96" y="276" fill="#38bdf8" font-family="Inter,Arial" font-size="48" font-weight="700">18</text>
+  <rect x="424" y="174" width="312" height="142" rx="18" fill="#172033"/>
+  <text x="448" y="222" fill="#cbd5e1" font-family="Inter,Arial" font-size="16">Warm boot p50</text>
+  <text x="448" y="276" fill="#34d399" font-family="Inter,Arial" font-size="48" font-weight="700">42ms</text>
+  <rect x="776" y="174" width="312" height="142" rx="18" fill="#172033"/>
+  <text x="800" y="222" fill="#cbd5e1" font-family="Inter,Arial" font-size="16">Audit events</text>
+  <text x="800" y="276" fill="#fbbf24" font-family="Inter,Arial" font-size="48" font-weight="700">1.2k</text>
+  <rect x="72" y="360" width="660" height="260" rx="18" fill="#172033"/>
+  <text x="96" y="408" fill="#f8fafc" font-family="Inter,Arial" font-size="22" font-weight="700">Recent sandboxes</text>
+  <g fill="#94a3b8" font-family="Inter,Arial" font-size="16">
+    <text x="96" y="462">sbx_code_01</text><text x="352" y="462">python-template</text><text x="594" y="462">running</text>
+    <text x="96" y="514">sbx_lsp_12</text><text x="352" y="514">node-template</text><text x="594" y="514">warm</text>
+    <text x="96" y="566">sbx_ci_33</text><text x="352" y="566">go-template</text><text x="594" y="566">paused</text>
+  </g>
+  <rect x="776" y="360" width="312" height="260" rx="18" fill="#172033"/>
+  <text x="800" y="408" fill="#f8fafc" font-family="Inter,Arial" font-size="22" font-weight="700">Host capacity</text>
+  <rect x="800" y="452" width="240" height="16" rx="8" fill="#263248"/><rect x="800" y="452" width="168" height="16" rx="8" fill="#38bdf8"/>
+  <rect x="800" y="514" width="240" height="16" rx="8" fill="#263248"/><rect x="800" y="514" width="132" height="16" rx="8" fill="#34d399"/>
+  <rect x="800" y="576" width="240" height="16" rx="8" fill="#263248"/><rect x="800" y="576" width="204" height="16" rx="8" fill="#fbbf24"/>
+</svg>

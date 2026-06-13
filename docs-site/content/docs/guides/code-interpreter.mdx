@@ -1,0 +1,72 @@
+---
+title: Code interpreter
+description: Replace OpenAI's code-interpreter with a self-hosted Python execution sandbox.
+---
+
+The `code-interpreter` template runs Python inside a Firecracker microVM. Use `exec` for commands, `run_code(..., language="python")` for Python snippets, and `sandbox.filesystem` for files.
+
+## One-shot exec
+
+```python
+from pandastack import Sandbox
+
+sandbox = Sandbox.create(template="code-interpreter", ttl_seconds=3600)
+result = sandbox.exec(["python", "-c", "print(2 + 2)"], timeout_seconds=30)
+print(result.stdout)  # "4
+"
+sandbox.kill()
+```
+
+This spawns Python fresh each call. Variables don't persist between runs.
+
+## Run Python code
+
+```python
+sandbox = Sandbox.create(template="code-interpreter", ttl_seconds=3600)
+
+out = sandbox.run_code("""
+x = 42
+y = x * 2
+print(x, y)
+""", language="python")
+print(out.stdout)  # "42 84
+"
+```
+
+For shell snippets, use `language="shell"`.
+
+```python
+out = sandbox.run_code("python --version", language="shell")
+print(out.stdout)
+```
+
+## File uploads
+
+```python
+sandbox.filesystem.write("/workspace/data.csv", open("./data.csv", "r").read())
+result = sandbox.run_code("""
+import pandas as pd
+df = pd.read_csv('/workspace/data.csv')
+print(df.describe())
+""", language="python")
+print(result.stdout)
+```
+
+For larger files, use upload and download helpers:
+
+```python
+sandbox.filesystem.upload("./data.csv", "/workspace/data.csv")
+sandbox.filesystem.download("/workspace/result.csv", "./result.csv")
+```
+
+## Persistence
+
+Persistent volume APIs are not available yet. Keep work inside a live sandbox with a longer TTL, or download the workspace before cleanup.
+
+```python
+sandbox.set_ttl(7200)
+sandbox.filesystem.download("/workspace/notebook.ipynb", "./notebook.ipynb")
+sandbox.kill()
+```
+
+Track persistent storage work at [GitHub issues](https://github.com/pandastack-io/pandastack/issues).

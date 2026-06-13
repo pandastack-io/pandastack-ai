@@ -1,0 +1,81 @@
+---
+title: PandaStack
+---
+
+# PandaStack
+
+Open-source Firecracker microVM sandboxes for AI agents and code execution.
+
+## 60-second quickstart
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack
+bash scripts/mac-local-e2e.sh
+open http://localhost:3000
+```
+
+Create a sandbox from the local API:
+
+```bash
+curl -sS http://localhost:8080/v1/sandboxes \
+  -H 'Authorization: Bearer pds_local_dev_token' \
+  -H 'Content-Type: application/json' \
+  -d '{"template":"ubuntu-22.04","ttl_seconds":600}'
+```
+
+## What it does
+
+- Firecracker microVM sandboxes with strong process and kernel isolation.
+- Snapshot anywhere and fork running environments instantly.
+- Sub-second boot on every create via baked snapshot restore.
+- Template-defined CPU, RAM, and disk quotas.
+- Network egress controls for safer code execution.
+- Template-based images: Docker images converted to ext4 roots.
+- Pause, hibernate, and wake lifecycle controls.
+- Exec, REPL, LSP, and browser terminal surfaces.
+- Audit log and observability backed by Postgres and ClickHouse.
+- Multi-region scheduling primitives for larger fleets.
+
+## Architecture
+
+```text
++---------+      +-----+      +-----------+      +------------------+      +----------------------+
+|  SDKs   | ---> | API | ---> | Scheduler | ---> | Agents per host  | ---> | Firecracker microVMs |
++---------+      +-----+      +-----------+      +------------------+      +----------------------+
+                      |              |                    |
+                      v              v                    v
+                Postgres/audit   Capacity scoring   Snapshot seeds + UFFD streaming
+```
+
+The API receives sandbox requests, the scheduler chooses a host, and an agent creates or resumes a Firecracker microVM. Every create restores a baked per-template snapshot (optionally streaming guest memory on demand), and the snapshot store persists state.
+
+## Use it from your code
+
+```ts
+import { PandaStack } from "@pandastack/sdk";
+
+const panda = new PandaStack({ apiKey: process.env.PANDASTACK_API_KEY });
+const sandbox = await panda.sandboxes.create({ template: "node-20" });
+console.log(await sandbox.exec("node", ["-e", "console.log('hello')"]));
+```
+
+```python
+from pandastack import PandaStack
+
+client = PandaStack(api_key="pds_local_dev_token", base_url="http://localhost:8080")
+sandbox = client.sandboxes.create(template="python-3.12")
+print(sandbox.exec("python", ["-c", "print('hello')"]).stdout)
+```
+
+```go
+client := pandastack.NewClient(pandastack.WithAPIKey(os.Getenv("PANDASTACK_API_KEY")))
+sbx, err := client.Sandboxes.Create(ctx, pandastack.CreateSandboxRequest{Template: "go-1.22"})
+if err != nil { log.Fatal(err) }
+```
+
+## Next steps
+
+- Start locally with the [Apple Silicon guide](/docs/getting-started/local-mac-apple-silicon).
+- Review [Supabase auth for self-hosting](/docs/self-host/auth-supabase).
+- Explore [Terraform self-host examples](https://github.com/pandastack-io/pandastack/tree/main/examples/terraform).

@@ -1,0 +1,72 @@
+---
+title: Data pipelines
+description: Run untrusted data transformations in disposable sandboxes — perfect for ETL, scraping, and one-off batch jobs.
+---
+
+Use disposable sandboxes to isolate ETL steps, scrapers, and batch transforms. Put files through `sandbox.filesystem` and execute code with `exec` or `run_code`.
+
+## Python batch job
+
+```python
+from pandastack import Sandbox
+
+sandbox = Sandbox.create(
+    template="code-interpreter",
+    ttl_seconds=3600,
+    metadata={"pipeline": "daily-import"},
+)
+
+sandbox.filesystem.upload("./input.csv", "/workspace/input.csv")
+
+result = sandbox.exec([
+    "python",
+    "-c",
+    "import pandas as pd; df=pd.read_csv('/workspace/input.csv'); df.to_json('/workspace/output.json')",
+], timeout_seconds=300)
+
+if result.exit_code != 0:
+    print(sandbox.logs(stream="both", follow=False))
+    raise RuntimeError(result.stderr)
+
+sandbox.filesystem.download("/workspace/output.json", "./output.json")
+sandbox.kill()
+```
+
+## TypeScript batch job
+
+```ts
+import { Sandbox } from "@pandastack/sdk";
+
+const sandbox = await Sandbox.create({
+  template: "code-interpreter",
+  ttlSeconds: 3600,
+  metadata: { pipeline: "daily-import" },
+});
+
+await sandbox.filesystem.upload("./input.csv", "/workspace/input.csv");
+
+const result = await sandbox.exec([
+  "python",
+  "-c",
+  "import pandas as pd; df=pd.read_csv('/workspace/input.csv'); df.to_json('/workspace/output.json')",
+], 300);
+
+if (result.exitCode !== 0) {
+  console.log(await sandbox.logs("both", false));
+  throw new Error(result.stderr);
+}
+
+await sandbox.filesystem.download("/workspace/output.json", "./output.json");
+await sandbox.kill();
+```
+
+## CLI debugging
+
+```bash
+pandastack sandbox create --template code-interpreter --ttl 1h
+pandastack sandbox cp ./input.csv <id>:/workspace/input.csv
+pandastack sandbox exec <id> -- python /workspace/transform.py
+pandastack sandbox cp <id>:/workspace/output.json ./output.json
+pandastack sandbox logs <id> --no-follow --stream both
+pandastack sandbox delete <id>
+```

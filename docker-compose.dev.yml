@@ -1,0 +1,104 @@
+# Local development stack for PandaStack self-hosters.
+#
+# Brings up: Postgres (control plane), ClickHouse (observability),
+# api (control plane), dashboard (web UI).
+#
+# Does NOT bring up the agent / Firecracker — those need /dev/kvm and run
+# directly on the host (or inside a Lima VM on Mac). See scripts/local/.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   # then on the host (Linux with KVM):
+#   cd agent && sudo ./agent --listen :7070
+#   export PANDASTACK_AGENT_URL=http://host.docker.internal:7070
+#   docker compose -f docker-compose.dev.yml restart api
+#
+# Tear down: docker compose -f docker-compose.dev.yml down -v
+#
+# Self-hosters: copy .env.dev.example to .env.dev and edit. Stripe and
+# Supabase are intentionally optional — leave them blank to use the
+# file-token auth path with no billing.
+
+name: pandastack-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pandastack
+      POSTGRES_PASSWORD: pandastack
+      POSTGRES_DB: pandastack
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pandastack"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    environment:
+      CLICKHOUSE_DB: pandastack
+      CLICKHOUSE_USER: pandastack
+      CLICKHOUSE_PASSWORD: pandastack
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      PANDASTACK_LISTEN: ":8080"
+      PANDASTACK_AGENT_URL: ${PANDASTACK_AGENT_URL:-http://host.docker.internal:7070}
+      PANDASTACK_POSTGRES_URL: postgres://pandastack:pandastack@postgres:5432/pandastack?sslmode=disable
+      PANDASTACK_CLICKHOUSE_URL: http://pandastack:pandastack@clickhouse:8123/pandastack
+      PANDASTACK_TOKENS_FILE: /tokens/tokens.json
+      # Supabase auth is OPTIONAL — leave blank for token-file auth.
+      SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL:-}
+      SUPABASE_ISSUER: ${SUPABASE_ISSUER:-}
+      SUPABASE_AUDIENCE: ${SUPABASE_AUDIENCE:-}
+    volumes:
+      - ./scripts/local/tokens:/tokens:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_PANDASTACK_API: http://localhost:8080
+    environment:
+      NEXT_PUBLIC_PANDASTACK_API: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pg_data:
+  ch_data:

@@ -1,0 +1,3 @@
+task_id,variant,passed,steps,input_tokens,output_tokens,total_tokens,wall_seconds,hallucinated_count,error
+01_renamed_helper,exec,True,8,0,0,0,14.78,0,
+01_renamed_helper,lsp,True,8,0,0,0,29.33,0,

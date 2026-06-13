@@ -1,0 +1,214 @@
+---
+title: REST API
+description: All PandaStack HTTP endpoints, indexed.
+---
+
+Base URL for the hosted API:
+
+```text
+https://api.pandastack.ai
+```
+
+Token-based requests use `Authorization: Bearer $PANDASTACK_TOKEN`. Token examples use the `pds_` prefix.
+
+## Public
+
+```http
+GET /healthz
+GET /version
+GET /metrics
+```
+
+## Auth and tokens
+
+JWT-only endpoints:
+
+```http
+GET /v1/me
+POST /v1/me/current-org
+POST /v1/me/tokens
+GET /v1/me/tokens
+DELETE /v1/me/tokens/{prefix}
+```
+
+## Sandboxes
+
+Token or JWT:
+
+```http
+POST /v1/sandboxes
+GET /v1/sandboxes
+GET /v1/sandboxes/{id}
+DELETE /v1/sandboxes/{id}
+```
+
+Create body — only `template` is required. CPU and memory come from the template's baked size and are **not** accepted in this payload (older clients may send them; they will be ignored and reflected back as the template's actual size).
+
+```json
+{
+  "template": "code-interpreter",
+  "ttl_seconds": 3600,
+  "metadata": { "job": "example" }
+}
+```
+
+## Sandbox operations
+
+All operations are proxied to the agent:
+
+```http
+POST /v1/sandboxes/{id}/exec
+POST /v1/sandboxes/{id}/exec/stream
+GET /v1/sandboxes/{id}/exec/pty
+GET /v1/sandboxes/{id}/exec/ws
+GET /v1/sandboxes/{id}/logs
+GET /v1/sandboxes/{id}/events
+GET /v1/sandboxes/{id}/lsp/{lang}
+```
+
+`/exec/stream` and `/events` use Server-Sent Events. `/exec/pty`, `/exec/ws`, and `/lsp/{lang}` upgrade to WebSocket.
+
+## Filesystem
+
+```http
+GET /v1/sandboxes/{id}/fs?path=/workspace/app.py
+PUT /v1/sandboxes/{id}/fs?path=/workspace/app.py
+DELETE /v1/sandboxes/{id}/fs?path=/workspace/app.py
+GET /v1/sandboxes/{id}/fs/dir?path=/workspace
+GET /v1/sandboxes/{id}/fs/stat?path=/workspace/app.py
+```
+
+There are no `/files` or `/files/ls` routes.
+
+## Lifecycle
+
+```http
+POST /v1/sandboxes/{id}/pause
+POST /v1/sandboxes/{id}/resume
+POST /v1/sandboxes/{id}/snapshots
+POST /v1/sandboxes/{id}/fork
+POST /v1/sandboxes/{id}/fork-tree
+POST /v1/sandboxes/{id}/promote
+POST /v1/sandboxes/{id}/hibernate
+POST /v1/sandboxes/{id}/wake
+GET /v1/sandboxes/{id}/lifecycle
+PATCH /v1/sandboxes/{id}/lifecycle
+```
+
+## Preview
+
+```http
+POST /v1/sandboxes/{id}/preview
+POST /v1/sandboxes/{id}/preview-token
+```
+
+`/preview` requires JWT auth. `/preview-token` accepts token or JWT auth.
+
+## Templates
+
+```http
+GET /v1/templates
+GET /v1/templates/{name}
+POST /v1/templates/build
+DELETE /v1/templates/{name}
+GET /v1/templates/{name}/builds
+GET /v1/builds/{id}
+```
+
+## Ports
+
+```http
+GET /v1/sandboxes/{id}/ports
+POST /v1/sandboxes/{id}/ports
+DELETE /v1/sandboxes/{id}/ports
+```
+
+## Databases
+
+Managed PostgreSQL 16 (Beta). See [Databases](/docs/concepts/databases).
+
+```http
+POST   /v1/databases
+GET    /v1/databases
+GET    /v1/databases/{id}
+DELETE /v1/databases/{id}
+GET    /v1/databases/{id}/connection
+ANY    /v1/databases/{id}/proxy/{path}
+```
+
+Create body (`label` optional):
+
+```json
+{
+  "label": "my-app-db"
+}
+```
+
+CPU and memory are fixed by the `postgres-16` template (2 vCPU · 1 GiB RAM, baked into its snapshot) and can't be set per-database.
+
+`POST` returns `201` and blocks until PostgreSQL is ready (up to 90s). The body includes `connection_url`, `host`, `port`, `database`, `username`, `password`, `broker_token`, and `broker_url`. `DELETE` returns `204` and is irreversible. The `proxy` route forwards to the in-VM REST query broker; authenticate it with `Authorization: Bearer <broker_token>`.
+
+## Volumes
+
+Durable per-workspace block storage that survives sandbox lifecycles. See [Volumes](/docs/concepts/volumes).
+
+```http
+POST   /v1/volumes
+GET    /v1/volumes
+GET    /v1/volumes/{name}
+DELETE /v1/volumes/{name}
+```
+
+Create body — `name` is required, `size_mb` optional (defaults to 256 MiB, hard ceiling 65536 MiB / 64 GiB; tier quotas apply below the ceiling):
+
+```json
+{
+  "name": "my-data",
+  "size_mb": 1024
+}
+```
+
+Over-quota creates return `429`; a host with no storage headroom returns `507`. A volume is host-pinned to the agent that creates it for its lifetime. Listing is per-agent (it queries the scheduler-picked agent), so a volume created on one agent may not appear in a list served by another until a control-plane volume registry exists.
+
+## Apps (git-driven hosting)
+
+Connect a GitHub repo and serve it behind a stable per-app URL with blue-green deploys. See [Apps overview](/docs/apps/overview).
+
+```http
+POST   /v1/apps
+GET    /v1/apps
+GET    /v1/apps/{id}
+PATCH  /v1/apps/{id}
+DELETE /v1/apps/{id}
+
+POST   /v1/apps/{id}/deploys
+GET    /v1/apps/{id}/deploys
+GET    /v1/apps/{id}/deploys/{deployID}
+GET    /v1/apps/{id}/deploys/{deployID}/logs
+POST   /v1/apps/{id}/rollback
+GET    /v1/apps/{id}/runtime-logs
+ANY    /v1/apps/{id}/proxy/{rest...}
+```
+
+Create body — `git_url` is required; `git_branch`, `framework`, `runtime`, build/start commands, `env`, `port`, `cpu`, and `memory_mb` are optional (framework is auto-detected when omitted). The response includes a computed `url`. `GET /v1/apps/{id}` also returns it.
+
+`POST /v1/apps/{id}/deploys` triggers a deploy (optional `git_ref` override) and returns a deployment row. `/deploys/{deployID}/logs` and `/runtime-logs` use Server-Sent Events when called with `?follow=1`. `POST /v1/apps/{id}/rollback` reverts to the previous (or a specified) deployment. The `proxy` route is a stable reverse proxy to the live sandbox.
+
+## GitHub integration (apps)
+
+```http
+GET    /v1/github/connect
+GET    /v1/github/callback
+GET    /v1/github/installations
+DELETE /v1/github/installations/{id}
+GET    /v1/github/repos
+POST   /v1/webhooks/github
+```
+
+`/connect` returns the GitHub App install URL; `/callback` records the installation. `/repos` lists repos for an installation. `POST /v1/webhooks/github` is the HMAC-verified push webhook that triggers auto-deploys for apps with `auto_deploy=true` on the pushed branch.
+
+## Billing
+
+```http
+POST /v1/billing/sync
+```

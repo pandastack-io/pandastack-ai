@@ -1,0 +1,122 @@
+{
+  "started_at": "2026-05-26T20:24:06.343385+05:30",
+  "finished_at": "2026-05-26T20:24:50.634533+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 12,
+  "successes": 11,
+  "failures": 1,
+  "boot_p50_ms": 368,
+  "boot_p90_ms": 559,
+  "boot_p99_ms": 574.3,
+  "boot_p99_9_ms": 575.83,
+  "boot_min_ms": 234,
+  "boot_max_ms": 576,
+  "wall_p50_ms": 476,
+  "wall_p99_ms": 696.4,
+  "boot_modes": {
+    "snapshot-natid": 11
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 0,
+      "wall_ms": 0,
+      "delete_ms": 0,
+      "boot_mode": "",
+      "ok": false,
+      "err": "status 500: {\"error\":\"network allocate: database is locked (5) (SQLITE_BUSY)\"}\n"
+    },
+    {
+      "iter": 1,
+      "boot_ms": 509,
+      "wall_ms": 654,
+      "delete_ms": 3052,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 559,
+      "wall_ms": 698,
+      "delete_ms": 3084,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 576,
+      "wall_ms": 682,
+      "delete_ms": 3059,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 368,
+      "wall_ms": 476,
+      "delete_ms": 3058,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 234,
+      "wall_ms": 334,
+      "delete_ms": 3058,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 368,
+      "wall_ms": 470,
+      "delete_ms": 3059,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 465,
+      "wall_ms": 659,
+      "delete_ms": 3049,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 307,
+      "wall_ms": 433,
+      "delete_ms": 3049,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 325,
+      "wall_ms": 428,
+      "delete_ms": 3049,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 236,
+      "wall_ms": 405,
+      "delete_ms": 3064,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 480,
+      "wall_ms": 606,
+      "delete_ms": 3074,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

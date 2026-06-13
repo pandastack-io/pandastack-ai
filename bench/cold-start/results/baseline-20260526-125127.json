@@ -1,0 +1,426 @@
+{
+  "started_at": "2026-05-26T18:21:28.198482+05:30",
+  "finished_at": "2026-05-26T18:28:24.033736+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 50,
+  "successes": 50,
+  "failures": 0,
+  "boot_p50_ms": 1174.5,
+  "boot_p90_ms": 1638.4,
+  "boot_p99_ms": 66776.81999999999,
+  "boot_p99_9_ms": 67386.282,
+  "boot_min_ms": 1100,
+  "boot_max_ms": 67454,
+  "wall_p50_ms": 1184,
+  "wall_p99_ms": 67007.27,
+  "boot_modes": {
+    "cold": 3,
+    "snapshot": 47
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 1281,
+      "wall_ms": 1291,
+      "delete_ms": 3056,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 1449,
+      "wall_ms": 1458,
+      "delete_ms": 3077,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 1202,
+      "wall_ms": 1210,
+      "delete_ms": 3061,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 1833,
+      "wall_ms": 1844,
+      "delete_ms": 3070,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 1232,
+      "wall_ms": 1243,
+      "delete_ms": 3078,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 1660,
+      "wall_ms": 1671,
+      "delete_ms": 3066,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 67454,
+      "wall_ms": 67682,
+      "delete_ms": 103,
+      "boot_mode": "cold",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 1618,
+      "wall_ms": 1631,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 8,
+      "boot_ms": 1125,
+      "wall_ms": 1138,
+      "delete_ms": 3041,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 9,
+      "boot_ms": 1166,
+      "wall_ms": 1179,
+      "delete_ms": 3042,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 10,
+      "boot_ms": 1136,
+      "wall_ms": 1144,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 11,
+      "boot_ms": 1152,
+      "wall_ms": 1162,
+      "delete_ms": 3053,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 12,
+      "boot_ms": 1192,
+      "wall_ms": 1204,
+      "delete_ms": 3046,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 13,
+      "boot_ms": 1146,
+      "wall_ms": 1157,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 14,
+      "boot_ms": 1170,
+      "wall_ms": 1179,
+      "delete_ms": 3045,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 15,
+      "boot_ms": 1292,
+      "wall_ms": 1301,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 16,
+      "boot_ms": 1131,
+      "wall_ms": 1142,
+      "delete_ms": 3048,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 17,
+      "boot_ms": 1176,
+      "wall_ms": 1185,
+      "delete_ms": 3051,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 18,
+      "boot_ms": 1162,
+      "wall_ms": 1170,
+      "delete_ms": 3050,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 19,
+      "boot_ms": 1167,
+      "wall_ms": 1176,
+      "delete_ms": 3043,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 20,
+      "boot_ms": 1168,
+      "wall_ms": 1178,
+      "delete_ms": 3050,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 21,
+      "boot_ms": 1166,
+      "wall_ms": 1178,
+      "delete_ms": 3047,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 22,
+      "boot_ms": 1225,
+      "wall_ms": 1233,
+      "delete_ms": 3078,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 23,
+      "boot_ms": 1636,
+      "wall_ms": 1648,
+      "delete_ms": 3054,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 24,
+      "boot_ms": 1173,
+      "wall_ms": 1182,
+      "delete_ms": 3045,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 25,
+      "boot_ms": 1169,
+      "wall_ms": 1180,
+      "delete_ms": 3049,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 26,
+      "boot_ms": 1160,
+      "wall_ms": 1168,
+      "delete_ms": 3050,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 27,
+      "boot_ms": 1228,
+      "wall_ms": 1237,
+      "delete_ms": 3046,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 28,
+      "boot_ms": 1234,
+      "wall_ms": 1243,
+      "delete_ms": 3042,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 29,
+      "boot_ms": 1238,
+      "wall_ms": 1248,
+      "delete_ms": 3046,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 30,
+      "boot_ms": 1163,
+      "wall_ms": 1171,
+      "delete_ms": 3050,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 31,
+      "boot_ms": 1169,
+      "wall_ms": 1179,
+      "delete_ms": 3055,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 32,
+      "boot_ms": 1155,
+      "wall_ms": 1166,
+      "delete_ms": 3040,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 33,
+      "boot_ms": 66072,
+      "wall_ms": 66305,
+      "delete_ms": 117,
+      "boot_mode": "cold",
+      "ok": true
+    },
+    {
+      "iter": 34,
+      "boot_ms": 1445,
+      "wall_ms": 1456,
+      "delete_ms": 3046,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 35,
+      "boot_ms": 1289,
+      "wall_ms": 1297,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 36,
+      "boot_ms": 1458,
+      "wall_ms": 1467,
+      "delete_ms": 3044,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 37,
+      "boot_ms": 1100,
+      "wall_ms": 1110,
+      "delete_ms": 3045,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 38,
+      "boot_ms": 1162,
+      "wall_ms": 1173,
+      "delete_ms": 3045,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 39,
+      "boot_ms": 1111,
+      "wall_ms": 1122,
+      "delete_ms": 3039,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 40,
+      "boot_ms": 1206,
+      "wall_ms": 1218,
+      "delete_ms": 3050,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 41,
+      "boot_ms": 1240,
+      "wall_ms": 1248,
+      "delete_ms": 3048,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 42,
+      "boot_ms": 1134,
+      "wall_ms": 1147,
+      "delete_ms": 3058,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 43,
+      "boot_ms": 1301,
+      "wall_ms": 1314,
+      "delete_ms": 3047,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 44,
+      "boot_ms": 1151,
+      "wall_ms": 1159,
+      "delete_ms": 3051,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 45,
+      "boot_ms": 1171,
+      "wall_ms": 1183,
+      "delete_ms": 3047,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 46,
+      "boot_ms": 65526,
+      "wall_ms": 65758,
+      "delete_ms": 81,
+      "boot_mode": "cold",
+      "ok": true
+    },
+    {
+      "iter": 47,
+      "boot_ms": 1503,
+      "wall_ms": 1513,
+      "delete_ms": 3052,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 48,
+      "boot_ms": 1105,
+      "wall_ms": 1115,
+      "delete_ms": 3054,
+      "boot_mode": "snapshot",
+      "ok": true
+    },
+    {
+      "iter": 49,
+      "boot_ms": 1161,
+      "wall_ms": 1172,
+      "delete_ms": 3042,
+      "boot_mode": "snapshot",
+      "ok": true
+    }
+  ]
+}

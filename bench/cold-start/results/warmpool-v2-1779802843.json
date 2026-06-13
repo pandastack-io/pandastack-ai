@@ -1,0 +1,90 @@
+{
+  "started_at": "2026-05-26T19:10:43.930055+05:30",
+  "finished_at": "2026-05-26T19:12:33.971974+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 8,
+  "successes": 8,
+  "failures": 0,
+  "boot_p50_ms": 10522,
+  "boot_p90_ms": 12710.5,
+  "boot_p99_ms": 12808.15,
+  "boot_p99_9_ms": 12817.915,
+  "boot_min_ms": 0,
+  "boot_max_ms": 12819,
+  "wall_p50_ms": 10564,
+  "wall_p99_ms": 13050.51,
+  "boot_modes": {
+    "snapshot-natid": 7,
+    "warmpool": 1
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 0,
+      "wall_ms": 101,
+      "delete_ms": 4549,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 10488,
+      "wall_ms": 10554,
+      "delete_ms": 3969,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 10002,
+      "wall_ms": 10066,
+      "delete_ms": 3752,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 7277,
+      "wall_ms": 7401,
+      "delete_ms": 3864,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 10556,
+      "wall_ms": 10574,
+      "delete_ms": 4023,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 12664,
+      "wall_ms": 12858,
+      "delete_ms": 4581,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 12819,
+      "wall_ms": 13065,
+      "delete_ms": 3658,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 12630,
+      "wall_ms": 12651,
+      "delete_ms": 4373,
+      "boot_mode": "snapshot-natid",
+      "ok": true
+    }
+  ]
+}

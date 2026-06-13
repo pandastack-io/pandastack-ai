@@ -1,0 +1,20 @@
+name: Question
+description: Ask a usage or design question
+title: "question: "
+labels: [status/triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For how-to questions, please try GitHub Discussions or Discord first so the answer can help more people. Use this issue form when the question may identify a docs bug or missing product behavior.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include relevant deployment details and links.

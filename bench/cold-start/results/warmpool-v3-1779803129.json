@@ -1,0 +1,89 @@
+{
+  "started_at": "2026-05-26T19:15:29.414016+05:30",
+  "finished_at": "2026-05-26T19:16:08.048975+05:30",
+  "api_base": "http://localhost:8080",
+  "workspace": "default",
+  "template": "ubuntu-24.04",
+  "memory_mb": 1024,
+  "vcpus": 2,
+  "n": 8,
+  "successes": 8,
+  "failures": 0,
+  "boot_p50_ms": 0,
+  "boot_p90_ms": 0,
+  "boot_p99_ms": 0,
+  "boot_p99_9_ms": 0,
+  "boot_min_ms": 0,
+  "boot_max_ms": 0,
+  "wall_p50_ms": 28.5,
+  "wall_p99_ms": 169.44,
+  "boot_modes": {
+    "warmpool": 8
+  },
+  "samples": [
+    {
+      "iter": 0,
+      "boot_ms": 0,
+      "wall_ms": 170,
+      "delete_ms": 4971,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 1,
+      "boot_ms": 0,
+      "wall_ms": 7,
+      "delete_ms": 4552,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 2,
+      "boot_ms": 0,
+      "wall_ms": 2,
+      "delete_ms": 4469,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 3,
+      "boot_ms": 0,
+      "wall_ms": 10,
+      "delete_ms": 5570,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 4,
+      "boot_ms": 0,
+      "wall_ms": 12,
+      "delete_ms": 4974,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 5,
+      "boot_ms": 0,
+      "wall_ms": 46,
+      "delete_ms": 4155,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 6,
+      "boot_ms": 0,
+      "wall_ms": 162,
+      "delete_ms": 5074,
+      "boot_mode": "warmpool",
+      "ok": true
+    },
+    {
+      "iter": 7,
+      "boot_ms": 0,
+      "wall_ms": 45,
+      "delete_ms": 4406,
+      "boot_mode": "warmpool",
+      "ok": true
+    }
+  ]
+}

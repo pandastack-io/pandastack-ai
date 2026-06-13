@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a capability or improvement
+title: "feat: "
+labels: [feature, status/triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: who
+    attributes:
+      label: Who has this problem?
+      description: Describe the user, deployment shape, or workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed shape
+      description: Optional API, UX, CLI, or architecture sketch.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

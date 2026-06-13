@@ -1,0 +1,244 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+/* Class-based dark mode (next-themes sets .dark on <html>) */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Dual-theme token system.
+ * Light (default) mirrors the marketing site: warm off-white, ink text,
+ * electric-violet brand. Dark keeps the original zinc surfaces but swaps
+ * the emerald brand for the same violet.
+ *
+ * The zinc-* and emerald-* Tailwind scales are remapped below in
+ * @theme inline so the existing hardcoded utility classes (bg-zinc-900,
+ * text-emerald-400, ...) become theme-aware automatically. The light
+ * values invert the scale, preserving contrast relationships.
+ */
+:root {
+  /* Surface hierarchy */
+  --bg-base:      #fafaf8;
+  --bg-surface:   #ffffff;
+  --bg-elevated:  #ffffff;
+  --bg-overlay:   #f0efea;
+
+  /* Borders */
+  --border-subtle:  rgba(22, 22, 28, 0.05);
+  --border-default: rgba(22, 22, 28, 0.09);
+  --border-strong:  rgba(22, 22, 28, 0.16);
+
+  /* Text */
+  --text-primary:   #16161c;
+  --text-secondary: #5b5b66;
+  --text-muted:     #94949e;
+  --text-faint:     #b8b8c0;
+
+  /* Brand — electric violet (matches marketing) */
+  --brand:        #6d4aff;
+  --brand-dim:    rgba(109, 74, 255, 0.10);
+  --brand-border: rgba(109, 74, 255, 0.30);
+
+  /* Status */
+  --status-running:    #16a34a;
+  --status-paused:     #d97706;
+  --status-failed:     #dc2626;
+  --status-hibernated: #7c3aed;
+  --status-creating:   #2563eb;
+
+  /* zinc-* remap (light = inverted scale) */
+  --z-950: #fafaf8;
+  --z-900: #ffffff;
+  --z-800: #efeee9;
+  --z-700: #e2e1da;
+  --z-600: #94949e;
+  --z-500: #74747e;
+  --z-400: #5b5b66;
+  --z-300: #44444e;
+  --z-200: #2c2c35;
+  --z-100: #1f1f27;
+  --z-50:  #16161c;
+
+  /* emerald-* remap → violet brand scale */
+  --br-50:  #f4f0ff;
+  --br-200: #e3daff;
+  --br-300: #5b3ad9;
+  --br-400: #6d4aff;
+  --br-500: #6d4aff;
+  --br-600: #5b3ad9;
+  --br-700: #c9bcf5;
+  --br-900: #ece6ff;
+
+  /* status hue remaps (300 = text, 900/950 = washes) */
+  --red-300: #b91c1c;  --red-400: #dc2626;  --red-500: #dc2626;
+  --red-700: #fca5a5;  --red-900: #fee2e2;  --red-950: #fef2f2;  --red-200: #991b1b;
+  --amber-200: #92400e; --amber-300: #b45309; --amber-400: #d97706;
+  --amber-500: #d97706; --amber-700: #fcd34d; --amber-900: #fef3c7; --amber-950: #fffbeb;
+  --sky-300: #0369a1; --sky-500: #0284c7; --sky-700: #7dd3fc; --sky-900: #e0f2fe;
+
+  --xterm-bg: #0e0e16; /* terminals stay ink in both themes */
+}
+
+.dark {
+  --bg-base:      #09090b;
+  --bg-surface:   #111113;
+  --bg-elevated:  #18181b;
+  --bg-overlay:   #27272a;
+
+  --border-subtle:  rgba(255, 255, 255, 0.05);
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-strong:  rgba(255, 255, 255, 0.12);
+
+  --text-primary:   #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-muted:     #52525b;
+  --text-faint:     #3f3f46;
+
+  --brand:        #8d6bff;
+  --brand-dim:    rgba(141, 107, 255, 0.14);
+  --brand-border: rgba(141, 107, 255, 0.30);
+
+  --status-running:    #22c55e;
+  --status-paused:     #f59e0b;
+  --status-failed:     #ef4444;
+  --status-hibernated: #8b5cf6;
+  --status-creating:   #3b82f6;
+
+  /* zinc-* true values */
+  --z-950: #09090b;
+  --z-900: #18181b;
+  --z-800: #27272a;
+  --z-700: #3f3f46;
+  --z-600: #52525b;
+  --z-500: #71717a;
+  --z-400: #a1a1aa;
+  --z-300: #d4d4d8;
+  --z-200: #e4e4e7;
+  --z-100: #f4f4f5;
+  --z-50:  #fafafa;
+
+  /* emerald-* remap → violet, dark-tuned */
+  --br-50:  #f4f0ff;
+  --br-200: #d6c9ff;
+  --br-300: #b6a3ff;
+  --br-400: #9d80ff;
+  --br-500: #7c5cff;
+  --br-600: #6d4aff;
+  --br-700: #4c34b8;
+  --br-900: #261c5c;
+
+  /* status hues = stock Tailwind dark-appropriate values */
+  --red-300: #fca5a5;  --red-400: #f87171;  --red-500: #ef4444;
+  --red-700: #b91c1c;  --red-900: #7f1d1d;  --red-950: #450a0a;  --red-200: #fecaca;
+  --amber-200: #fde68a; --amber-300: #fcd34d; --amber-400: #fbbf24;
+  --amber-500: #f59e0b; --amber-700: #b45309; --amber-900: #78350f; --amber-950: #451a03;
+  --sky-300: #7dd3fc; --sky-500: #0ea5e9; --sky-700: #0369a1; --sky-900: #0c4a6e;
+
+  --xterm-bg: #09090b;
+}
+
+@theme inline {
+  --color-background: var(--bg-base);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* brand color utilities (bg-brand, text-brand, ...) */
+  --color-brand: var(--brand);
+
+  /* theme-aware zinc scale */
+  --color-zinc-50:  var(--z-50);
+  --color-zinc-100: var(--z-100);
+  --color-zinc-200: var(--z-200);
+  --color-zinc-300: var(--z-300);
+  --color-zinc-400: var(--z-400);
+  --color-zinc-500: var(--z-500);
+  --color-zinc-600: var(--z-600);
+  --color-zinc-700: var(--z-700);
+  --color-zinc-800: var(--z-800);
+  --color-zinc-900: var(--z-900);
+  --color-zinc-950: var(--z-950);
+
+  /* emerald = brand violet (emerald classes were brand-only; status uses vars) */
+  --color-emerald-50:  var(--br-50);
+  --color-emerald-200: var(--br-200);
+  --color-emerald-300: var(--br-300);
+  --color-emerald-400: var(--br-400);
+  --color-emerald-500: var(--br-500);
+  --color-emerald-600: var(--br-600);
+  --color-emerald-700: var(--br-700);
+  --color-emerald-900: var(--br-900);
+
+  /* theme-aware status hues */
+  --color-red-200: var(--red-200);
+  --color-red-300: var(--red-300);
+  --color-red-400: var(--red-400);
+  --color-red-500: var(--red-500);
+  --color-red-700: var(--red-700);
+  --color-red-900: var(--red-900);
+  --color-red-950: var(--red-950);
+  --color-amber-200: var(--amber-200);
+  --color-amber-300: var(--amber-300);
+  --color-amber-400: var(--amber-400);
+  --color-amber-500: var(--amber-500);
+  --color-amber-700: var(--amber-700);
+  --color-amber-900: var(--amber-900);
+  --color-amber-950: var(--amber-950);
+  --color-sky-300: var(--sky-300);
+  --color-sky-500: var(--sky-500);
+  --color-sky-700: var(--sky-700);
+  --color-sky-900: var(--sky-900);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Selection */
+::selection { background: rgba(109, 74, 255, 0.22); color: var(--text-primary); }
+
+/* Focus ring */
+:focus-visible {
+  outline: 2px solid rgba(109, 74, 255, 0.5);
+  outline-offset: 2px;
+}
+
+/* Skeleton shimmer */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-overlay) 25%, var(--bg-elevated) 50%, var(--bg-overlay) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s infinite;
+  border-radius: 4px;
+}
+
+/* Glowing pill pulse */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(109, 74, 255, 0.4); }
+  50%       { box-shadow: 0 0 8px 2px rgba(109, 74, 255, 0.15); }
+}
+.glow-pulse { animation: glow-pulse 2s ease-in-out infinite; }

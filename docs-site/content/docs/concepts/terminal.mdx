@@ -1,0 +1,71 @@
+---
+title: Terminal
+description: Interactive PTY into a sandbox over WebSocket.
+---
+
+The terminal endpoint hands you a real Linux PTY inside the sandbox over a WebSocket. It's what powers the dashboard's "Connect" tab, and it's the right primitive to embed if you're building an IDE or a CI live-tail.
+
+The endpoint upgrades an `Authorization: Bearer …` HTTP `GET` to a WebSocket.
+
+## Opening a PTY
+
+```
+GET /v1/sandboxes/{id}/exec/pty?rows=40&cols=120
+Upgrade: websocket
+```
+
+Wire protocol after the upgrade:
+
+| Direction | Frame                                                       | Meaning                                |
+| --------- | ----------------------------------------------------------- | -------------------------------------- |
+| client → server | binary frame                                          | Bytes typed into stdin.                |
+| client → server | `{"type":"resize","rows":40,"cols":120}` (text JSON)  | Resize the PTY.                        |
+| server → client | binary frame                                          | PTY stdout/stderr bytes.               |
+| server → client | `{"type":"exit","code":N}`                            | Shell exited; connection closes.       |
+
+The shell defaults to `bash -li` (login + interactive). Override with `?cmd=` (URL-encoded full command line) when you want a single program: `?cmd=htop`, `?cmd=python3`, etc.
+
+### Browser example (xterm.js)
+
+```ts
+import { Terminal } from "@xterm/xterm";
+
+const ws = new WebSocket(
+  `wss://api.pandastack.ai/v1/sandboxes/${id}/exec/pty?rows=40&cols=120`,
+  ["pds-pty", `bearer.${token}`],   // subprotocol-based auth for browsers
+);
+ws.binaryType = "arraybuffer";
+
+const term = new Terminal({ rows: 40, cols: 120 });
+term.open(document.getElementById("term")!);
+
+ws.onmessage = (ev) => {
+  if (typeof ev.data === "string") {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "exit") term.write(`\r\n[process exited ${msg.code}]\r\n`);
+  } else {
+    term.write(new Uint8Array(ev.data));
+  }
+};
+
+term.onData((data) => ws.send(new TextEncoder().encode(data)));
+term.onResize(({ rows, cols }) => ws.send(JSON.stringify({ type: "resize", rows, cols })));
+```
+
+### CLI
+
+```bash
+pandastack sandbox shell <sandbox-id>           # opens a PTY in your terminal
+pandastack sandbox shell <sandbox-id> -- htop   # one-off command
+```
+
+## Use cases
+
+**Developer tool: in-browser shell.** A "Connect" button in your app opens a tab with a full bash shell into the user's sandbox. xterm.js + 30 lines of WS glue.
+
+**Interactive debugging.** Your agent runs `pytest -x` via `exec`; when something needs a human, open a PTY into the same sandbox and poke around with the full state still in place.
+
+## Limits
+
+- One client per `/exec/pty` connection. Multiple shells need separate connections.
+- Idle disconnect after **10 minutes** of no traffic in either direction (keep-alive with an empty resize at least every 5 min if needed).

@@ -1,0 +1,94 @@
+---
+title: Performance
+description: How PandaStack hits 179 ms on every create via snapshot restore, and what to expect in your own benchmarks.
+---
+
+PandaStack's whole point is "start a real VM faster than you can blink." This page is the honest breakdown — what we measure, how the snapshot-restore boot path works, and what numbers you should plan against.
+
+## Measured cold-start (production, n=50)
+
+Last refresh: **2026-06-01**, snapshot-natid mode on XFS+reflink, `base` template, `api.pandastack.ai` → `us-central1`.
+
+| Percentile | `boot_ms` (server-side) | `wall_ms` (client over public internet) |
+| ---------- | ----------------------- | --------------------------------------- |
+| min        | 157 ms                  | 412 ms                                  |
+| p50        | **179 ms**              | 705 ms                                  |
+| p75        | 183 ms                  | 812 ms                                  |
+| p90        | 188 ms                  | 1.1 s                                   |
+| p95        | 195 ms                  | 1.6 s                                   |
+| p99        | 203 ms                  | 4.2 s                                   |
+| max        | 203 ms                  | 4.7 s                                   |
+
+- **`boot_ms`** is what we and other microVM platforms quote: the time from "snapshot restore begins" to "guest sshd answers" inside the host. It's the number that matters for serial agent workloads where the client lives near the API.
+- **`wall_ms`** is the round-trip a Python script over your home Wi-Fi sees: DNS, TLS, Cloudflare edge → us-central1, request handling, response. Treat it as the "first sandbox in your loop" budget; subsequent ones overlap.
+
+Reproduce with `scripts/bench_boot.py` from the repo — the methodology and raw JSON are in `scripts/bench-results/`.
+
+## Snapshot restore on every create
+
+There is **no warm pool of idle VMs** — every create takes the same 179 ms path: restore the template's baked snapshot into a pre-allocated NAT slot.
+
+```
+   create ──► NAT slot (~9 ms) ──► reflink rootfs (~4 ms) ──► spawn FC (~25 ms)
+          ──► snapshot load + resume (~90 ms) ──► guest ready (~40 ms)
+```
+
+- The snapshot bakes automatically: the first-ever boot of a template on a host is a cold boot (~3 s, or longer for big rootfs) that captures the snapshot as a side effect. Every subsequent create restores it.
+- Agents also pre-seed published template snapshots from object storage at boot, so on a fresh host even the *first* create of a first-party template is usually a restore.
+- Because every create is the same path, p99 stays within ~25 ms of p50 — there's no "pool exhausted" slow tier to fall through to.
+
+## Boot modes you'll see in `boot_mode`
+
+| Value             | What happened                                         | Typical `boot_ms` |
+| ----------------- | ----------------------------------------------------- | ----------------- |
+| `snapshot-natid`  | Fresh restore from a memory snapshot into a free NAT slot. | 150–210 ms     |
+| `cold`            | First-ever boot of a template (no snapshot yet).      | 6–12 s            |
+| `fork`            | Copy-on-write fork of a running parent.               | 30–60 ms          |
+
+You can read `info.boot_mode` on the returned sandbox to confirm which path you got.
+
+## Fork is faster than create
+
+If you're spawning many sandboxes from the same starting state — fan-out testing, parallel agent reasoning, branch-and-merge codegen — `fork` is dramatically cheaper than `create`.
+
+```ts
+const parent  = await Sandbox.create({ template: "code-interpreter" });
+await parent.exec("pip install pandas numpy");      // ← one-time setup
+const workers = await parent.forkTree({ count: 10 }); // ← ~50 ms each
+```
+
+A fork shares the parent's memory pages via copy-on-write and its rootfs via XFS reflink. You pay for net new dirty pages only.
+
+## Network performance
+
+Sandboxes get a NAT-allocated IP via the host's tap interface (see [Networking & NATID](/docs/concepts/networking-natid)). Real-world numbers from the same prod box:
+
+| Path                                | Throughput | Latency added |
+| ----------------------------------- | ---------- | ------------- |
+| Sandbox → host (loopback to tap)    | 9.2 Gbps   | &lt;100 µs       |
+| Sandbox → public internet           | line rate of host NIC | +1 ms (NAT hop) |
+| Sandbox → sandbox on same host      | 8.7 Gbps   | &lt;200 µs       |
+| Preview URL (TLS edge → sandbox)    | line rate  | +2–10 ms (edge hop) |
+
+There is no per-sandbox bandwidth cap by default — set one via `egress_mbps` in the create call if you need it (cloud tier only).
+
+## What's not measured here
+
+- **Disk I/O inside the sandbox**: depends on the host's underlying storage. The official production fleet runs NVMe SSD with XFS reflinks — you can expect ~3 GB/s sequential reads from a freshly-restored sandbox.
+- **GPU**: not available on the public cloud yet. Self-hosters can pass through host GPUs via Firecracker's PCI passthrough; reach out if you want help wiring it up.
+- **First-byte time of preview URLs**: dominated by your app's startup, not the edge. A `next dev` server on the `base` runtime is "ready" ~2 s after the sandbox starts.
+
+## Tuning checklist
+
+If your numbers don't match the table above:
+
+1. **Are you measuring `boot_ms` or `wall_ms`?** The two differ by your network RTT. Compare like-for-like.
+2. **Seeing `cold` in `info.boot_mode`?** The template hadn't been baked on that host yet. The first boot captures the snapshot; subsequent creates drop to ~180 ms. For many sandboxes from one starting state, use `fork` instead.
+3. **Template too big?** Cold-first-boot of a >5 GB rootfs takes 8–12 s. Once the snapshot exists, subsequent boots drop to ~180 ms.
+4. **NATID exhaustion?** Each host serves up to 4096 concurrent sandboxes (the /20 NAT range). Past that, creates queue. Self-hosters: expand the range in the agent config.
+
+## See also
+
+- [Sandbox lifecycle](/docs/concepts/sandbox-lifecycle) — full state machine.
+- [Snapshots and forks](/docs/concepts/snapshots-and-forks) — how the underlying CoW works.
+- [Architecture](/docs/reference/architecture) — host, agent, scheduler internals.

@@ -1,0 +1,314 @@
+---
+title: TypeScript SDK
+description: "@pandastack/sdk — official TypeScript / JavaScript SDK. Full reference."
+---
+
+The `@pandastack/sdk` package is the recommended way to use PandaStack from Node, Bun, Deno, or modern browsers. It targets ES2022, uses native `fetch`, and ships full TypeScript types.
+
+## Install
+
+```bash
+npm install @pandastack/sdk
+# or: pnpm add @pandastack/sdk · yarn add @pandastack/sdk · bun add @pandastack/sdk
+```
+
+## Configure
+
+```bash
+export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API=https://api.pandastack.ai   # optional, this is the default
+```
+
+On Node, the SDK also reads `~/.config/pandastack/config.json` (`token` / `apiKey` / `api_key`) if no env vars are set.
+
+## Imports
+
+```ts
+import {
+  Client,
+  PandaStackError, AuthError, NotFoundError, BadRequestError, ServerError, NetworkError,
+  type SandboxCreateOptions, type SandboxInfo, type ExecResult,
+  type LifecycleInfo, type PreviewInfo, type SnapshotInfo,
+  type TemplateInfo, type TemplateBuild, type TemplateBuildOptions,
+  type TokenInfo, type CreatedToken, type MeInfo,
+  type LogsOptions,
+} from "@pandastack/sdk";
+```
+
+There is no global `Sandbox` class — you create one through a `Client`:
+
+```ts
+const client = new Client();        // reads env vars
+const sandbox = await client.sandboxes.create({ template: "code-interpreter" });
+```
+
+## `Client`
+
+```ts
+new Client(config?: {
+  apiUrl?: string;       // default: process.env.PANDASTACK_API ?? "https://api.pandastack.ai"
+  apiKey?: string;       // default: process.env.PANDASTACK_TOKEN
+  timeoutMs?: number;    // default: 30_000
+})
+```
+
+Exposes resource namespaces — `client.sandboxes`, `client.templates`, `client.tokens`, `client.databases`, `client.volumes` — and one direct call:
+
+```ts
+const me = await client.me();         // → { user_id, email, org_id, ... }
+```
+
+## Sandboxes
+
+### `client.sandboxes.create(opts) -> Promise<Sandbox>`
+
+```ts
+const sandbox = await client.sandboxes.create({
+  template:   "code-interpreter",   // default "ubuntu-24.04"; CPU + memory are baked in
+  ttlSeconds: 3600,                 // default server-side (3600)
+  persistent: false,
+  fromSnapshot: "snap-…",           // boot from a specific snapshot
+  metadata: { job: "demo" },
+  volumes: [{ name: "data", readOnly: true }],
+});
+```
+
+<Callout type="warn">
+  `cpu` and `memoryMb` (and `memory_mb`) are accepted for backwards compatibility but **deprecated and ignored** — the server always uses the template's baked size. Passing them logs a one-time `console.warn`. To run at a different size, [bake a custom template](/docs/concepts/templates#bake-your-own) with `--cpu` / `--memory-mb`.
+</Callout>
+
+Returns a `Sandbox` with `.id`, `.template`, `.cpu`, `.memory_mb`, `.status`, `.guest_ip`, `.boot_ms`, `.boot_mode`, `.metadata`, `.created_at`.
+
+### Other namespace calls
+
+```ts
+await client.sandboxes.list();             // Sandbox[]
+await client.sandboxes.get(id);            // Sandbox
+await client.sandboxes.delete(id);         // void
+```
+
+## `Sandbox` methods
+
+### Exec and code
+
+```ts
+const result = await sandbox.exec("python3 -c 'print(2+2)'", { timeoutSeconds: 10 });
+// { stdout: "4\n", stderr: "", exit_code: 0, exitCode: 0, duration_ms: 23 }
+
+await sandbox.runCode("print('hi')", "python");
+await sandbox.runCode("ls /workspace");                    // language defaults to "shell"
+await sandbox.commands.run("ls /workspace");               // alias for exec
+```
+
+`cmd` is a **string**, not a list — it runs under `sh -c`. See [Exec](/docs/concepts/exec).
+
+### Streaming logs
+
+```ts
+for await (const line of sandbox.logs({ stream: "both", follow: true })) {
+  console.log(line);
+  if (line.includes("Ready")) break;
+}
+```
+
+`stream` ∈ `"stdout" | "stderr" | "both"`. `follow: true` opens an SSE stream until you `break` or the sandbox exits.
+
+### Filesystem
+
+```ts
+await sandbox.filesystem.write("/workspace/in.txt", "hi\n");
+const text = await sandbox.filesystem.read("/workspace/in.txt");   // string
+await sandbox.filesystem.upload("./local.csv", "/workspace/data.csv");
+await sandbox.filesystem.download("/workspace/out.csv", "./out.csv");
+```
+
+Full guide: [Filesystem](/docs/concepts/filesystem).
+
+### Lifecycle
+
+```ts
+await sandbox.pause();
+await sandbox.resume();
+
+const snap   = await sandbox.snapshot();                 // SnapshotInfo
+const child  = await sandbox.fork({ metadata: { branch: "exp" } });
+const fanout = await sandbox.forkTree({ count: 8, metadata: { batch: "search" } });
+await child.promote();                                   // detach from parent
+
+await sandbox.hibernate();
+await sandbox.wake();
+
+await sandbox.setTtl(7200);
+await sandbox.setPersistent(true);
+await sandbox.lifecycle();   // { ttl_seconds, persistent, idle_seconds }
+
+await sandbox.kill();
+```
+
+`Sandbox` implements `AsyncDisposable`:
+
+```ts
+{
+  await using sandbox = await client.sandboxes.create({ template: "code-interpreter" });
+  await sandbox.exec("python3 train.py");
+}  // sandbox.kill() auto-called
+```
+
+### Preview URLs
+
+```ts
+sandbox.previewUrl(3000);                                  // → "https://3000-…"
+await sandbox.previewUrls();                               // → { 3000: "..." }
+await sandbox.signedPreviewUrl(3000, 3600);                // → { url, token, expires_at, ... }
+```
+
+Full guide: [Preview URLs](/docs/concepts/preview-urls).
+
+## Templates
+
+```ts
+await client.templates.list();
+await client.templates.get("code-interpreter");
+await client.templates.delete("my-template");
+
+const build = await client.templates.build({
+  name:     "my-template",
+  rootfs:   "/path/to/Dockerfile.tar",   // string | Blob | Uint8Array | ArrayBuffer
+  sizeMb:   2048,
+  kernel:   "kernel-6.1",                // optional
+});
+console.log(build.id, build.status);
+
+await client.templates.builds();
+await client.templates.buildStatus(build.id);
+```
+
+`TemplateInfo` has `name`, `rootfs_path`, `size_bytes`, `meta`. `TemplateBuild` has `id`, `name`, `status`, `error`, `started_at`, `ended_at`, `size_mb`, `bytes`.
+
+## Databases
+
+Managed PostgreSQL 16 in dedicated Firecracker microVMs (Beta). See [Databases](/docs/concepts/databases).
+
+```ts
+// Create — blocks until Postgres is accepting connections (~30–90s)
+const db = await client.databases.create({ label: "my-app-db" }); // size is fixed by the postgres-16 template
+console.log(db.connection_url);                  // postgres://...
+
+await client.databases.list();                   // metadata only (no credentials)
+await client.databases.get(db.id);               // full record incl. connection_url
+await client.databases.connection(db.id);        // { connection_url, broker_url, broker_token }
+await client.databases.delete(db.id);            // irreversible
+```
+
+`DatabaseInfo` has `id`, `status`, `template`, `host`, `port`, `database`, `username`, `password`, `connection_url`, `broker_url`, `broker_token`. Connect with any driver using `connection_url` (TLS required, `?sslmode=require`).
+
+## Volumes
+
+Persistent named volumes — ext4 block devices that survive sandbox deletion and attach at create time. See [Volumes](/docs/concepts/volumes).
+
+```ts
+const vol = await client.volumes.create({ name: "models", size_mb: 4096 });
+await client.volumes.list();             // VolumeInfo[]
+await client.volumes.get("models");
+await client.volumes.delete("models");   // refused (409) while attached to a running sandbox
+
+// Attach at create — appears as /dev/vdb (then vdc, ...) inside the guest
+const sandbox = await client.sandboxes.create({
+  template: "code-interpreter",
+  volumes: [{ name: "models", readOnly: true }, { name: "scratch" }],
+});
+await sandbox.exec("mkdir -p /mnt/models && mount -o ro /dev/vdb /mnt/models");
+```
+
+`VolumeInfo` has `name`, `size_mb`, `created_at`. Quotas are per plan (Free 1 × 1 GiB · Pro 10 × 10 GiB · Team 50 × 50 GiB · Enterprise unlimited; 64 GiB hard per-volume ceiling). Exceeding the quota returns a 429 (`BadRequestError`); storage above your plan's included total bills at **$0.15 per provisioned GiB-month**. Live rates and per-tier limits: `GET /v1/pricing`.
+
+## Apps (git-driven hosting)
+
+Connect a GitHub repo and serve it behind a stable per-app URL with blue-green deploys. See [Apps overview](/docs/apps/overview).
+
+```ts
+// Create — only name + git_url are required; framework is auto-detected when omitted
+const app = await client.apps.create({
+  name: "my-site",
+  git_url: "https://github.com/acme/my-site",
+  git_branch: "main",                 // optional (default: main)
+  framework: "nextjs",                // optional: nextjs | vite | node | static
+  install_command: undefined,         // optional build/run overrides
+  build_command: undefined,
+  start_command: undefined,
+  root_directory: undefined,          // optional sub-dir to build from
+  port: 3000,                         // optional (default: 3000)
+  env: { NODE_ENV: "production" },
+});
+console.log(app.id, app.url);         // `url` is populated once running
+
+await client.apps.list();             // AppInfo[]
+await client.apps.get(app.id);        // includes the stable `url`
+await client.apps.update(app.id, { build_command: "npm run build:prod" });
+await client.apps.delete(app.id);     // also tears down the runtime sandbox
+```
+
+Deploys are blue-green: a fresh sandbox builds the new commit, health-checks, then the app atomically flips to it.
+
+```ts
+const dep = await client.apps.deploy(app.id, { gitRef: "v1.2.0" });  // gitRef optional
+await client.apps.deployments(app.id);             // newest first
+await client.apps.deployment(app.id, dep.id);      // includes full build log
+
+for await (const line of client.apps.deployLogs(app.id, dep.id)) {   // SSE stream
+  console.log(line);
+}
+
+await client.apps.rollback(app.id);   // rebuild + flip back to the previous deployment
+```
+
+<Callout>
+  Apps run on the `base` template snapshot, so CPU/RAM are governed by that template's baked size (2 GiB), **not** the per-app `cpu`/`memory_mb` — those are accepted for forward-compat but the agent overrides them to the snapshot size.
+</Callout>
+
+Private repos and push-triggered auto-deploys use a GitHub App installation; the connect flow is browser-based (`GET /v1/github/connect`). See [GitHub integration](/docs/reference/rest-api#github-integration-apps).
+
+## Tokens
+
+```ts
+await client.tokens.list();                       // TokenInfo[]
+const created = await client.tokens.create("ci-pipeline");  // CreatedToken (.token visible once)
+await client.tokens.revoke(created.prefix);
+```
+
+## Errors
+
+Every SDK exception inherits from `PandaStackError` with `.statusCode` and `.response`:
+
+| Class             | When                                                  |
+| ----------------- | ----------------------------------------------------- |
+| `AuthError`       | 401 / 403 — bad / missing token.                      |
+| `NotFoundError`   | 404 — sandbox / template / snapshot doesn't exist.    |
+| `BadRequestError` | Other 4xx — bad payload, quota exceeded.              |
+| `ServerError`     | 5xx — orchestrator transient. Usually safe to retry.  |
+| `NetworkError`    | Underlying `fetch` failure (DNS, TCP, TLS).           |
+
+```ts
+try {
+  const s = await client.sandboxes.get(id);
+} catch (e) {
+  if (e instanceof NotFoundError) {
+    return client.sandboxes.create({ template: "code-interpreter" });
+  }
+  throw e;
+}
+```
+
+## Self-hosting and preview hosts
+
+If you're not on `api.pandastack.ai`, the preview URL formatter needs to know what hostname suffix to use. By default it strips `api.` from your `apiUrl`. Override:
+
+```ts
+const client = new Client({ apiUrl: "https://api.acme.dev" });
+(client as any).previewHost = "preview.acme.dev";
+sandbox.previewUrl(3000);  // → https://3000-{id}.preview.acme.dev
+```
+
+## Browser usage
+
+The SDK works in modern browsers too — every call is `fetch`, no Node-only APIs in the hot path. `filesystem.upload` / `download` (which use `node:fs`) and `tokens` config-file fallback are no-ops in the browser; everything else is identical. Mint a short-lived `signedPreviewUrl` server-side if you need to share UI with end-users without leaking your master token.

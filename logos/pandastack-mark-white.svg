@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <!--
+    PandaStack mark — "Layered Panda" (white variant, for dark backgrounds)
+    See pandastack-mark.svg for design rationale.
+  -->
+  <defs>
+    <mask id="ps-face-w">
+      <rect width="240" height="240" fill="black"/>
+      <circle cx="64"  cy="46" r="24" fill="white"/>
+      <circle cx="176" cy="46" r="24" fill="white"/>
+      <rect x="32" y="44" width="176" height="72" rx="34" fill="white"/>
+      <ellipse cx="89"  cy="82" rx="14" ry="20" transform="rotate(-20 89 82)"  fill="black"/>
+      <ellipse cx="151" cy="82" rx="14" ry="20" transform="rotate(20 151 82)" fill="black"/>
+    </mask>
+  </defs>
+
+  <!-- layer 1: head -->
+  <rect width="240" height="240" fill="#F2F4F6" mask="url(#ps-face-w)"/>
+  <circle cx="91"  cy="81" r="6.5" fill="#F2F4F6"/>
+  <circle cx="149" cy="81" r="6.5" fill="#F2F4F6"/>
+
+  <!-- layer 2: platform -->
+  <rect x="48" y="132" width="144" height="28" rx="14" fill="#F2F4F6"/>
+
+  <!-- layer 3: Firecracker foundation (accent) -->
+  <rect x="64" y="176" width="112" height="28" rx="14" fill="#FF5A1F"/>
+</svg>

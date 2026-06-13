@@ -1,0 +1,66 @@
+---
+# Push the agent binary WITHOUT recreating the VM. Same source of truth as
+# release.yml's "Roll agent fleet" step (gs://<bucket>/bin/pandastack-agent),
+# but idempotent: it only swaps + restarts when the published binary differs
+# from what's installed. The VM (its instance SA) pulls from GCS over Google's
+# backbone — fast, and no large transfer over the IAP tunnel.
+
+- name: Stat installed agent binary
+  ansible.builtin.stat:
+    path: "{{ agent_bin_path }}"
+    checksum_algorithm: sha256
+  register: agent_installed
+
+- name: Download candidate agent from GCS (on the VM)
+  ansible.builtin.command:
+    cmd: "gcloud storage cp gs://{{ agent_gcs_bucket }}/{{ agent_gcs_object }} {{ agent_candidate_path }}"
+  changed_when: false
+  # Fetch to a temp path even in --check so the diff/validate below is real.
+  check_mode: false
+
+- name: Stat candidate binary
+  ansible.builtin.stat:
+    path: "{{ agent_candidate_path }}"
+    checksum_algorithm: sha256
+  register: agent_candidate
+  check_mode: false
+
+- name: Validate candidate binary
+  ansible.builtin.assert:
+    that:
+      - agent_candidate.stat.exists
+      - agent_candidate.stat.size | int >= agent_min_bytes
+    fail_msg: "Candidate agent binary missing or smaller than {{ agent_min_bytes }} bytes — refusing to install."
+
+- name: Install new agent binary (only when changed)
+  when: agent_candidate.stat.checksum != (agent_installed.stat.checksum | default(''))
+  block:
+    - name: Atomically place new agent binary
+      ansible.builtin.copy:
+        src: "{{ agent_candidate_path }}"
+        dest: "{{ agent_bin_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: restart pandastack-agent
+
+- name: Remove candidate temp file
+  ansible.builtin.file:
+    path: "{{ agent_candidate_path }}"
+    state: absent
+
+# Apply the restart now (rather than at end-of-play) so the health check below
+# validates the freshly-restarted service.
+- name: Apply pending restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify agent service is active
+  ansible.builtin.command: "systemctl is-active {{ agent_service }}"
+  register: agent_active
+  changed_when: false
+  failed_when: agent_active.stdout != "active"
+
+- name: Report installed agent checksum
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: pandastack-agent active (sha256 now {{ agent_candidate.stat.checksum }})"

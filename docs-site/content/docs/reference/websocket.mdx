@@ -1,0 +1,43 @@
+---
+title: WebSocket & SSE
+description: Streaming endpoints — PTY, LSP, logs, events.
+---
+
+The hosted API origin is `https://api.pandastack.ai`; WebSocket clients should use the matching `wss://api.pandastack.ai` scheme. Authenticate with JWT or `Authorization: Bearer $PANDASTACK_TOKEN` where the route allows token auth.
+
+## Server-Sent Events
+
+```http
+POST /v1/sandboxes/{id}/exec/stream
+GET /v1/sandboxes/{id}/events
+```
+
+`exec/stream` streams command output. `events` streams sandbox lifecycle and agent events.
+
+## Logs
+
+```http
+GET /v1/sandboxes/{id}/logs?stream=both&follow=true
+```
+
+The SDK exposes this as `sandbox.logs(stream="both", follow=False)` in Python and `sandbox.logs("both", false)` in TypeScript.
+
+## WebSocket endpoints
+
+```http
+GET /v1/sandboxes/{id}/exec/pty
+GET /v1/sandboxes/{id}/exec/ws
+GET /v1/sandboxes/{id}/lsp/{lang}
+```
+
+- `/exec/pty` opens an interactive terminal.
+- `/exec/ws` runs command execution over WebSocket.
+- `/lsp/{lang}` proxies a language server session for `lang`.
+
+## CLI equivalents
+
+```bash
+pandastack sandbox ssh <id>
+pandastack sandbox exec <id> -- python -c 'print(42)'
+pandastack sandbox logs <id> --stream both
+```

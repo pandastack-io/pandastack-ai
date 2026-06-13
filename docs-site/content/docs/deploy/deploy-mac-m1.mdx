@@ -1,0 +1,35 @@
+---
+title: Deploy on Mac (M1/M2/M3)
+description: Local dev on Apple Silicon via Lima — for hacking on PandaStack itself.
+---
+
+Apple Silicon Macs are useful for local PandaStack development. Build the CLI from source and point it at the API you are running.
+
+## Build the CLI
+
+```bash
+git clone https://github.com/pandastack-io/pandastack
+cd pandastack/cmd/pandastack
+go build -o /usr/local/bin/pandastack ./
+```
+
+## Configure
+
+```bash
+export PANDASTACK_API=https://api.pandastack.ai
+export PANDASTACK_TOKEN=pds_abc123def456...
+```
+
+Use your local API origin instead of `https://api.pandastack.ai` when developing against a local control plane.
+
+## Smoke test
+
+```bash
+pandastack version
+pandastack template list
+pandastack sandbox create --template base --ttl 1h --cpu 2 --memory-mb 2048
+pandastack sandbox exec <id> -- uname -a
+pandastack sandbox delete <id>
+```
+
+The current CLI command tree is `auth`, `template`, `sandbox`, `token`, `version`, and `help`; it does not include a Mac-specific deploy command.

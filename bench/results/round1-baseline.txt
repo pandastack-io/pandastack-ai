@@ -1,0 +1,43 @@
+create#1 wall=1753ms server_boot=1635ms id=3b23925f-703a-44e2-a7a1-8c98630ab685
+create#2 wall=1850ms server_boot=1607ms id=ee6e9ce5-4fe0-4019-8e18-419fc70d1f88
+create#3 wall=2671ms server_boot=2305ms id=bd6a11d0-8164-458f-83e9-8c67a4549cb8
+create#4 wall=1476ms server_boot=1237ms id=557dd483-ea7f-4812-9f01-812eb1bb7575
+create#5 wall=1924ms server_boot=1683ms id=f7ddd23d-a70e-4367-8cff-2144ba3cfa08
+---
+{
+    "by_mode": {
+        "cold": {
+            "n": 2,
+            "min_ms": 2298,
+            "max_ms": 2304,
+            "p50_ms": 2304,
+            "p90_ms": 2304,
+            "p99_ms": 2304
+        }
+    },
+    "by_template": {
+        "ubuntu-24.04": {
+            "n": 2,
+            "min_ms": 2298,
+            "max_ms": 2304,
+            "p50_ms": 2304,
+            "p90_ms": 2304,
+            "p99_ms": 2304
+        }
+    },
+    "recent": [
+        {
+            "id": "e484d62c-e47e-4b5f-9ff3-f248ac6071e3",
+            "template": "ubuntu-24.04",
+            "mode": "cold",
+            "boot_ms": 2304
+        },
+        {
+            "id": "d86281d8-d2ce-4c2c-96cb-f612508ed815",
+            "template": "ubuntu-24.04",
+            "mode": "cold",
+            "boot_ms": 2298
+        }
+    ],
+    "total_samples": 2
+}

@@ -1,0 +1,142 @@
+---
+title: Supabase auth
+---
+
+# Supabase auth for self-hosting
+
+Use Supabase Auth when your PandaStack deployment has more than one human user, more than one organization, or a dashboard exposed beyond a single trusted development machine.
+
+Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider.
+
+## When to use it
+
+Choose Supabase auth when you need:
+
+- dashboard sign-in for multiple users
+- organization membership and invitations
+- API requests tied to a real user identity
+- JWT verification instead of the local `pds_local_dev_token`
+- a path to hosted auth without operating an identity service yourself
+
+Do not use stub auth for shared hosts or internet-facing deployments.
+
+## Required environment variables
+
+### API
+
+```bash
+PANDASTACK_AUTH_MODE=supabase
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
+SUPABASE_SERVICE_ROLE_KEY=YOUR_PRIVATE_SERVICE_ROLE_KEY
+SUPABASE_JWT_SECRET=YOUR_JWT_SECRET
+PANDASTACK_DATABASE_URL=postgres://...
+PANDASTACK_CLICKHOUSE_URL=http://...
+```
+
+- `SUPABASE_URL` is used to discover the project and validate issuer/audience assumptions.
+- `SUPABASE_ANON_KEY` is safe for browser-adjacent configuration but should still be managed as config.
+- `SUPABASE_SERVICE_ROLE_KEY` is server-only. Never expose it to the dashboard bundle.
+- `SUPABASE_JWT_SECRET` is used by the API to verify Supabase-issued access tokens.
+
+### Dashboard
+
+```bash
+NEXT_PUBLIC_PANDASTACK_API=https://api.pandastack.ai
+NEXT_PUBLIC_PANDASTACK_AUTH_MODE=supabase
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
+```
+
+Only `NEXT_PUBLIC_*` values are shipped to the browser. Do not add service-role keys or JWT secrets to dashboard environment variables.
+
+## Supabase project setup
+
+1. Create a Supabase project.
+2. Open **Project Settings → API**.
+3. Copy the project URL into `SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`.
+4. Copy the anon public key into `SUPABASE_ANON_KEY` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+5. Copy the service-role key into `SUPABASE_SERVICE_ROLE_KEY` for the API only.
+6. Open **Project Settings → API → JWT Settings** and copy the JWT secret into `SUPABASE_JWT_SECRET`.
+7. Configure redirect URLs before inviting users.
+
+## Redirect URLs
+
+In Supabase Auth URL configuration, add:
+
+- `http://localhost:3000/auth/callback` for local dashboard testing
+- `https://YOUR_DASHBOARD_HOST/auth/callback` for your deployed dashboard
+- `https://YOUR_DASHBOARD_HOST/login` as an allowed site URL or redirect target if your deployment uses a login page
+
+Keep localhost redirects only for development projects or explicitly trusted deployments.
+
+## Database migrations
+
+On first boot, the API and agent apply idempotent migrations against the configured Postgres database. For Supabase auth, the important tables are:
+
+- `orgs` from `agent/migrations/postgres/00010_orgs_billing.sql`
+- `org_members` from `agent/migrations/postgres/00010_orgs_billing.sql`
+- `org_invites` from `agent/migrations/postgres/00010_orgs_billing.sql`
+- `user_current_org` from `agent/migrations/postgres/00010_orgs_billing.sql`
+- `api_tokens` from the API token store bootstrap
+- `sandboxes`, `snapshots`, `allocations`, `network_state`, `boot_events`, `usage_events`, `agents`, `leases`, and `sandbox_events` from the agent Postgres migrations
+- `processed_stripe_events` and `pending_meter_events` when billing/metering paths are enabled, even if Stripe is disabled in self-host mode
+
+ClickHouse is initialized separately for observability tables such as `sandbox_metrics`, `sandbox_events`, `audit_log`, `boot_events`, and `http_requests`.
+
+The Supabase Auth schema remains owned by Supabase. PandaStack stores its own organization and workspace records in the application database.
+
+## First-user provisioning
+
+After the first user signs up, seed an organization and mark that user as owner. Replace the values with the Supabase user ID and email from the Auth dashboard:
+
+```sql
+INSERT INTO orgs (slug, name, owner_user_id)
+VALUES ('default', 'Default', 'SUPABASE_USER_ID')
+ON CONFLICT (slug) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id
+RETURNING id;
+
+INSERT INTO org_members (org_id, user_id, email, role)
+SELECT id, 'SUPABASE_USER_ID', 'owner@example.com', 'owner'
+FROM orgs
+WHERE slug = 'default'
+ON CONFLICT (org_id, user_id) DO UPDATE SET role = 'owner', email = EXCLUDED.email;
+
+INSERT INTO user_current_org (user_id, org_id)
+SELECT 'SUPABASE_USER_ID', id
+FROM orgs
+WHERE slug = 'default'
+ON CONFLICT (user_id) DO UPDATE SET org_id = EXCLUDED.org_id, updated_at = now();
+```
+
+Then refresh the dashboard session. The first user should see the seeded organization.
+
+## Troubleshooting
+
+### `401 invalid token`
+
+Check that the dashboard is sending the Supabase access token, not the anon key. The anon key identifies the app; the access token identifies the signed-in user.
+
+### `JWT signature is invalid`
+
+Verify `SUPABASE_JWT_SECRET` exactly matches the project's JWT secret. Rotating the secret requires restarting API instances and forcing users to sign in again.
+
+### `issuer mismatch`
+
+Confirm `SUPABASE_URL` uses the same project that issued the token. Mixing staging dashboard config with production API config commonly causes this.
+
+### User signs in but sees no organization
+
+Seed `orgs`, `org_members`, and `user_current_org` for the Supabase user ID. Email alone is not enough; the API keys membership by user ID.
+
+### RLS errors in Supabase
+
+PandaStack application tables should live in the application database controlled by the API. If you place them inside Supabase Postgres and enable RLS manually, create explicit policies for the API service role or disable RLS on PandaStack-owned tables.
+
+### Dashboard has Supabase config but API still accepts local token
+
+Check `PANDASTACK_AUTH_MODE`. It must be `supabase` on the API. Stub auth is only for single-tenant local development.
+
+### Invitations do not work
+
+Confirm `org_invites` exists, the inviter is an `owner` or `admin`, and the dashboard redirect URL is allowed in Supabase.

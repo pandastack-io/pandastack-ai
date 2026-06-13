@@ -1,0 +1,173 @@
+---
+title: Sandbox lifecycle
+description: Born, used, paused, hibernated, forked, snapshotted, deleted — every state a sandbox can be in.
+---
+
+A sandbox is a single Firecracker microVM with a dedicated kernel, rootfs, network namespace,
+and lifecycle. Sandboxes are identified by a UUID (e.g. `278a4f42-3467-4424-98e6-a547646dd0fd`)
+and always belong to a workspace.
+
+## States
+
+```
+                    create
+                       │
+                       ▼
+                  ┌─ creating ─┐
+                       │
+                       │ snapshot restored, SSH ready
+                       ▼
+                    running ◄────────────┐
+                       │                 │
+                   pause │                │ resume
+                       ▼                 │
+                    paused ──────────────┘
+                       │
+                       │ hibernate
+                       ▼
+                  hibernated  (memory written to disk, VM stopped)
+                       │
+                       │ wake (manual or implicit on next request)
+                       ▼
+                    running
+
+   any state ──► failed   (orchestrator marks unhealthy sandboxes)
+   any state ──► deleted  (rootfs purged, slot released)
+```
+
+## Lifetime guarantees
+
+| Transition         | P50      | P99      | Notes |
+| ------------------ | -------- | -------- | ----- |
+| Create → running   | **179 ms** | 203 ms  | Snapshot-natid path on every create, n=50 prod. See [Performance](/docs/concepts/performance). |
+| Pause → resume     | &lt;5 ms   | 8 ms     | Just `firecracker pause` / `resume`. No memory writes. |
+| Hibernate → wake   | ~150 ms  | 220 ms   | Memory written to disk, restored on demand. |
+| Fork (CoW + reflink) | ~50 ms | 80 ms    | Cheaper than create; shares pages with parent. |
+| Kill               | ~30 ms   | 60 ms    | Tap interface released, NAT slot freed, rootfs unlinked. |
+
+## Creating
+
+```python
+sandbox = Sandbox.create(
+    template="code-interpreter",
+    ttl_seconds=3600,
+    metadata={"job": "demo"},
+)
+```
+
+```ts
+const sandbox = await Sandbox.create({
+  template: "code-interpreter",
+  ttlSeconds: 3600,
+  metadata: { job: "demo" },
+});
+```
+
+The returned object includes `id`, `boot_ms`, `boot_mode`, `guest_ip`, and any metadata you supplied. `boot_mode = "snapshot-natid"` means the sandbox was restored from the template's baked snapshot — the normal path for every create; `cold` means the template had no snapshot yet (first-ever boot on that host).
+
+## Pause and resume
+
+`pause` halts the vCPU without touching memory. Useful when an agent is mid-loop and waiting on a human approval — you stop paying for CPU but keep the entire process tree alive.
+
+```ts
+await sandbox.pause();
+// ...wait for user input...
+await sandbox.resume();
+```
+
+The sandbox stays on the same host. No state is written to disk.
+
+## Hibernate and wake
+
+`hibernate` is the heavier sibling: it dumps the sandbox's memory + disk to a snapshot, then stops the Firecracker process entirely. Host RAM and vCPUs are freed.
+
+```ts
+await sandbox.hibernate();
+// ...minutes or hours later...
+await sandbox.wake();
+```
+
+Two things to know:
+
+1. **Hibernation is automatic for persistent sandboxes.** The server-side idle sweeper hibernates any `persistent: true` sandbox that's been idle for 5 minutes. Wake is implicit on the next API request.
+2. **Hibernated sandboxes still cost storage.** A snapshot of a 2 GB memory sandbox is ~2 GB on disk. Use `kill` if you don't need it back.
+
+## TTL and persistence
+
+Every sandbox has a TTL — the wall-clock seconds until the orchestrator kills it. Default is 1 hour. Update at runtime:
+
+```python
+sandbox.set_ttl(7200)              # extend to 2 hours
+sandbox.set_persistent(True)       # opt out of TTL; survive idle sweeper
+print(sandbox.lifecycle())
+# {"ttl_seconds": 7200, "persistent": true, "idle_seconds": 12}
+```
+
+```ts
+await sandbox.setTtl(7200);
+await sandbox.setPersistent(true);
+console.log(await sandbox.lifecycle());
+```
+
+| Field           | Meaning                                                                    |
+| --------------- | -------------------------------------------------------------------------- |
+| `ttl_seconds`   | Time until kill, refreshed by any API activity on the sandbox.             |
+| `persistent`    | If `true`, ignores TTL but is hibernated when idle. Wakes on next request. |
+| `idle_seconds`  | Seconds since the last exec / filesystem / network request.                |
+
+## Forking
+
+```ts
+const child = await sandbox.fork({ metadata: { branch: "feature-x" } });
+const fanout = await sandbox.forkTree({ count: 8, metadata: { batch: "search" } });
+```
+
+Forks share memory pages with the parent (copy-on-write) and rootfs blocks via XFS reflink. Fork is ~3× faster than create-from-snapshot and uses an order of magnitude less disk. Promote a child to standalone with `child.promote()` — it'll keep running even after the parent is killed.
+
+## Snapshotting
+
+```ts
+const snap = await sandbox.snapshot();
+// → { id: "snap-…", sandbox_id, created_at, mem_path, state_path }
+```
+
+Take a named snapshot any time. Boot a fresh sandbox from it later by passing `from_snapshot: snap.id` to `create`. Use this for golden-image flows ("here's the env after a 20-step setup, branch from here forever").
+
+## Lease semantics
+
+Every running sandbox holds a **lease** in the shared store. The agent that owns it
+refreshes the lease every 10 s. If the lease expires (agent crash, network partition),
+the scheduler marks the sandbox `failed` and releases its NATID slot.
+
+This is what lets you safely have a multi-node cluster: a dead agent's sandboxes don't
+linger as zombies.
+
+## Health monitor
+
+While a sandbox is `running`, the agent runs a background health monitor that:
+
+- Pokes the SSH socket every 5 s.
+- Checks Firecracker's `/state` endpoint every 30 s.
+- Tracks RSS + vCPU usage for metrics.
+- Marks the sandbox `failed` after 3 consecutive failed probes.
+
+You can subscribe to lifecycle changes via the [events stream](/docs/reference/websocket).
+
+## Cleanup with `using`
+
+In TypeScript, `Sandbox` is `AsyncDisposable`:
+
+```ts
+{
+  await using sandbox = await Sandbox.create({ template: "code-interpreter" });
+  await sandbox.exec("python3 train.py");
+}  // sandbox.kill() called automatically
+```
+
+In Python, `Sandbox` is a context manager:
+
+```python
+with Sandbox.create(template="code-interpreter") as sandbox:
+    sandbox.exec("python3 train.py")
+# kill() called on __exit__
+```
