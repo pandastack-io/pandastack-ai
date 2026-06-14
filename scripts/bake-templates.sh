@@ -18,6 +18,10 @@ TEMPLATES="$DATA_DIR/templates"
 WORK="${WORK:-/var/lib/pandastack-work/bake}"
 FORCE="${FORCE:-0}"
 KERNEL="${KERNEL:-vmlinux-5.10}"
+# Architecture written into each template's meta.json. Derived from the host so
+# the same script bakes correctly on amd64 prod hosts and arm64 (Apple Silicon
+# Lima) dev VMs. Override with ARCH= if cross-baking.
+ARCH="${ARCH:-$(uname -m)}"
 
 if [[ $EUID -ne 0 ]]; then
   echo "must be root" >&2; exit 1
@@ -392,6 +396,17 @@ PGCONF
   # ── Directories PgBouncer needs at runtime ──────────────────────────────────
   mkdir -p /etc/pgbouncer /var/log/pgbouncer /var/run/pgbouncer
   chown postgres:postgres /var/log/pgbouncer /var/run/pgbouncer
+
+  # ── Disable Debian's auto-cluster ───────────────────────────────────────────
+  # apt install postgresql-16 creates a default "main" cluster AND enables
+  # postgresql.service / postgresql@16-main.service, which auto-start that
+  # cluster on :5432 at boot. That steals the port from autostart.sh's own
+  # durable-volume cluster, so postgres there fails with "Address already in
+  # use". The Dockerfile build path disables these; the bake path must too.
+  systemctl disable postgresql.service 2>/dev/null || true
+  systemctl disable postgresql@16-main.service 2>/dev/null || true
+  systemctl mask postgresql@16-main.service 2>/dev/null || true
+  systemctl mask postgresql.service 2>/dev/null || true
 }
 
 declare -A CPU_COUNT=(
@@ -494,12 +509,38 @@ bake_one() {
     chroot "$mnt" /bin/bash -c "
       set -euo pipefail
       export DEBIAN_FRONTEND=noninteractive
-      # Enable universe + updates + security so most packages resolve.
-      cat > /etc/apt/sources.list <<'SRC'
-deb http://archive.ubuntu.com/ubuntu noble main universe
-deb http://archive.ubuntu.com/ubuntu noble-updates main universe
-deb http://security.ubuntu.com/ubuntu noble-security main universe
+      # The rootfs normally ships /etc/apt/sources.list.d/ubuntu.sources (the
+      # deb822 format on Ubuntu 24.04) with the correct arch-appropriate mirror
+      # already configured (archive.ubuntu.com for amd64, ports.ubuntu.com for
+      # arm64). In that case we leave it alone — adding a legacy sources.list
+      # would duplicate the targets and make apt error out.
+      #
+      # Only when neither sources.list.d/ubuntu.sources nor a non-empty
+      # sources.list exists do we write a minimal legacy list, picking the
+      # right mirror for the rootfs's architecture.
+      if [ ! -s /etc/apt/sources.list.d/ubuntu.sources ] && \
+         [ ! -s /etc/apt/sources.list ]; then
+        dpkg_arch=\$(dpkg --print-architecture)
+        if [ \"\$dpkg_arch\" = \"amd64\" ] || [ \"\$dpkg_arch\" = \"i386\" ]; then
+          main_mirror=http://archive.ubuntu.com/ubuntu
+          sec_mirror=http://security.ubuntu.com/ubuntu
+        else
+          main_mirror=http://ports.ubuntu.com/ubuntu-ports
+          sec_mirror=http://ports.ubuntu.com/ubuntu-ports
+        fi
+        cat > /etc/apt/sources.list <<SRC
+deb \$main_mirror noble main universe
+deb \$main_mirror noble-updates main universe
+deb \$sec_mirror noble-security main universe
 SRC
+      fi
+      # Non-interactive dpkg conffile handling. DEBIAN_FRONTEND=noninteractive
+      # alone does NOT answer config-file conflict prompts (e.g. reinstalling
+      # procps prompts about /etc/sysctl.conf), which hang/abort a TTY-less
+      # chroot bake. Force-keep the existing conffile on conflict.
+      cat > /etc/apt/apt.conf.d/90pandastack-bake <<'APTCONF'
+Dpkg::Options { \"--force-confdef\"; \"--force-confold\"; };
+APTCONF
       apt-get update -qq
       $(declare -f _install_autostart_unit)
       $(declare -f "$fn")
@@ -542,7 +583,7 @@ SRC
 {
   "name": "$name",
   "kernel": "$KERNEL",
-  "arch": "x86_64",
+  "arch": "$ARCH",
   "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "size_mb": $size_mb,
   "cpu": $cpu_count,

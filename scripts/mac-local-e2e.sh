@@ -627,6 +627,33 @@ smoke_test() {
   die "Smoke test failed: exec did not return hello"
 }
 
+# seed_postgres_template bakes the managed-database template (postgres-16) into
+# the Lima VM by running the production baker (scripts/bake-templates.sh) against
+# the local `base` rootfs. This is what makes `POST /v1/databases` work in local
+# dev — without it, only `base` is creatable.
+#
+# The repo is bind-mounted at /workspace inside Lima, so the baker and the
+# postgres-16 template sources are already present. bake-templates.sh clones the
+# base rootfs, chroot-installs Postgres 16 + pgvector + the query-broker, and
+# registers /var/lib/pandastack/templates/postgres-16/. Idempotent (skips if the
+# rootfs already exists; set FORCE=1 to rebake). ~5-10 min the first time.
+#
+# To bake the OTHER first-party templates (agent, browser, code-interpreter,
+# claude-agent) the same way, see docs-site/.../getting-started/local-testing.mdx.
+seed_postgres_template() {
+  step "Baking 'postgres-16' template in Lima (managed databases; ~5-10 min first run)"
+  limactl shell --workdir /workspace "$LIMA_NAME" -- sudo bash -lc '
+    set -euo pipefail
+    if [[ -f /var/lib/pandastack/templates/postgres-16/rootfs.ext4 ]]; then
+      echo "postgres-16 template already present; skipping"
+      exit 0
+    fi
+    test -f /var/lib/pandastack/templates/base/rootfs.ext4 || { echo "base template missing; run seed_base_template first"; exit 1; }
+    # Bake postgres-16 off the local "base" rootfs (apt-ready, arm64).
+    BASE_NAME=base bash /workspace/scripts/bake-templates.sh postgres-16
+  '
+}
+
 main() {
   need_darwin_arm64
   ensure_prereqs
@@ -636,6 +663,7 @@ main() {
   ensure_lima
   install_firecracker_and_template
   seed_base_template
+  seed_postgres_template
   build_and_start_agent
   build_and_start_api
   start_dashboard

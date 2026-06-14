@@ -63,8 +63,21 @@ if [[ -f "${CRED_TRIGGER}" ]]; then
   BROKER_TOKEN="$(cat "${CRED_TOK}")"
   rm -f "${CRED_TRIGGER}" "${CRED_PASS}" "${CRED_TOK}"
 else
-  PG_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 44)"
-  BROKER_TOKEN="pds_pg_$(tr -dc 'a-f0-9' </dev/urandom | head -c 48)"
+  # Generate credentials without a pipe whose consumer closes early. The old
+  # `tr </dev/urandom | head -c N` made head close the pipe after N bytes, which
+  # SIGPIPEs tr; under `set -o pipefail` + `set -e` that aborted the whole
+  # autostart (the bug that left postgres stuck "activating", never writing
+  # ready.json). Here we read a bounded chunk into a var, filter it, and slice
+  # with bash parameter expansion — no early-closing pipe involved.
+  _rnd() {
+    local charset="$1" want="$2" out=""
+    while [[ ${#out} -lt $want ]]; do
+      out+="$(head -c 8192 /dev/urandom | tr -dc "$charset")"
+    done
+    printf '%s' "${out:0:$want}"
+  }
+  PG_PASSWORD="$(_rnd 'A-Za-z0-9' 44)"
+  BROKER_TOKEN="pds_pg_$(_rnd 'a-f0-9' 48)"
 fi
 
 # ── Phase 2: bring up the durable data device ────────────────────────────────

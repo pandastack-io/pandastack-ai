@@ -8,6 +8,7 @@
     "getting-started/self-host",
     "getting-started/local-mac-apple-silicon",
     "getting-started/local-linux",
+    "getting-started/local-testing",
     "---Concepts---",
     "concepts/sandbox-lifecycle",
     "concepts/exec",

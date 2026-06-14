@@ -1,0 +1,133 @@
+---
+title: Local testing & baking templates
+---
+
+# Local testing & baking templates
+
+> **Single-tenant dev mode.** This page assumes you've already run the local
+> bootstrap from the [Apple Silicon guide](/docs/getting-started/local-mac-apple-silicon)
+> (`bash scripts/mac-local-e2e.sh`) and have the agent running inside a Lima VM.
+
+## What gets seeded by default
+
+To keep the first-run fast, `scripts/mac-local-e2e.sh` only bakes the two
+templates most people need:
+
+| Template | What it is | Baked locally? |
+| --- | --- | --- |
+| `base` | Universal app runtime — Ubuntu 24.04 + mise (Node 22, Python 3.12, Go, Bun, pnpm/yarn). Backs sandboxes **and** git-driven app hosting. | ✅ yes |
+| `postgres-16` | Managed PostgreSQL 16 + pgvector + connection pooler + REST query broker. Backs `POST /v1/databases`. | ✅ yes |
+| `code-interpreter` | Python + Node + the data-science / Playwright stack. | ❌ on demand |
+| `browser` | Headless browser automation. | ❌ on demand |
+| `agent` | Coding-agent CLI box (Node 22 + agent CLIs). | ❌ on demand |
+| `claude-agent` | Claude Managed Agents self-hosted runtime. | ❌ on demand |
+
+All six templates are **registered in the catalog** (they show up in
+`GET /v1/templates`), but only the baked ones have a local `rootfs.ext4`.
+Creating a sandbox from an unbaked template fails — the agent has no filesystem
+to boot:
+
+```text
+500  bake template key: mount rootfs: ... failed to setup loop device
+     for /var/lib/pandastack/templates/<name>/rootfs.ext4
+```
+
+That's expected. Bake the template first (below) and the error goes away.
+
+## Test the seeded templates
+
+The agent runs inside Lima; the API is on your Mac at `:8080`. Use the local
+dev token:
+
+```bash
+export PANDASTACK_API=http://localhost:8080
+export TOKEN=pds_local_dev_token
+auth=(-H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json")
+
+# 1. base — create a sandbox and exec a command
+SBX=$(curl -fsS "${auth[@]}" -X POST $PANDASTACK_API/v1/sandboxes \
+  -d '{"template":"base"}' | jq -r .id)
+
+curl -fsS "${auth[@]}" -X POST $PANDASTACK_API/v1/sandboxes/$SBX/exec \
+  -d '{"cmd":"echo","args":["hello"]}'        # → {"stdout":"hello\n",...}
+
+curl -fsS "${auth[@]}" -X DELETE $PANDASTACK_API/v1/sandboxes/$SBX
+
+# 2. postgres-16 — provision a managed database (blocks ~30-90s until ready)
+curl -fsS "${auth[@]}" -X POST $PANDASTACK_API/v1/databases \
+  -d '{"label":"test-db"}'                     # → includes a connection_url
+```
+
+<Callout>
+First create from a freshly-baked template does a one-time cold boot (~3s) and
+captures a snapshot. Every create after that restores the snapshot in well under
+a second. Give the first call a few seconds before you decide it's stuck.
+</Callout>
+
+## Bake the other templates
+
+The same production baker that runs in CI also runs locally. The repo is
+bind-mounted into the Lima VM at `/workspace`, so the baker and template sources
+are already there. Run it inside the VM, pointed at the local `base` rootfs:
+
+```bash
+# Bake one (or several) templates. ~5-15 min each — they install real toolchains.
+limactl shell --workdir /workspace pandastack-lima-vm -- \
+  sudo BASE_NAME=base bash /workspace/scripts/bake-templates.sh code-interpreter
+
+# Bake several at once:
+limactl shell --workdir /workspace pandastack-lima-vm -- \
+  sudo BASE_NAME=base bash /workspace/scripts/bake-templates.sh browser agent
+
+# Re-bake one that already exists (FORCE):
+limactl shell --workdir /workspace pandastack-lima-vm -- \
+  sudo FORCE=1 BASE_NAME=base bash /workspace/scripts/bake-templates.sh postgres-16
+```
+
+What the baker does for each template: clone the `base` rootfs → grow it to the
+template's target size → `chroot` and install the template-specific packages →
+write `meta.json` → register it at `/var/lib/pandastack/templates/<name>/`. It
+derives the guest arch from the host (`aarch64` inside Lima), and skips anything
+already baked unless `FORCE=1`.
+
+Once baked, the template is immediately creatable — no agent restart needed:
+
+```bash
+SBX=$(curl -fsS "${auth[@]}" -X POST $PANDASTACK_API/v1/sandboxes \
+  -d '{"template":"code-interpreter"}' | jq -r .id)
+curl -fsS "${auth[@]}" -X POST $PANDASTACK_API/v1/sandboxes/$SBX/exec \
+  -d '{"cmd":"python3","args":["-c","import numpy; print(numpy.__version__)"]}'
+```
+
+## Inspecting & resetting templates
+
+```bash
+# What's baked locally?
+limactl shell pandastack-lima-vm -- sudo ls -la /var/lib/pandastack/templates/
+
+# A template's metadata (arch / cpu / memory_mb / size):
+limactl shell pandastack-lima-vm -- sudo cat /var/lib/pandastack/templates/postgres-16/meta.json
+
+# Bake logs (per template):
+limactl shell pandastack-lima-vm -- sudo cat /var/lib/pandastack-work/bake/postgres-16.log
+```
+
+A template's baked memory size is frozen at bake time (Firecracker captures the
+guest's RAM into the snapshot), so the per-sandbox `cpu`/`memory_mb` in a create
+request are overridden to match the baked snapshot. To change a template's
+resources, edit its entry in `scripts/bake-templates.sh` and re-bake with
+`FORCE=1`.
+
+## Notes & gotchas
+
+- **`base` is the prerequisite for everything.** Every other template is baked
+  *from* the `base` rootfs, so seed it first (the bootstrap already does).
+- **Baking is slow the first time, fast after.** Each template installs a real
+  toolchain in a chroot. `code-interpreter` (data-science + Playwright) and
+  `claude-agent` are the heaviest.
+- **Disk.** Templates are multi-GB each (`postgres-16` ~12 GiB, `code-interpreter`
+  ~larger). The Lima VM's disk is 30 GiB by default — bake selectively, not all
+  six at once, unless you've grown the VM disk.
+- **Production bakes everything.** In a real deployment the
+  `.github/workflows/bake-templates.yml` pipeline bakes all templates to object
+  storage and the agents sync them; you only bake locally for dev/testing.
