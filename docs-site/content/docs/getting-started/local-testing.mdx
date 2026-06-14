@@ -64,6 +64,46 @@ captures a snapshot. Every create after that restores the snapshot in well under
 a second. Give the first call a few seconds before you decide it's stuck.
 </Callout>
 
+## Connecting to a managed database locally
+
+A created database returns two ways to connect, and both work in local dev:
+
+**1. REST query API (always works, no setup).** Run SQL over HTTP — the request
+is proxied through the API to the in-VM query broker. The DB record's
+`broker_url` and `broker_token` are all you need:
+
+```bash
+DB=<database-id>; BTOK=<broker-token>
+curl -sS -X POST "$PANDASTACK_API/v1/databases/$DB/proxy/v1/query" \
+  -H "Authorization: Bearer $BTOK" -H 'content-type: application/json' \
+  -d '{"database":"pandastack","sql":"select version()"}'
+# → {"columns":[...],"rows":[["PostgreSQL 16.14 ..."]],"count":1,...}
+```
+
+**2. Native `postgres://` (via the local db-proxy).** `mac-local-e2e.sh` runs the
+db-proxy on `:5433` and points `*.db.localhost` at `127.0.0.1` (dnsmasq, set up
+during bootstrap — it needs `sudo` once). With that in place the
+`connection_url` works directly:
+
+```bash
+psql "$(curl -fsS "${auth[@]}" $PANDASTACK_API/v1/databases/$DB | jq -r .connection_url)?sslmode=require"
+```
+
+If you skipped the dnsmasq step (or ran with `ENABLE_DB_PROXY=0`), `<id>.db.localhost`
+won't resolve. You can still connect by pinning the address while keeping the SNI
+hostname — `libpq` accepts both:
+
+```bash
+psql "host=<id>.db.localhost hostaddr=127.0.0.1 port=5433 \
+      user=pandastack dbname=pandastack sslmode=require"
+```
+
+<Callout type="warn">
+The native host `<id>.db.localhost:5433` is a **local-dev** convenience. In
+production the same URL is `<id>.db.<your-domain>:5432`, served by the db-proxy
+behind real DNS + TLS. The REST query API path is identical in both.
+</Callout>
+
 ## Bake the other templates
 
 The same production baker that runs in CI also runs locally. The repo is

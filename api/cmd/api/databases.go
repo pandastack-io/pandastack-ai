@@ -33,6 +33,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +47,19 @@ var dbSNISuffix = func() string {
 		return v
 	}
 	return ".db.pandastack.ai"
+}()
+
+// dbProxyPort is the port the native connection URL advertises (the db-proxy's
+// listen port). Defaults to 5432 (production). Local dev runs the proxy on a
+// different port to avoid colliding with the control-plane Postgres; override
+// with PANDASTACK_DB_PROXY_PORT.
+var dbProxyPort = func() int {
+	if v := strings.TrimSpace(os.Getenv("PANDASTACK_DB_PROXY_PORT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n < 65536 {
+			return n
+		}
+	}
+	return 5432
 }()
 
 // dbAPIBase is the public base URL of this API, used to build broker_url.
@@ -511,7 +525,7 @@ func (d *databasesAPI) connection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"connection_url": fmt.Sprintf("postgres://%s:%s@%s:5432/%s", info.Username, info.Password, id+dbSNISuffix, info.Database),
+		"connection_url": fmt.Sprintf("postgres://%s:%s@%s:%d/%s", info.Username, info.Password, id+dbSNISuffix, dbProxyPort, info.Database),
 		"broker_url":     dbAPIBase + "/v1/databases/" + id + "/proxy",
 		"broker_token":   info.BrokerToken,
 	})
@@ -821,7 +835,7 @@ type pgInfoResponse struct {
 // db-proxy connection URL using SNI routing and the public broker proxy URL.
 func mergeInfo(base DatabaseInfo, pg *pgInfoResponse, sandboxID string) DatabaseInfo {
 	base.Host = sandboxID + dbSNISuffix
-	base.Port = 5432
+	base.Port = dbProxyPort
 	base.Database = pg.Database
 	base.Username = pg.Username
 	base.Password = pg.Password
@@ -829,7 +843,7 @@ func mergeInfo(base DatabaseInfo, pg *pgInfoResponse, sandboxID string) Database
 	// Public REST broker URL: routed through this API's proxy handler.
 	// Callers authenticate with Authorization: Bearer <broker_token>.
 	base.BrokerURL = dbAPIBase + "/v1/databases/" + sandboxID + "/proxy"
-	base.ConnectionURL = fmt.Sprintf("postgres://%s:%s@%s:5432/%s",
-		pg.Username, pg.Password, base.Host, pg.Database)
+	base.ConnectionURL = fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		pg.Username, pg.Password, base.Host, dbProxyPort, pg.Database)
 	return base
 }

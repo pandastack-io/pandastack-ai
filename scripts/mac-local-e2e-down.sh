@@ -11,6 +11,7 @@ TOKEN="pds_local_dev_token"
 COMPOSE=(docker compose -f "$REPO_ROOT/docker-compose.dev.yml")
 API_PID="$STATE_DIR/api.pid"
 DASHBOARD_PID="$STATE_DIR/dashboard.pid"
+DB_PROXY_PID="$STATE_DIR/db-proxy.pid"
 DELETE_VM=1
 
 GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -90,6 +91,7 @@ cleanup_lima_guest() {
 
 main() {
   delete_sandboxes
+  kill_pid_file "$DB_PROXY_PID" "db-proxy"
   kill_pid_file "$DASHBOARD_PID" "dashboard"
   kill_pid_file "$API_PID" "API"
   cleanup_lima_guest

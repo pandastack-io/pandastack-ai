@@ -21,7 +21,15 @@ WORKSPACE="$PANDASTACK_STUB_WORKSPACE"
 COMPOSE=(docker compose -f "$REPO_ROOT/docker-compose.dev.yml")
 API_PID="$STATE_DIR/api.pid"
 DASHBOARD_PID="$STATE_DIR/dashboard.pid"
+DB_PROXY_PID="$STATE_DIR/db-proxy.pid"
 TOKENS_FILE="$STATE_DIR/tokens.json"
+# Native-postgres local connectivity (db-proxy). The proxy listens on 5433
+# (5432 is the control-plane Postgres) and routes by SNI {id}.db.localhost,
+# resolved to 127.0.0.1 via dnsmasq. Set ENABLE_DB_PROXY=0 to skip it.
+ENABLE_DB_PROXY="${ENABLE_DB_PROXY:-1}"
+DB_PROXY_PORT="${DB_PROXY_PORT:-5433}"
+DB_SNI_SUFFIX="${DB_SNI_SUFFIX:-.db.localhost}"
+DB_PROXY_CERT_DIR="$STATE_DIR/db-proxy-cert"
 PG_DSN_HOST="postgres://pandastack:pandastack@localhost:5432/pandastack?sslmode=disable"
 PG_DSN_VM="postgres://pandastack:pandastack@host.lima.internal:5432/pandastack?sslmode=disable"
 CLICKHOUSE_URL="http://pandastack:pandastack@localhost:8123/pandastack"
@@ -539,6 +547,9 @@ build_and_start_api() {
         PANDASTACK_STUB_WORKSPACE="$PANDASTACK_STUB_WORKSPACE" \
         PANDASTACK_APP_HOST_SUFFIX="${PANDASTACK_APP_HOST_SUFFIX:-}" \
         PANDASTACK_PREVIEW_HOST_SUFFIX="${PANDASTACK_PREVIEW_HOST_SUFFIX:-}" \
+        PANDASTACK_API_BASE_URL="${PANDASTACK_API_BASE_URL:-http://localhost:8080}" \
+        PANDASTACK_DB_SNI_SUFFIX="$([[ "$ENABLE_DB_PROXY" == "1" ]] && echo "$DB_SNI_SUFFIX" || echo "")" \
+        PANDASTACK_DB_PROXY_PORT="$([[ "$ENABLE_DB_PROXY" == "1" ]] && echo "$DB_PROXY_PORT" || echo "")" \
         GITHUB_APP_ID="${GITHUB_APP_ID:-}" \
         GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:-}" \
         GITHUB_APP_PRIVATE_KEY="${GITHUB_APP_PRIVATE_KEY:-}" \
@@ -587,6 +598,84 @@ start_dashboard() {
     sleep 2
   done
   curl -fsS http://localhost:3000 >/dev/null 2>&1 || die "Dashboard did not become healthy; see $LOG_DIR/dashboard.log"
+}
+
+# start_db_proxy makes the *native* postgres:// connection URL work on localhost.
+# In production this runs on a VM behind {id}.db.pandastack.ai:5432; locally we
+# run the same binary on the Mac host and route by SNI {id}.db.localhost:5433:
+#
+#   psql → {id}.db.localhost (→ 127.0.0.1 via dnsmasq) :5433 → db-proxy
+#        → TLS handshake (SNI = {id}.db.localhost, self-signed wildcard cert)
+#        → catalog lookup (leases JOIN agents) → HTTP-Upgrade pg-tunnel to the
+#          agent at 127.0.0.1:7070 → agent dials guest_ip:5432
+#
+# Requires sudo for the dnsmasq resolver file. Set ENABLE_DB_PROXY=0 to skip
+# (the REST query broker path always works without any of this).
+start_db_proxy() {
+  [[ "$ENABLE_DB_PROXY" == "1" ]] || { warn "db-proxy disabled (ENABLE_DB_PROXY=0); native postgres:// URLs won't resolve locally — use the REST query API"; return 0; }
+  step "Starting db-proxy for native postgres:// on localhost (SNI ${DB_SNI_SUFFIX}:${DB_PROXY_PORT})"
+
+  # 1. dnsmasq: resolve *<suffix> → 127.0.0.1. The suffix is e.g. .db.localhost,
+  #    so the dnsmasq domain is the suffix without the leading dot.
+  local dns_domain="${DB_SNI_SUFFIX#.}"
+  if ! command -v dnsmasq >/dev/null 2>&1; then
+    step "Installing dnsmasq with Homebrew"
+    brew install dnsmasq
+  fi
+  local dnsmasq_conf brew_prefix
+  brew_prefix="$(brew --prefix)"
+  dnsmasq_conf="$brew_prefix/etc/dnsmasq.d/pandastack-db.conf"
+  mkdir -p "$brew_prefix/etc/dnsmasq.d"
+  if ! grep -qs "address=/${dns_domain}/127.0.0.1" "$dnsmasq_conf" 2>/dev/null; then
+    printf 'address=/%s/127.0.0.1\n' "$dns_domain" > "$dnsmasq_conf"
+    # dnsmasq.d may not be included by the main conf on a fresh brew install.
+    grep -qs "conf-dir=.*dnsmasq.d" "$brew_prefix/etc/dnsmasq.conf" 2>/dev/null || \
+      printf '\nconf-dir=%s/etc/dnsmasq.d,*.conf\n' "$brew_prefix" >> "$brew_prefix/etc/dnsmasq.conf"
+  fi
+  warn "dnsmasq + the macOS resolver need sudo (one time). You may be prompted."
+  sudo mkdir -p /etc/resolver
+  printf 'nameserver 127.0.0.1\n' | sudo tee "/etc/resolver/${dns_domain}" >/dev/null
+  sudo brew services restart dnsmasq >/dev/null 2>&1 || sudo "$brew_prefix/sbin/dnsmasq" --conf-file="$brew_prefix/etc/dnsmasq.conf" 2>/dev/null || true
+  # Verify resolution (give the resolver a moment).
+  for _ in {1..10}; do
+    dscacheutil -q host -a name "probe${DB_SNI_SUFFIX}" 2>/dev/null | grep -q "127.0.0.1" && break
+    sleep 1
+  done
+  dscacheutil -q host -a name "probe${DB_SNI_SUFFIX}" 2>/dev/null | grep -q "127.0.0.1" \
+    || warn "wildcard DNS for *${DB_SNI_SUFFIX} not confirmed; native URLs may still fail to resolve"
+
+  # 2. Self-signed wildcard cert for *.<suffix> (TLS only; psql uses sslmode=require).
+  mkdir -p "$DB_PROXY_CERT_DIR"
+  if [[ ! -f "$DB_PROXY_CERT_DIR/fullchain.pem" ]]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout "$DB_PROXY_CERT_DIR/privkey.pem" \
+      -out "$DB_PROXY_CERT_DIR/fullchain.pem" \
+      -subj "/CN=*${DB_SNI_SUFFIX}" \
+      -addext "subjectAltName=DNS:*${DB_SNI_SUFFIX},DNS:${dns_domain}" >/dev/null 2>&1
+  fi
+
+  # 3. Build + run the db-proxy on the Mac host.
+  (cd "$REPO_ROOT/db-proxy" && go build -o "$BIN_DIR/pandastack-db-proxy" .)
+  if [[ -f "$DB_PROXY_PID" ]] && kill -0 "$(cat "$DB_PROXY_PID" 2>/dev/null)" 2>/dev/null; then
+    echo "db-proxy already running (pid $(cat "$DB_PROXY_PID"))"
+  else
+    env \
+      PANDASTACK_DB_DSN="$PG_DSN_HOST" \
+      PANDASTACK_NODE_TOKEN="$NODE_TOKEN" \
+      PANDASTACK_CERT_DIR="$DB_PROXY_CERT_DIR" \
+      PANDASTACK_LISTEN_ADDR=":${DB_PROXY_PORT}" \
+      PANDASTACK_SNI_SUFFIX="$DB_SNI_SUFFIX" \
+      PANDASTACK_METRICS_ADDR=":5544" \
+      "$BIN_DIR/pandastack-db-proxy" >"$LOG_DIR/db-proxy.log" 2>&1 &
+    echo $! > "$DB_PROXY_PID"
+  fi
+  for _ in {1..20}; do
+    nc -z 127.0.0.1 "$DB_PROXY_PORT" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  nc -z 127.0.0.1 "$DB_PROXY_PORT" >/dev/null 2>&1 \
+    && echo "  db-proxy listening on :${DB_PROXY_PORT}" \
+    || warn "db-proxy not listening on :${DB_PROXY_PORT}; see $LOG_DIR/db-proxy.log"
 }
 
 smoke_test() {
@@ -667,6 +756,7 @@ main() {
   build_and_start_agent
   build_and_start_api
   start_dashboard
+  start_db_proxy
   smoke_test
 
   printf "\n${GREEN}╰─ PandaStack local E2E is up${NC}\n"
