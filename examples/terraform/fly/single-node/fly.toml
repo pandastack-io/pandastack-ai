@@ -2,7 +2,7 @@ app = "pandastack-agent-single-node"
 primary_region = "ord"
 
 [build]
-  image = "ghcr.io/pandastack-io/pandastack/agent:latest"
+  image = "ghcr.io/pandastack-io/pandastack-ai/agent:latest"
 
 [env]
   PANDASTACK_CONTROL_PLANE_URL = "https://api.pandastack.ai"

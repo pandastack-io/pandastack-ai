@@ -88,8 +88,8 @@ ${GREEN}✓ PandaStack is up.${NC}
 
   dashboard:  http://localhost:3000
   api:        http://localhost:8080
-  postgres:   localhost:5432  (user/pass: pandastack-io/pandastack-ai-oss)
-  clickhouse: http://localhost:8123  (user/pass: pandastack-io/pandastack-ai-oss)
+  postgres:   localhost:5432  (user/pass: pandastack/pandastack)
+  clickhouse: http://localhost:8123  (user/pass: pandastack/pandastack)
   agent:      http://localhost:7070  (pid $(cat "$AGENT_PID"))
   token:      pds_local_dev_token
 

@@ -418,7 +418,7 @@ EnvironmentFile=/etc/pandastack/env.agent
 ExecStart=/usr/local/bin/pandastack-agent \
   -socket /run/fcsandbox/agent.sock \
   -data-dir /var/lib/pandastack \
-  -db /var/lib/pandastack-io/pandastack-ai-oss.db \
+  -db /var/lib/pandastack/pandastack.db \
   -metrics-listen :9100
 Restart=always
 RestartSec=3

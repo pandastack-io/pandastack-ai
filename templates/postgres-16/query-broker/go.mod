@@ -1,4 +1,4 @@
-module github.com/pandastack-io/pandastack/templates/postgres-16/query-broker
+module github.com/pandastack-io/pandastack-ai/templates/postgres-16/query-broker
 
 go 1.23
 

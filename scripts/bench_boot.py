@@ -32,7 +32,7 @@ def req(method, path, body=None):
         headers={
             "Authorization": "Bearer " + TOKEN,
             "Content-Type": "application/json",
-            "User-Agent": "pandastack-bench/1.0 (+https://github.com/pandastack-io/pandastack-ai-oss)",
+            "User-Agent": "pandastack-bench/1.0 (+https://github.com/pandastack-io/pandastack-ai)",
         },
     )
     with urllib.request.urlopen(r, timeout=30) as resp:

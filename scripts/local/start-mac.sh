@@ -141,7 +141,7 @@ case "$CMD" in
     step "Writing /etc/pandastack/env (local SQLite, no Supabase)"
     limactl shell "$VM_NAME" -- sudo tee /etc/pandastack/env >/dev/null <<'ENV'
 PANDASTACK_DB_DRIVER=sqlite
-PANDASTACK_DB_DSN=/var/lib/pandastack-io/pandastack-ai-oss.db
+PANDASTACK_DB_DSN=/var/lib/pandastack/pandastack.db
 PANDASTACK_NATID=1
 PANDASTACK_NATID_POOL_SIZE=4
 PANDASTACK_DEFAULT_TTL_SECONDS=300
@@ -157,7 +157,7 @@ After=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/pandastack/env
-ExecStart=/usr/local/bin/pandastack-agent -socket /run/fcsandbox/agent.sock -data-dir /var/lib/pandastack -db /var/lib/pandastack-io/pandastack-ai-oss.db
+ExecStart=/usr/local/bin/pandastack-agent -socket /run/fcsandbox/agent.sock -data-dir /var/lib/pandastack -db /var/lib/pandastack/pandastack.db
 Restart=always
 RestartSec=3
 [Install]

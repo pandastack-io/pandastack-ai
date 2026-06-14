@@ -177,7 +177,7 @@ python3 bench/lsp/harness.py --variants both --model gpt-4o-mini
 
 The 5 tasks live in `bench/lsp/tasks.py`. Pylsp wheels for hermetic install live in `bench/lsp/wheels/` (17 wheels including pylsp-rope and rope; the sandbox has no PyPI egress). Per-task CSVs land in `bench/lsp/results/`.
 
-If you find a task where our LSP variant should win and doesn't, [open an issue](https://github.com/pandastack) with the failing test. We'll either fix the feature or update this blog.
+If you find a task where our LSP variant should win and doesn't, [open an issue](https://github.com/pandastack-io/pandastack-ai/issues) with the failing test. We'll either fix the feature or update this blog.
 
 — *The PandaStack team*
 

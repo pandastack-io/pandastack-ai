@@ -15,6 +15,6 @@ ENV
 chmod 0600 /opt/pandastack/agent.env
 
 # Replace this placeholder with a pinned release artifact once published.
-curl -fsSL https://raw.githubusercontent.com/pandastack-io/pandastack/main/scripts/install-agent.sh | bash || true
+curl -fsSL https://raw.githubusercontent.com/pandastack-io/pandastack-ai/main/scripts/install-agent.sh | bash || true
 
 systemctl enable --now pandastack-agent || true

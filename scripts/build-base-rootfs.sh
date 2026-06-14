@@ -39,7 +39,7 @@ WORK="${WORK:-/var/lib/pandastack-work/base}"
 
 PANDASTACK_INIT_BIN="${PANDASTACK_INIT_BIN:-}"
 if [[ -z "$PANDASTACK_INIT_BIN" ]]; then
-  for cand in /usr/local/bin/pandastack-init /opt/pandastack-io/pandastack-ai-oss-init "$(dirname "$0")/../bin/pandastack-init"; do
+  for cand in /usr/local/bin/pandastack-init /opt/pandastack/pandastack-init "$(dirname "$0")/../bin/pandastack-init"; do
     [[ -x "$cand" ]] && PANDASTACK_INIT_BIN="$cand" && break
   done
 fi

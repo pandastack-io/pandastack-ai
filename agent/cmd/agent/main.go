@@ -41,7 +41,7 @@ func main() {
 	var (
 		socketPath    = flag.String("socket", "/run/pandastack/agent.sock", "Unix socket to listen on")
 		dataDir       = flag.String("data-dir", "/var/lib/pandastack", "Root of templates / vms / snapshots")
-		dbPath        = flag.String("db", "/var/lib/pandastack-io/pandastack-ai-oss.db", "SQLite metadata DB")
+		dbPath        = flag.String("db", "/var/lib/pandastack/pandastack.db", "SQLite metadata DB")
 		cidr          = flag.String("sandbox-cidr", "172.20.0.0/16", "CIDR pool for per-sandbox /30 subnets")
 		idleAfter     = flag.Duration("idle-after", envDurationDefault("PANDASTACK_IDLE_AFTER", 0), "Auto-hibernate sandboxes idle for this long (0=disabled). Env override: PANDASTACK_IDLE_AFTER")
 		metricsListen = flag.String("metrics-listen", os.Getenv("PANDASTACK_METRICS_LISTEN"), "Optional TCP listen address for /metrics + /healthz (e.g. :9100). Empty = serve on the unix socket only.")

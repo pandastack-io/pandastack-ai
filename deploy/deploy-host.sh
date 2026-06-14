@@ -201,7 +201,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/pandastack/env.agent
-ExecStart=/usr/local/bin/pandastack-agent -socket /run/fcsandbox/agent.sock -data-dir /var/lib/pandastack -db /var/lib/pandastack-io/pandastack-ai-oss.db
+ExecStart=/usr/local/bin/pandastack-agent -socket /run/fcsandbox/agent.sock -data-dir /var/lib/pandastack -db /var/lib/pandastack/pandastack.db
 Restart=always
 RestartSec=3
 [Install]
