@@ -2,8 +2,8 @@ name: Local E2E
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 9 * * *'
+  # schedule:
+  #   - cron: '17 9 * * *'
 
 permissions:
   contents: read
