@@ -4,6 +4,12 @@ dist/
 node_modules/
 *.log
 
+# stray go build outputs (when `go build` runs without -o in a package dir)
+/agent/agent
+/cmd/pandastack/cli
+/api/api
+/db-proxy/db-proxy
+
 # go
 agent/vendor/
 api/vendor/

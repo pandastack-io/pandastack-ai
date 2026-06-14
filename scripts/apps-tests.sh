@@ -15,8 +15,9 @@ set -euo pipefail
 
 API="${API:-http://localhost:8080}"
 KEY="${PANDASTACK_API_KEY:-}"
-# A tiny static repo deploys fast and needs no toolchain.
-GIT_URL="${GIT_URL:-https://github.com/pandastack/example-static-site}"
+# A tiny static repo deploys fast and needs no toolchain. Override GIT_URL to
+# point at your own; the default is GitHub's canonical public "Hello World" repo.
+GIT_URL="${GIT_URL:-https://github.com/octocat/Hello-World}"
 SKIP_DEPLOY="${SKIP_DEPLOY:-}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 
