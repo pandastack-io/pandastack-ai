@@ -20,7 +20,6 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"cloud.google.com/go/storage"
 	"github.com/pandastack/api/internal/obs"
 )
 
@@ -111,9 +110,8 @@ func main() {
 			log.Info("jwt auth enabled", "jwks_url", os.Getenv("SUPABASE_JWKS_URL"))
 		}
 	}
-	skipPrefixes := append(authSkipPrefixes(), previewPathPrefix, "/v1/webhooks/", "/v1/internal/natid", "/v1/github/callback")
+	skipPrefixes := append(authSkipPrefixes(), "/v1/internal/natid")
 	authn := newUnifiedAuth(ts, jwtValidator, skipPrefixes)
-	previewSigner := newPreviewSigner(log)
 
 	var transport http.RoundTripper
 	if *agentURL != "" {
@@ -167,7 +165,6 @@ func main() {
 	})
 	mux.Handle("GET /metrics", obs.MetricsHandler())
 	registerMeTokenRoutes(mux, ts)
-	registerPreviewRoutes(mux, previewSigner, v1Handler)
 
 	// ClickHouse analytics: shared writer + reader. nil-safe; init may return
 	// (nil, nil) when PANDASTACK_CLICKHOUSE_URL is unset.
@@ -179,8 +176,6 @@ func main() {
 	// fall through to the agent proxy as 404s.
 	var orgs *orgsAPI
 	var resolver *orgResolver
-	var fns *functionsAPI
-	var apps *appsAPI
 	if pgDB != nil {
 		orgs = newOrgsAPI(pgDB, log)
 		if err := orgs.SetupSchema(context.Background()); err != nil {
@@ -188,23 +183,9 @@ func main() {
 			os.Exit(1)
 		}
 		orgs.Register(mux)
-		fns = newFunctionsAPI(pgDB, log, v1Handler, initGCSClient(log), os.Getenv("PANDASTACK_FN_BUCKET"), chs)
-		if err := fns.SetupSchema(context.Background()); err != nil {
-			log.Error("functions schema setup failed", "err", err)
-			os.Exit(1)
-		}
-		fns.Register(mux)
-		log.Info("functions and schedules endpoints registered")
 		dbs := newDatabasesAPI(log, v1Handler, pgDB, multiNode)
 		dbs.Register(mux)
 		log.Info("databases endpoints registered")
-		apps = newAppsAPI(pgDB, log, v1Handler, chs)
-		if err := apps.SetupSchema(context.Background()); err != nil {
-			log.Error("apps schema setup failed", "err", err)
-			os.Exit(1)
-		}
-		apps.Register(mux)
-		log.Info("apps endpoints registered")
 		tpls := newTemplatesAPI(pgDB, log, v1Handler)
 		if err := tpls.SetupSchema(context.Background()); err != nil {
 			log.Error("templates schema setup failed", "err", err)
@@ -240,17 +221,6 @@ func main() {
 		inner = resolver.Middleware(mux)
 	}
 	handler := chain(log, cors(authn.Middleware(mwClickHouseLog(chs)(inner))))
-	// Preview-host router runs OUTSIDE the auth chain so that public
-	// {port}-{sandbox_id}.<suffix> requests bypass token checks. When
-	// PANDASTACK_PREVIEW_HOST_SUFFIX is unset, this is a passthrough.
-	handler = previewHostRouter(v1Handler, mux, handler)
-	// App-host router runs OUTSIDE the auth chain so that public
-	// {app-id}.<suffix> requests resolve to the app's CURRENT sandbox
-	// (app-scoped indirection — stable URL across blue-green deploys). When
-	// PANDASTACK_APP_HOST_SUFFIX is unset, this is a passthrough.
-	if apps != nil {
-		handler = apps.HostRouter(handler)
-	}
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -261,14 +231,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Schedule runner: fires due schedules every 30 seconds.
-	if fns != nil {
-		go fns.StartScheduler(ctx)
-	}
-	// App health monitor: health-checks running apps and auto-restarts them.
-	if apps != nil {
-		go apps.StartMonitor(ctx)
-	}
 
 	go func() {
 		log.Info("control-plane listening",
@@ -367,16 +329,3 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
-// initGCSClient creates a GCS client using Application Default Credentials.
-// Returns nil if GCS is not needed (PANDASTACK_FN_BUCKET is unset).
-func initGCSClient(log *slog.Logger) *storage.Client {
-	if os.Getenv("PANDASTACK_FN_BUCKET") == "" {
-		return nil
-	}
-	c, err := storage.NewClient(context.Background())
-	if err != nil {
-		log.Warn("GCS client init failed (function bundles disabled)", "err", err)
-		return nil
-	}
-	return c
-}

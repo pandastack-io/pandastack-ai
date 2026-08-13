@@ -20,7 +20,6 @@ function msg(e: unknown) { return e instanceof Error ? e.message : String(e); }
 type Managed = { kind: "database" | "app"; href: string; label: string } | null;
 function managedBy(s: Sandbox): Managed {
   if (s.template === "postgres-16") return { kind: "database", href: "/databases", label: "Databases" };
-  if (s.metadata?.kind === "app" || s.metadata?.["app.id"]) return { kind: "app", href: "/apps", label: "Apps" };
   return null;
 }
 

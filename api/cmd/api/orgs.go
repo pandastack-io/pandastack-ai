@@ -145,6 +145,45 @@ func writeErrOrg(w http.ResponseWriter, code int, msg string) {
 	writeJSONOrg(w, code, map[string]string{"error": msg})
 }
 
+var reservedOrgSlugs = map[string]bool{
+	"admin": true, "default": true, "system": true, "internal": true,
+	"root": true, "superuser": true, "pandastack": true, "api": true,
+	"agent": true, "edge": true, "app": true, "apps": true, "www": true,
+	"dashboard": true, "webhook": true, "webhooks": true, "healthz": true,
+	"metrics": true, "v1": true, "me": true, "orgs": true, "public": true,
+	"null": true, "undefined": true,
+}
+
+func isReservedOrgSlug(slug string) bool {
+	return reservedOrgSlugs[strings.ToLower(strings.TrimSpace(slug))]
+}
+
+// isValidOrgSlug enforces the workspace-key charset: 2-40 chars, lowercase
+// [a-z0-9], hyphen-separated, no leading/trailing/double hyphen.
+func isValidOrgSlug(slug string) bool {
+	slug = strings.TrimSpace(slug)
+	n := len(slug)
+	if n < 2 || n > 40 || slug[0] == '-' || slug[n-1] == '-' {
+		return false
+	}
+	prevHyphen := false
+	for i := 0; i < n; i++ {
+		c := slug[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			prevHyphen = false
+		case c == '-':
+			if prevHyphen {
+				return false
+			}
+			prevHyphen = true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // slugFromName makes a URL-safe org slug from a display name. Keeps a-z/0-9/-
 // only, collapses runs of '-'. If empty after sanitizing, falls back to a
 // short random suffix.
@@ -273,6 +312,14 @@ func (a *orgsAPI) createOrg(w http.ResponseWriter, r *http.Request) {
 	slug := strings.TrimSpace(body.Slug)
 	if slug == "" {
 		slug = slugFromName(body.Name)
+	}
+	// SECURITY (tenancy): the org slug becomes the workspace key on
+	// X-Fcs-Workspace; the agent treats the literal "admin"/"default"/"" as a
+	// fleet-wide see-everything scope. A user-chosen slug MUST NOT name those,
+	// nor any shape that could break out of a downstream string context.
+	if !isValidOrgSlug(slug) || isReservedOrgSlug(slug) {
+		writeErrOrg(w, 400, "invalid organization slug: use 2-40 lowercase letters, digits, and single hyphens (reserved names are not allowed)")
+		return
 	}
 	// Pull email from auth header if available — useful for org_members row.
 	email := strings.TrimSpace(r.Header.Get("X-Pandastack-User-Email"))

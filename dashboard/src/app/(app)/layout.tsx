@@ -12,7 +12,6 @@ import { createClient } from "@/lib/supabase/client";
 import { ConfirmProvider } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme";
 import {
-  AppWindow,
   Box,
   Cpu,
   Database,
@@ -27,7 +26,6 @@ import {
   ChevronRight,
   Zap,
   Activity,
-  Clock,
   LineChart,
   Bell,
   User,
@@ -44,10 +42,7 @@ import {
 const NAV = [
   { href: "/sandboxes",       label: "Sandboxes",    icon: Box,        shortcut: "G S" },
   { href: "/databases",       label: "Databases",    icon: Database,   shortcut: "" },
-  { href: "/apps",            label: "Apps",         icon: AppWindow,  shortcut: "" },
   { href: "/templates",       label: "Templates",    icon: LayoutGrid, shortcut: "G T" },
-  { href: "/functions",       label: "Functions",    icon: Zap,        shortcut: "" },
-  { href: "/schedules",       label: "Schedules",    icon: Clock,      shortcut: "" },
   { href: "/volumes",         label: "Volumes",      icon: HardDrive,  shortcut: "" },
   { href: "/audit",           label: "Audit Log",    icon: Bell,       shortcut: "" },
   { href: "/stats",           label: "Performance",  icon: Activity,   shortcut: "" },
@@ -617,10 +612,7 @@ function SearchModal({ onClose }: { onClose: () => void }) {
   const actions = [
     { label: "Go to Sandboxes", shortcut: "G S", href: "/sandboxes" },
     { label: "Go to Databases", shortcut: "", href: "/databases" },
-    { label: "Go to Apps", shortcut: "", href: "/apps" },
     { label: "Go to Templates", shortcut: "G T", href: "/templates" },
-    { label: "Go to Functions", shortcut: "", href: "/functions" },
-    { label: "Go to Schedules", shortcut: "", href: "/schedules" },
     { label: "Go to Volumes", shortcut: "", href: "/volumes" },
     { label: "Go to Performance", shortcut: "", href: "/stats" },
     { label: "Go to API Tokens", shortcut: "", href: "/settings/tokens" },
