@@ -213,56 +213,6 @@ sb.exec("mkdir -p /mnt/models && mount -o ro /dev/vdb /mnt/models")
 
 Quotas are per plan (Free 1 × 1 GiB · Pro 10 × 10 GiB · Team 50 × 50 GiB · Enterprise unlimited; 64 GiB hard per-volume ceiling). Exceeding the quota returns a 429 (`BadRequestError`); storage above your plan's included total bills at **$0.15 per provisioned GiB-month**. Live rates and per-tier limits: `GET /v1/pricing`.
 
-## Apps (git-driven hosting)
-
-Connect a GitHub repo and serve it behind a stable per-app URL with blue-green deploys. See [Apps overview](/docs/apps/overview).
-
-```python
-from pandastack import Client
-client = Client()
-
-# Create — only name + git_url are required; framework is auto-detected when omitted
-app = client.apps.create(
-    name="my-site",
-    git_url="https://github.com/acme/my-site",
-    git_branch="main",            # optional (default: main)
-    framework="nextjs",           # optional: nextjs | vite | node | static (auto-detected if omitted)
-    install_command=None,         # optional overrides
-    build_command=None,
-    start_command=None,
-    root_directory=None,          # optional sub-dir to build from
-    port=3000,                    # optional (default: 3000)
-    env={"NODE_ENV": "production"},
-)
-print(app["id"], app.get("url"))
-
-client.apps.list()                 # all apps in the workspace
-client.apps.get(app["id"])         # includes the stable `url` when running
-client.apps.update(app["id"], build_command="npm run build:prod")
-client.apps.delete(app["id"])      # also tears down the runtime sandbox
-```
-
-Deploys are blue-green: a fresh sandbox builds the new commit, health-checks, then the app atomically flips to it.
-
-```python
-dep = client.apps.deploy(app["id"], git_ref="v1.2.0")   # git_ref optional (defaults to git_branch)
-client.apps.deployments(app["id"])                       # newest first
-client.apps.deployment(app["id"], dep["id"])             # includes full build log
-
-for line in client.apps.deploy_logs(app["id"], dep["id"]):  # SSE, line by line
-    print(line)
-
-client.apps.rollback(app["id"])    # rebuild + flip back to the previous deployment
-```
-
-<Callout>
-  Apps run on the `base` template snapshot, so CPU/RAM are governed by that template's baked size (2 GiB), **not** the per-app `cpu`/`memory_mb` — those are accepted for forward-compat but the agent overrides them to the snapshot size.
-</Callout>
-
-### GitHub integration
-
-Private repos and push-triggered auto-deploys use a GitHub App installation. The connect flow is browser-based (`GET /v1/github/connect` returns the install URL); once installed, list repos and installations via the [REST API](/docs/reference/rest-api#github-integration-apps). A push to a connected branch with `auto_deploy=true` triggers a deploy pinned to the exact commit.
-
 ## Tokens
 
 ```python
