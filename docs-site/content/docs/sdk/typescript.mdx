@@ -222,52 +222,6 @@ await sandbox.exec("mkdir -p /mnt/models && mount -o ro /dev/vdb /mnt/models");
 
 `VolumeInfo` has `name`, `size_mb`, `created_at`. Quotas are per plan (Free 1 × 1 GiB · Pro 10 × 10 GiB · Team 50 × 50 GiB · Enterprise unlimited; 64 GiB hard per-volume ceiling). Exceeding the quota returns a 429 (`BadRequestError`); storage above your plan's included total bills at **$0.15 per provisioned GiB-month**. Live rates and per-tier limits: `GET /v1/pricing`.
 
-## Apps (git-driven hosting)
-
-Connect a GitHub repo and serve it behind a stable per-app URL with blue-green deploys. See [Apps overview](/docs/apps/overview).
-
-```ts
-// Create — only name + git_url are required; framework is auto-detected when omitted
-const app = await client.apps.create({
-  name: "my-site",
-  git_url: "https://github.com/acme/my-site",
-  git_branch: "main",                 // optional (default: main)
-  framework: "nextjs",                // optional: nextjs | vite | node | static
-  install_command: undefined,         // optional build/run overrides
-  build_command: undefined,
-  start_command: undefined,
-  root_directory: undefined,          // optional sub-dir to build from
-  port: 3000,                         // optional (default: 3000)
-  env: { NODE_ENV: "production" },
-});
-console.log(app.id, app.url);         // `url` is populated once running
-
-await client.apps.list();             // AppInfo[]
-await client.apps.get(app.id);        // includes the stable `url`
-await client.apps.update(app.id, { build_command: "npm run build:prod" });
-await client.apps.delete(app.id);     // also tears down the runtime sandbox
-```
-
-Deploys are blue-green: a fresh sandbox builds the new commit, health-checks, then the app atomically flips to it.
-
-```ts
-const dep = await client.apps.deploy(app.id, { gitRef: "v1.2.0" });  // gitRef optional
-await client.apps.deployments(app.id);             // newest first
-await client.apps.deployment(app.id, dep.id);      // includes full build log
-
-for await (const line of client.apps.deployLogs(app.id, dep.id)) {   // SSE stream
-  console.log(line);
-}
-
-await client.apps.rollback(app.id);   // rebuild + flip back to the previous deployment
-```
-
-<Callout>
-  Apps run on the `base` template snapshot, so CPU/RAM are governed by that template's baked size (2 GiB), **not** the per-app `cpu`/`memory_mb` — those are accepted for forward-compat but the agent overrides them to the snapshot size.
-</Callout>
-
-Private repos and push-triggered auto-deploys use a GitHub App installation; the connect flow is browser-based (`GET /v1/github/connect`). See [GitHub integration](/docs/reference/rest-api#github-integration-apps).
-
 ## Tokens
 
 ```ts

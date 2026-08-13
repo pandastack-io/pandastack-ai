@@ -170,43 +170,6 @@ Create body — `name` is required, `size_mb` optional (defaults to 256 MiB, har
 
 Over-quota creates return `429`; a host with no storage headroom returns `507`. A volume is host-pinned to the agent that creates it for its lifetime. Listing is per-agent (it queries the scheduler-picked agent), so a volume created on one agent may not appear in a list served by another until a control-plane volume registry exists.
 
-## Apps (git-driven hosting)
-
-Connect a GitHub repo and serve it behind a stable per-app URL with blue-green deploys. See [Apps overview](/docs/apps/overview).
-
-```http
-POST   /v1/apps
-GET    /v1/apps
-GET    /v1/apps/{id}
-PATCH  /v1/apps/{id}
-DELETE /v1/apps/{id}
-
-POST   /v1/apps/{id}/deploys
-GET    /v1/apps/{id}/deploys
-GET    /v1/apps/{id}/deploys/{deployID}
-GET    /v1/apps/{id}/deploys/{deployID}/logs
-POST   /v1/apps/{id}/rollback
-GET    /v1/apps/{id}/runtime-logs
-ANY    /v1/apps/{id}/proxy/{rest...}
-```
-
-Create body — `git_url` is required; `git_branch`, `framework`, `runtime`, build/start commands, `env`, `port`, `cpu`, and `memory_mb` are optional (framework is auto-detected when omitted). The response includes a computed `url`. `GET /v1/apps/{id}` also returns it.
-
-`POST /v1/apps/{id}/deploys` triggers a deploy (optional `git_ref` override) and returns a deployment row. `/deploys/{deployID}/logs` and `/runtime-logs` use Server-Sent Events when called with `?follow=1`. `POST /v1/apps/{id}/rollback` reverts to the previous (or a specified) deployment. The `proxy` route is a stable reverse proxy to the live sandbox.
-
-## GitHub integration (apps)
-
-```http
-GET    /v1/github/connect
-GET    /v1/github/callback
-GET    /v1/github/installations
-DELETE /v1/github/installations/{id}
-GET    /v1/github/repos
-POST   /v1/webhooks/github
-```
-
-`/connect` returns the GitHub App install URL; `/callback` records the installation. `/repos` lists repos for an installation. `POST /v1/webhooks/github` is the HMAC-verified push webhook that triggers auto-deploys for apps with `auto_deploy=true` on the pushed branch.
-
 ## Billing
 
 ```http

@@ -182,7 +182,7 @@ curl -s "https://api.anthropic.com/v1/environments/$ENV_ID/work/stats" \
 
 ## Production notes
 
-- **Webhook instead of polling.** This guide uses an always-on poller (only needs outbound HTTPS). To skip the idle poller, drive the same create-and-launch logic from a [webhook](https://platform.claude.com/docs/en/managed-agents/webhooks) handler that fires on `session.status_run_started` — a [PandaStack function](/docs/functions/overview) is a good home for it.
+- **Webhook instead of polling.** This guide uses an always-on poller (only needs outbound HTTPS). To skip the idle poller, drive the same create-and-launch logic from a [webhook](https://platform.claude.com/docs/en/managed-agents/webhooks) handler that fires on `session.status_run_started`.
 - **Staging files into a session.** Anthropic doesn't mount files or repos into self-hosted sandboxes. Pass references (an S3 path, a commit SHA) in the session `metadata`; your orchestrator reads them off the claimed work item and stages the files into `/workspace` before launching the runner.
 - **Outputs at rest.** The reference pulls `/mnt/session/outputs` to local disk. For durable storage, push to a bucket. (Mounting a [volume](/docs/concepts/volumes) at that path would force a cold boot and forfeit the snapshot-restore fast path, so copy via the filesystem API instead.)
 - **Stopping a session.** To end a session from your ops tooling, call `work/stop` on its work item (`POST /v1/environments/{env}/work/{work_id}/stop`, org API key). The runner finishes its in-flight tool call, posts a final status, and exits; pass `{"force": true}` to interrupt immediately.
