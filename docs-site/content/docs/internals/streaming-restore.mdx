@@ -1,6 +1,6 @@
 ---
-title: Streaming Restore (UFFD)
-description: How a cold host boots a sandbox without first downloading the whole memory snapshot — on-demand page streaming over userfaultfd.
+title: Streaming Restore (UFFD + NBD)
+description: How a cold host boots a sandbox without first downloading the whole memory snapshot or rootfs — on-demand page streaming over userfaultfd, and demand-paged disk over NBD.
 ---
 
 [Snapshot restore](/docs/internals/snapshot-restore) is fast because `vm.mem` is already a local file: Firecracker `mmap`s it and pages fault in lazily. But that assumes the file is *on the host*. On a **cold host** — one that has never restored this template — the agent first has to download the entire `vm.mem` (256 MiB – several GiB) from object storage before Firecracker can `mmap` it. That download is the "cold host first-boot cliff": the create blocks on transferring memory the guest may never even touch.
@@ -166,6 +166,79 @@ The agent's `/metrics` endpoint exposes four Prometheus series, emitted at resto
 
 The ratio `chunk_fetches / page_faults` tells you how much of the working set the prefetcher warmed ahead of demand; `zero_fill` shows how much of the guest's address space was untouched/zero. See `agent/internal/obs/obs.go`.
 
+## Streaming the rootfs
+
+Memory is only half of a cold host's download bill. The other half is
+`clone.ext4` — the template's root filesystem, which the dm-snapshot origin
+normally needs as a **local** file before any sandbox can copy-on-write from it.
+Disk streaming removes that half too.
+
+<Callout type="info">
+Rootfs streaming is opt-in behind `PANDASTACK_STREAM_DISK=1`, and gated
+separately from memory streaming so the two can roll out independently. When it
+is off — or when anything in the path is unavailable — the agent uses the local
+loop device over `clone.ext4`, exactly as before.
+</Callout>
+
+### The sidecar
+
+A thin seed carries no local `clone.ext4`. Instead it installs a small JSON
+sidecar next to the snapshot, `rootfs.gcs` — the disk analog of memory
+streaming's `vm.mem.gcs`:
+
+```json title="rootfs.gcs"
+{
+  "bucket": "<your-snapshot-bucket>",
+  "object": "seeds/<template>/<generation>/clone.ext4",
+  "size": 12884901888,
+  "chunkSize": 1048576,
+  "generation": "<generation>"
+}
+```
+
+`size` is validated against the chunk header's total size, so a drifted header
+can never stream the wrong bytes.
+
+### NBD, not ublk
+
+The guest's rootfs is presented as a **read-only in-kernel NBD device**
+(`/dev/nbdN`) driven by a userspace Go server in the agent. Every block read the
+guest issues is answered by demand-paging the corresponding 1 MiB chunk through
+the same resolver the memory path uses: local cache first, GCS Range GET on a
+miss.
+
+ublk would have been the modern choice, but its `ADD_DEV` path kernel-panicked
+on the production 6.x kernel line under both the upstream C daemon and a pure-Go
+one. NBD is the decade-stable in-tree alternative, and its failure mode is
+strictly better: a crashed or buggy NBD server cannot panic the host. The worst
+case is a blocked reader, bounded by a finite `NBD_SET_TIMEOUT` and recoverable.
+Teardown disconnects the device and closes the sockets, which unblocks both the
+device thread and any pending guest reader — no wedge.
+
+### Never-fail dispatch
+
+`EnsureBase` is the single entry point the create/restore flow calls. It picks
+the streaming path only when disk streaming is enabled **and** a `rootfs.gcs`
+sidecar is present. If streaming setup then fails — no free `/dev/nbd`, GCS auth
+trouble, header drift — and a real local rootfs exists, it falls back to the
+local loop rather than stranding the template. Only a thin seed with no local
+image at all turns that into an error.
+
+### Egress guards
+
+Streaming turns a cold boot into ranged reads against object storage, so the
+origin carries two ceilings, both per template generation per host:
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `PANDASTACK_NBD_EGRESS_MBPS` | unlimited | Fetch rate ceiling in MiB/s. |
+| `PANDASTACK_NBD_EGRESS_CAP_K` | `4` | Lifetime hard cap as a multiple of the measured working set. `0` disables the cap. |
+
+The cap exists because a pathological read pattern (a full-disk `dd`, a runaway
+`find /`) would otherwise pull the whole image repeatedly. Bounding lifetime
+fetches at a small multiple of the real working set keeps a single misbehaving
+sandbox from generating unbounded object-storage traffic.
+
 ## Files
 
 - `agent/internal/firecracker/uffd_restore.go` — the `beginUffdRestore` / `serveUffd` / `closeUffd` lifecycle, the `uffdSource` local-vs-GCS source selection, and the self-learning recorder.
@@ -174,3 +247,6 @@ The ratio `chunk_fetches / page_faults` tells you how much of the working set th
 - `agent/internal/seed/` — schema-v3 seed split: `upload.go` publishes the thin tarball + standalone `vm.mem`; `sync.go` does the stream-vs-download decision and writes the sidecar.
 - `api/internal/scheduler/scheduler.go` — cold-tier `streamColdBoost`.
 - `agent/internal/obs/obs.go` — the four `uffd_*` collectors.
+- `agent/internal/diskstream/` — the `rootfs.gcs` sidecar (`DiskRef`), chunk header, and resolver source for streamed rootfs.
+- `agent/internal/nbdstream/` — the in-kernel NBD device setup and the userspace serve loop (`//go:build linux`).
+- `agent/internal/sandbox/dmsnap.go` — `EnsureBase` dispatch, streaming-vs-local fallback, and the egress-guard env knobs.

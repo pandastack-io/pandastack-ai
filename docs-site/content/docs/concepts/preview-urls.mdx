@@ -19,7 +19,7 @@ Both share the same TLS-terminating edge — your sandbox doesn't need a public 
 
 ## Public preview URLs
 
-If your template runs a server on a port, that port is reachable instantly. Apps deployed on the `base` runtime start their dev/start command via the `pandastack-autostart` systemd unit, so the URL works the moment the sandbox is `running`.
+If your sandbox runs a server on a port, that port is reachable instantly. A process started by the `pandastack-autostart` systemd unit is listening by the time the sandbox reports `running`, so the URL works immediately.
 
 ```ts
 const sandbox = await Sandbox.create({ template: "base" });
@@ -76,7 +76,7 @@ After expiry the edge returns `403 Forbidden`. There is no separate "revoke" cal
 ## Concurrency and rate limits
 
 - A sandbox can expose **up to 32 distinct ports** simultaneously. Beyond that, the agent stops registering new ports until older ones close.
-- Each preview hostname carries the same per-token rate limit as the rest of the API (1 req/s burst 10 by default). Override per-org via the cloud dashboard.
+- Each preview hostname carries the same per-token abuse guard as the rest of the API (1 req/s burst 10 by default), configurable on the API. It is a runaway-loop guard, not a usage quota.
 - WebSockets are supported transparently — useful for `next dev` HMR, Jupyter, and Streamlit.
 
 ## REST equivalents

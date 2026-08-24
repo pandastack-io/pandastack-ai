@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// db_idle.go — transparent auto-suspend for managed databases (cost feature).
+// db_idle.go — transparent auto-suspend for managed databases.
 //
-// A managed database is a persistent sandbox: it runs 24/7. An
-// idle hobby/agent database therefore costs the customer full compute rate for
-// hours of doing nothing. This sweep hibernates a database that has had NO
-// real activity for a configurable window; db-proxy + the broker proxy wake it
-// transparently on the next connection (wake-on-connect), so the customer sees
-// only a slightly slower first query after an idle period — never an action to
-// take, so an idle database costs only its storage for the idle hours.
+// A managed database is a persistent sandbox: it runs 24/7 and holds its full
+// RAM and vCPU reservation on the host whether or not anything is querying it.
+// On a box with many small databases that is the dominant source of wasted
+// capacity. This sweep hibernates a database that has had NO real activity for
+// a configurable window; db-proxy + the broker proxy wake it transparently on
+// the next connection (wake-on-connect), so a client sees only a slightly
+// slower first query after an idle period — never an action to take. A
+// suspended database occupies disk, not memory or cores.
 //
 // Gated OFF by default (PANDASTACK_DB_IDLE_AFTER_SECONDS=0). Enabling it is a
 // deliberate fleet decision — wake-on-connect must be proven first, because a

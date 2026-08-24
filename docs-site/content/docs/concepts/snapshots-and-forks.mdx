@@ -1,14 +1,75 @@
 ---
 title: Snapshots and forks
-description: Capture VM state in seconds. Fork running VMs in milliseconds.
+description: Snapshots capture memory and disk; a plain fork copies only the disk and cold-boots the child, while fork-tree restores the parent's memory too.
 ---
 
-Snapshots capture a sandbox state. Forks create a new sandbox from an existing sandbox. The supported API works from a live sandbox ID; SDK helpers that construct directly from a snapshot are not available today.
+A **snapshot** captures a running sandbox's memory and device state, plus its disk, so you can create a new sandbox from it later with `from_snapshot`. You can list, get, and delete your snapshots.
+
+A **fork** creates one or more new sandboxes from an existing **live** sandbox. There are three fork paths and they do not preserve the same things. Read the table before you pick one — a plain fork does **not** carry the parent's running processes.
+
+## Fork modes compared
+
+| Behavior | `POST /fork` (default) | `POST /fork-tree` | `POST /fork` with `mode: "warm"` |
+| --- | --- | --- | --- |
+| State the child inherits | Disk only | Disk **and** memory | Disk **and** memory |
+| Running processes survive | No — the child boots fresh | Yes | Yes |
+| How the child starts | Full kernel + init boot (~3s) | Snapshot restore (a few hundred ms per child) | Snapshot restore (under ~500ms) |
+| Children per call | 1–16 (default 1) | 1–16 (default 2) | Exactly 1 |
+| Parent afterwards | Paused for the rootfs copy, then resumed | Paused for the snapshot, then resumed | Paused **and stopped** — you must resume it |
+| Child network identity | Fresh IP/MAC per child | Fresh IP/MAC per child | Reuses the parent's IP/MAC |
+| Available in the SDKs and CLI | Yes | Yes | REST only |
+
+### Plain fork: disk only
+
+`POST /v1/sandboxes/{id}/fork` pauses the parent, copies its rootfs for a consistent disk view, resumes the parent, then boots each child **from scratch** on that disk copy. The child gets its own kernel and its own empty memory.
+
+That means anything that lived only in RAM is gone. A Python process the parent had running, a module it imported, a variable it held, an open database connection, a dev server listening on a port — none of it exists in the child. What survives is whatever the parent wrote to disk: installed packages, cloned repositories, downloaded datasets, generated files.
+
+<Callout type="warn">
+A plain fork is not a live clone of the parent. The child cold-boots, which takes roughly 3 seconds, and it starts with no processes running. If you need the parent's memory — a warm interpreter, a loaded model, an in-progress session — use `fork-tree` instead.
+</Callout>
+
+Use a plain fork when the parent is a **prepared disk**: install dependencies and lay down code once in a parent, then fan out workers that already have all of it on disk.
+
+Each child carries `forked_from: <parent-id>` in its metadata. Metadata you pass to a plain fork is not applied to the children — use `fork-tree` when you need to tag them.
+
+### Fork-tree: disk and memory
+
+`POST /v1/sandboxes/{id}/fork-tree` snapshots the parent **once** (pause, capture memory + device state, resume — the parent survives untouched), then creates `count` children in parallel from that snapshot. Each child restores the parent's memory and disk and gets a fresh network identity, so the children run simultaneously and independently.
+
+This is the mode where processes survive. The children come up at the exact moment the snapshot was taken, with the parent's memory in place.
+
+Every child is tagged with `fork_tree_id`, `fork_tree_role`, `fork_parent_id`, and `fork_index` metadata, which is what `POST /v1/sandboxes/{id}/promote` uses to keep one child and delete its siblings — fan out N attempts, score them, promote the winner, and the siblings are cleaned up for you.
+
+<Callout type="info">
+The parent snapshot is taken synchronously, and when a snapshot bucket is configured the agent also uploads it before the call returns (roughly 8s for a 512 MiB snapshot). That one-time cost dominates a fork-tree call; the children themselves restore in parallel.
+</Callout>
+
+### Warm fork: one child, parent goes down
+
+`POST /v1/sandboxes/{id}/fork` with `{"mode": "warm"}` snapshots the parent and restores a single child from it, so the child inherits memory and disk. The child reuses the parent's network identity (IP, MAC, TAP), which is why only `count: 1` is accepted.
+
+<Callout type="warn">
+Warm fork pauses the parent and does **not** resume it — the parent's VM is stopped so the child can take over its network identity, and the two can never run at the same time. Call `POST /v1/sandboxes/{id}/resume` on the parent when you are done with the child. If you want the parent to keep running, use `fork-tree` with `count: 1`.
+</Callout>
+
+Warm fork is only reachable over REST; the SDKs and the CLI do not expose it.
 
 ## CLI
 
 ```bash
+# Create a snapshot from a sandbox
 pandastack sandbox snapshot <id>
+
+# List / inspect / delete your snapshots
+pandastack snapshot list
+pandastack snapshot list --sandbox <sandbox-id>   # only snapshots from this sandbox
+pandastack snapshot get <snapshot-id>
+pandastack snapshot delete <snapshot-id>
+
+# Create a sandbox from a snapshot
+pandastack sandbox create --from-snapshot <snapshot-id>
+
 pandastack sandbox fork <id>
 pandastack sandbox pause <id>
 pandastack sandbox resume <id>
@@ -20,9 +81,19 @@ pandastack sandbox set-ttl <id> 1h
 ## Python
 
 ```python
-snapshot = sandbox.snapshot()
-fork = sandbox.fork(metadata={"branch": "experiment"})
-forks = sandbox.fork_tree(3, metadata={"batch": "fanout"})
+snapshot = sandbox.snapshot()                 # create from a live sandbox
+
+# List / inspect / delete your snapshots
+for s in client.snapshots.list():
+    print(s["id"], s.get("template"), s["created_at"])
+client.snapshots.get(snapshot_id)
+client.snapshots.delete(snapshot_id)
+
+# Create a new sandbox from a snapshot
+restored = client.sandboxes.create(from_snapshot=snapshot_id)
+
+fork = sandbox.fork()                         # disk only, child cold-boots
+forks = sandbox.fork_tree(3, metadata={"batch": "fanout"})   # disk + memory
 
 sandbox.promote()
 sandbox.hibernate()
@@ -35,9 +106,19 @@ print(sandbox.lifecycle())
 ## TypeScript
 
 ```ts
-const snapshot = await sandbox.snapshot();
-const fork = await sandbox.fork({ branch: "experiment" });
-const forks = await sandbox.forkTree(3, { batch: "fanout" });
+const snapshot = await sandbox.snapshot();            // create from a live sandbox
+
+// List / inspect / delete your snapshots
+const snaps = await client.snapshots.list();
+for (const s of snaps) console.log(s.id, s.template, s.created_at);
+await client.snapshots.get(snapshotId);
+await client.snapshots.delete(snapshotId);
+
+// Create a new sandbox from a snapshot
+const restored = await Sandbox.create({ from_snapshot: snapshotId });
+
+const fork = await sandbox.fork();                    // disk only, child cold-boots
+const forks = await sandbox.forkTree({ count: 3, metadata: { batch: "fanout" } }); // disk + memory
 
 await sandbox.promote();
 await sandbox.hibernate();
@@ -50,12 +131,17 @@ console.log(await sandbox.lifecycle());
 ## API
 
 ```http
-POST /v1/sandboxes/{id}/snapshots
-POST /v1/sandboxes/{id}/fork
-POST /v1/sandboxes/{id}/fork-tree
-POST /v1/sandboxes/{id}/promote
-POST /v1/sandboxes/{id}/hibernate
-POST /v1/sandboxes/{id}/wake
-GET /v1/sandboxes/{id}/lifecycle
-PATCH /v1/sandboxes/{id}/lifecycle
+POST   /v1/sandboxes/{id}/snapshots     # create a snapshot from a sandbox
+GET    /v1/snapshots                     # list your snapshots (?sandbox_id= to filter)
+GET    /v1/snapshots/{id}                # get one
+DELETE /v1/snapshots/{id}                # delete (removes the record + stored copy)
+POST   /v1/sandboxes/{id}/fork           # {"count": 1-16, "mode": "cold"|"warm"} — default cold, count 1
+POST   /v1/sandboxes/{id}/fork-tree      # {"count": 1-16, "metadata": {...}} — default count 2
+POST   /v1/sandboxes/{id}/promote        # {"tree_id": "...", "cleanup_siblings": true}
+POST   /v1/sandboxes/{id}/pause
+POST   /v1/sandboxes/{id}/resume
+POST   /v1/sandboxes/{id}/hibernate
+POST   /v1/sandboxes/{id}/wake
+GET    /v1/sandboxes/{id}/lifecycle
+PATCH  /v1/sandboxes/{id}/lifecycle
 ```

@@ -16,7 +16,7 @@ pip install pandastack
 Two env vars:
 
 ```bash
-export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API_KEY=pds_abc123def456...
 export PANDASTACK_API=https://api.pandastack.ai   # optional, this is the default
 ```
 
@@ -211,7 +211,7 @@ sb = Sandbox.create(
 sb.exec("mkdir -p /mnt/models && mount -o ro /dev/vdb /mnt/models")
 ```
 
-Quotas are per plan (Free 1 × 1 GiB · Pro 10 × 10 GiB · Team 50 × 50 GiB · Enterprise unlimited; 64 GiB hard per-volume ceiling). Exceeding the quota returns a 429 (`BadRequestError`); storage above your plan's included total bills at **$0.15 per provisioned GiB-month**. Live rates and per-tier limits: `GET /v1/pricing`.
+There is no volume count or storage quota — the open-source edition is unmetered. A hard **64 GiB per-volume ceiling** applies, and a host with no free space returns 507. See [Volumes](/docs/concepts/volumes).
 
 ## Tokens
 
@@ -230,7 +230,7 @@ All SDK exceptions inherit from `PandastackError`:
 | ---------------------- | ------------------------------------------------------------------- |
 | `AuthError`            | 401 / 403 — missing or invalid token.                               |
 | `NotFoundError`        | 404 — sandbox / template / snapshot doesn't exist.                  |
-| `BadRequestError`      | 4xx other — bad payload, quota exceeded, validation failure.        |
+| `BadRequestError`      | 4xx other — bad payload, validation failure, rate-limit guard.      |
 | `ServerError`          | 5xx — orchestrator hiccup, transient — usually safe to retry.       |
 | `APIConnectionError`   | Underlying `requests` connection problem.                            |
 

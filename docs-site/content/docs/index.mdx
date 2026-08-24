@@ -4,13 +4,13 @@ title: PandaStack
 
 # PandaStack
 
-Open-source Firecracker microVM sandboxes for AI agents and code execution.
+Open-source Firecracker microVM sandboxes and managed PostgreSQL, self-hosted.
 
 ## 60-second quickstart
 
 ```bash
 git clone https://github.com/pandastack-io/pandastack-ai
-cd pandastack
+cd pandastack-ai
 bash scripts/mac-local-e2e.sh
 open http://localhost:3000
 ```
@@ -21,21 +21,25 @@ Create a sandbox from the local API:
 curl -sS http://localhost:8080/v1/sandboxes \
   -H 'Authorization: Bearer pds_local_dev_token' \
   -H 'Content-Type: application/json' \
-  -d '{"template":"ubuntu-22.04","ttl_seconds":600}'
+  -d '{"template":"base","ttl_seconds":600}'
 ```
 
 ## What it does
 
 - Firecracker microVM sandboxes with strong process and kernel isolation.
-- Snapshot anywhere and fork running environments instantly.
+- [Managed PostgreSQL 16](/docs/concepts/databases) — a durable database in its own microVM, with a native `postgres://` URL in seconds.
+- [Snapshot](/docs/concepts/snapshots-and-forks) anywhere and fork running environments instantly, including fork trees.
 - Sub-second boot on every create via baked snapshot restore.
-- Template-defined CPU, RAM, and disk quotas.
+- [On-demand memory and rootfs streaming](/docs/internals/streaming-restore) from object storage.
+- Template-defined CPU, RAM, and disk sizing.
+- [Persistent volumes](/docs/concepts/volumes) that outlive the sandbox.
 - Network egress controls for safer code execution.
-- Template-based images: Docker images converted to ext4 roots.
+- [Template-based images](/docs/concepts/templates): OCI images converted to ext4 roots.
 - Pause, hibernate, and wake lifecycle controls.
-- Exec, REPL, LSP, and browser terminal surfaces.
+- Exec, REPL, LSP, MCP, and browser terminal surfaces.
 - Audit log and observability backed by Postgres and ClickHouse.
-- Multi-region scheduling primitives for larger fleets.
+- Multi-node scheduling primitives for larger fleets.
+- **No usage limits.** This edition ships unmetered and uncapped — see [Open source vs Cloud](/docs/concepts/open-source-vs-cloud).
 
 ## Architecture
 
@@ -45,7 +49,7 @@ curl -sS http://localhost:8080/v1/sandboxes \
 +---------+      +-----+      +-----------+      +------------------+      +----------------------+
                       |              |                    |
                       v              v                    v
-                Postgres/audit   Capacity scoring   Snapshot seeds + UFFD streaming
+                Postgres/audit   Capacity scoring   Snapshot seeds + UFFD/NBD streaming
 ```
 
 The API receives sandbox requests, the scheduler chooses a host, and an agent creates or resumes a Firecracker microVM. Every create restores a baked per-template snapshot (optionally streaming guest memory on demand), and the snapshot store persists state.
@@ -56,7 +60,7 @@ The API receives sandbox requests, the scheduler chooses a host, and an agent cr
 import { PandaStack } from "@pandastack/sdk";
 
 const panda = new PandaStack({ apiKey: process.env.PANDASTACK_API_KEY });
-const sandbox = await panda.sandboxes.create({ template: "node-20" });
+const sandbox = await panda.sandboxes.create({ template: "base" });
 console.log(await sandbox.exec("node", ["-e", "console.log('hello')"]));
 ```
 
@@ -64,18 +68,19 @@ console.log(await sandbox.exec("node", ["-e", "console.log('hello')"]));
 from pandastack import PandaStack
 
 client = PandaStack(api_key="pds_local_dev_token", base_url="http://localhost:8080")
-sandbox = client.sandboxes.create(template="python-3.12")
+sandbox = client.sandboxes.create(template="code-interpreter")
 print(sandbox.exec("python", ["-c", "print('hello')"]).stdout)
 ```
 
 ```go
 client := pandastack.NewClient(pandastack.WithAPIKey(os.Getenv("PANDASTACK_API_KEY")))
-sbx, err := client.Sandboxes.Create(ctx, pandastack.CreateSandboxRequest{Template: "go-1.22"})
+sbx, err := client.Sandboxes.Create(ctx, pandastack.CreateSandboxRequest{Template: "base"})
 if err != nil { log.Fatal(err) }
 ```
 
 ## Next steps
 
 - Start locally with the [Apple Silicon guide](/docs/getting-started/local-mac-apple-silicon).
+- See what the open-source edition includes: [Open source vs Cloud](/docs/concepts/open-source-vs-cloud).
 - Review [Supabase auth for self-hosting](/docs/self-host/auth-supabase).
 - Explore [Terraform self-host examples](https://github.com/pandastack-io/pandastack-ai/tree/main/examples/terraform).

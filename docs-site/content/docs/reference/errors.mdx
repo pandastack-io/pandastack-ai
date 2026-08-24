@@ -20,12 +20,13 @@ All HTTP errors follow a consistent JSON envelope:
 |---|---|---|
 | 400 | `validation.*` | Invalid request shape or parameter |
 | 401 | `auth.*` | Missing or invalid credentials |
-| 403 | `auth.forbidden`, `quota.exceeded` | Authenticated but not allowed |
+| 403 | `auth.forbidden` | Authenticated but not allowed |
 | 404 | `*.not_found` | Resource does not exist |
 | 409 | `*.conflict` | Resource state conflict (e.g. delete while booting) |
-| 429 | `rate_limit.*` | Too many requests |
+| 429 | `rate_limit.*` | Too many requests in a short window (abuse guard, not a usage quota) |
 | 500 | `internal.*` | Bug in PandaStack — please report |
 | 503 | `capacity.unavailable` | No agent capacity for placement |
+| 507 | `capacity.insufficient_storage` | The chosen host has no room for the requested disk |
 
 ## Common codes
 
@@ -40,10 +41,8 @@ All HTTP errors follow a consistent JSON envelope:
 | `template.not_found` | Template name unknown |
 | `template.build_failed` | Template image build failed (see `details.log_url`) |
 | `volume.in_use` | Trying to delete a volume that's still attached |
-| `quota.sandboxes_exceeded` | Hit workspace concurrent-sandbox limit |
-| `quota.vcpu_exceeded` | Hit workspace vCPU limit |
-| `capacity.unavailable` | All agents at capacity — try a different region |
-| `rate_limit.api` | Too many API calls per minute |
+| `capacity.unavailable` | All agents at capacity — retry, or add hosts |
+| `rate_limit.api` | Too many API calls in a short window |
 
 ## Retrying
 
@@ -60,6 +59,12 @@ Errors with `retryable: true` in the `details` are safe to retry with exponentia
 ```
 
 Other errors should not be blindly retried.
+
+<Callout type="info">
+There are no usage-quota errors in this edition. The open-source build ships
+unmetered and uncapped, so a `429` is always a short-window abuse guard and a
+`503`/`507` is always real capacity — never a plan limit.
+</Callout>
 
 ## Reporting bugs
 

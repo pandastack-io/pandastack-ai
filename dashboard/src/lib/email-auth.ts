@@ -20,7 +20,7 @@ import { isStubAuth } from '@/lib/auth-mode';
 /**
  * Verify the x-welcome-secret header against WELCOME_EMAIL_SECRET.
  *
- * For the SERVER-TO-SERVER lifecycle/quota email routes, which the control-plane
+ * For the SERVER-TO-SERVER lifecycle email routes, which the control-plane
  * API runner POSTs to (it stamps the header). The browser must never call these.
  *
  * Returns `null` when authorized (caller proceeds). Returns a NextResponse the

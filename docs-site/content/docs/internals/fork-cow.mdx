@@ -60,15 +60,34 @@ Production-verified: 10 concurrent forks across 2 agents, 10/10 success, marker 
 
 ## Warm-fork
 
-If the parent's template has a baked seed on the agent, "fork" doesn't even need a parent snapshot — the warm-fork path restores a fresh VM from the template seed, then `rsync`s the parent's `/workspace` delta into it. This is ~300 ms (mostly the rsync), because the seed restore is the same fast path as every create.
+Warm-fork is a separate, opt-in path that gives the child the parent's **memory** as well as its disk: the parent is snapshotted and the child is restored from that snapshot instead of cold-booting. It is never selected for you, and it is never a fallback — a plain fork always takes the rootfs-clone path above.
 
-Used automatically when:
+<Callout type="warn">
+Warm-fork consumes the parent. The child reuses the parent's TAP, IP, MAC and vsock CID, so the two cannot run at the same time: the agent pauses the parent, stops its Firecracker process, and does **not** bring it back. There is no supported way to get that parent running again — `POST /v1/sandboxes/{parent}/resume` fails because the agent no longer holds a driver for it, and `/wake` looks for a hibernation snapshot the warm-fork path never wrote. Treat warm-fork as "move this sandbox into a new id", not "copy it".
+</Callout>
 
-- The parent and the requested child are the same template.
-- The template's baked seed is present on the agent.
-- The parent has been modified less than ~64 MiB of files since boot.
+You have to ask for it explicitly, with `mode: "warm"`:
 
-Falls back to memory-CoW fork transparently otherwise.
+```bash
+curl -X POST https://api.pandastack.ai/v1/sandboxes/<parent-id>/fork \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"count":1,"mode":"warm"}'
+```
+
+`?warm=1` on the same URL is equivalent. Any other body (no `mode`, or `mode: "cold"`) is a normal fork.
+
+`count` must be `1`; anything else is rejected. The guest derives its IP from its MAC at boot, and Firecracker's snapshot-load network override can replace the host TAP but not the guest MAC — so every warm child would come up with the parent's exact `(IP, MAC)`, and two of them at once would collide on the host side.
+
+What the agent does, in order:
+
+1. Pause the parent and write its memory + device state to `<data-dir>/forks/<snapshot-id>` — **not** to the parent's hibernation directory.
+2. Mark the parent `paused` in the store and emit `warmfork.staged` plus `sandbox.paused` (reason `warm-fork`).
+3. Stop the parent's Firecracker process so its TAP and API socket are free.
+4. Reflink the parent's `rootfs.ext4` into the child's VM directory.
+5. Start a Firecracker process for the child, `PUT /snapshot/load` with the TAP as a network override, `PATCH /drives/rootfs` to the child's copy, then `PATCH /vm` to `Resumed`. The child emits `sandbox.warmforked`.
+
+The child inherits the parent's template, vCPU, memory and workspace, and carries `forked_from` plus `fork_mode: warm` in its metadata. The response is the same `ForkResult` shape as a cold fork — `parent_id`, `snapshot_id`, `children`, `at` — with exactly one child id.
 
 ## What this enables
 
@@ -85,14 +104,16 @@ Snapshotting + CoW lets you bottle the post-setup state and pour copies of it as
 
 ## Files
 
-- `agent/internal/api/fork.go` — `/fork` and `/fork-tree` handlers.
-- `agent/internal/sandbox/manager.go` — `forkFromSnapshot`, `warmFork`, the reflink rootfs step.
+- `agent/internal/api/fork_hibernate.go` — `/fork` (cold + warm) and `/fork-tree` handlers.
+- `agent/internal/sandbox/manager.go` — `Fork`, `spawnChildFromRootfs`, `WarmFork`.
+- `agent/internal/firecracker/warmfork.go` — `StartWarmFork`: snapshot load with network override, rootfs PATCH, resume.
+- `agent/internal/sandbox/clone.go` — `cloneFile`: `FICLONE` (reflink) with a full-copy fallback.
 - `agent/internal/snapstore/` — per-snapshot download mutex (the thing that prevents 10 concurrent forks from racing on `gsutil cp`).
-- `infra/cloud-init/user-data-agent.sh` — `mkfs.xfs -m reflink=1` on the data partition (this is the prereq).
+- `cloud-init/user-data-agent.sh` — `mkfs.xfs -m reflink=1` on the data volume (this is the prereq).
 
 ## Limits
 
 - Each child is its own VM — costs an FC process, a netns, a NATID slot.
 - Memory CoW shares pages until written; if your workload mutates the entire working set immediately, you'll pay almost `N×` memory.
 - Reflink requires XFS (with `reflink=1`) or btrfs. ext4 will fall back to a full `cp`, which is multi-second for big rootfs.
-- The parent must be paused for the snapshot duration. We unpause as soon as `vm.state` is written (~35 ms), so this is rarely user-visible.
+- The parent must be paused for the snapshot duration. On a cold fork we unpause as soon as `vm.state` is written (~35 ms), so this is rarely user-visible. A warm-fork parent is paused and stopped for good — see [warm-fork](#warm-fork).

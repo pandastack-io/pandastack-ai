@@ -325,7 +325,6 @@ bash scripts/mac-local-e2e.sh
 | Area | Local Apple Silicon | Production-style self-host |
 | --- | --- | --- |
 | Auth | Stub auth and `pds_local_dev_token` | Supabase or another JWT/OIDC provider |
-| Billing | Disabled/no-op | Stripe or internal metering integration |
 | Multi-region | Single Mac and one Lima VM | Multiple regions, zones, or host pools |
 | Snapshots | Local disk | Object storage or dedicated snapshot store |
 | Observability | Local ClickHouse | Managed or clustered ClickHouse/metrics stack |
@@ -463,7 +462,7 @@ If you are measuring performance, record:
 The script chooses conservative defaults for a first run:
 
 - single local user
-- no billing side effects
+- no external side effects
 - no external auth provider
 - no production control-plane URL
 - local Postgres and ClickHouse

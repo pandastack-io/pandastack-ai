@@ -1,0 +1,238 @@
+---
+title: Troubleshooting
+description: Symptoms you will actually hit running PandaStack, what causes them, and how to fix them — HTTP status codes, sandboxes that will not start, and database connection problems.
+---
+
+Every entry below is a real failure, with the symptom you see first. If you know
+the HTTP status or the error text, search this page for it.
+
+## Quick triage by HTTP status
+
+| Status | Usually means | Go to |
+|---|---|---|
+| `401` | Missing or wrong API key | [Authentication](#authentication) |
+| `404` | Wrong ID, or resource belongs to another workspace | [Wrong workspace](#404-on-a-resource-you-know-exists) |
+| `409` | Sandbox is paused, or you deleted a managed sandbox directly | [409 conflicts](#409-on-exec-or-delete) |
+| `411` | `POST` sent with no body through an edge proxy | [411 Length Required](#411-length-required-on-a-post) |
+| `429` | Short-window rate guard tripped | [429 rate limit](#429-rate-limit) |
+| `502` | No agent could take the request — usually capacity | [502 Bad Gateway](#502-bad-gateway-on-create) |
+| `507` | The chosen host has no disk headroom | [507 Insufficient Storage](#507-insufficient-storage) |
+
+<Callout type="info">
+There is no `402` in this edition. The open-source build ships unmetered and
+uncapped — a rejection is always auth, capacity, or state, never a plan limit.
+</Callout>
+
+---
+
+## Capacity
+
+### 502 Bad Gateway on create
+
+**Symptom.** `POST /v1/sandboxes` returns `502` — often after several creates
+that succeeded seconds earlier.
+
+**Cause.** No agent had room. Each sandbox reserves its template's **baked**
+memory, so a host's RAM is the real ceiling. On a small fleet you can hit this
+after only a handful of concurrent sandboxes.
+
+**Fix.**
+
+1. Delete sandboxes you are no longer using — `DELETE /v1/sandboxes/{id}`. Capacity frees immediately.
+2. Give sandboxes a `ttl_seconds` so abandoned ones reap themselves.
+3. Use a smaller template where you can — memory is baked per template, so a 1 GiB template fits roughly twice as densely as a 2 GiB one.
+4. Add hosts. Concurrency is bounded by fleet memory, and nothing else.
+5. Retry with backoff — `502` here is transient, not a permanent rejection.
+
+### 507 Insufficient Storage
+
+**Symptom.** A volume create, or a sandbox create with a large template, returns
+`507`.
+
+**Cause.** The host the scheduler picked has no free disk for the requested
+size. Volumes are host-local, and a template's rootfs is provisioned at its full
+`size_mb`.
+
+**Fix.** Retry — the scheduler picks again and may land on a host with room. If
+every retry fails, the fleet is genuinely full: prune old template snapshots,
+delete unused volumes, or add disk.
+
+### 429 rate limit
+
+**Symptom.** `429` with `Retry-After`, usually from a tight retry loop.
+
+**Cause.** A short-window per-token abuse guard, not a usage quota. It exists so
+one runaway client cannot saturate the control plane.
+
+**Fix.** Back off and retry. If your legitimate workload needs a higher ceiling,
+raise it on the API — see the rate-limit settings in
+[self-hosting](/docs/getting-started/self-host).
+
+---
+
+## Sandboxes
+
+### 409 on exec or delete
+
+**Symptom.** `exec` (or another guest operation) returns
+`sandbox not running (paused or hibernated) — resume/wake it first`. Or
+`DELETE /v1/sandboxes/{id}` returns
+`managed sandbox: delete it from the feature that owns it`.
+
+**Cause.** The first is a paused sandbox — guest operations need a running VM.
+The second is a sandbox that belongs to a managed database.
+
+**Fix.** `POST /v1/sandboxes/{id}/resume` for a paused sandbox; hibernated ones
+wake automatically on the next operation. For a database's sandbox, delete the
+database with `DELETE /v1/databases/{id}` instead.
+
+### A sandbox never becomes reachable
+
+**Symptom.** Create returns, but `exec` times out or refuses the connection.
+
+**Fix.** Read the Firecracker console — it almost always names the cause:
+
+```bash
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
+  https://api.pandastack.ai/v1/sandboxes/$ID/logs
+```
+
+A kernel panic points at a bad rootfs or a template baked with the wrong
+architecture. A boot that reaches a login prompt but never answers SSH points at
+a template missing `openssh-server` — see the guest contract under
+[Templates](/docs/concepts/templates#the-build-pipeline).
+
+### `mount rootfs: failed to setup loop device`
+
+**Symptom.** Create returns `500` naming
+`/var/lib/pandastack/templates/<name>/rootfs.ext4`.
+
+**Cause.** The template is registered in the catalog but has never been baked on
+this host, so there is no filesystem to boot.
+
+**Fix.** Bake it. See [local testing](/docs/getting-started/local-testing) for
+the local path, or run `scripts/bake-templates.sh <name>` on the host.
+
+### Restore fails with an error on `PUT /mmds`
+
+**Symptom.** A sandbox restore from a template snapshot fails at the MMDS step.
+
+**Cause.** A Firecracker snapshot freezes device state at bake time. A snapshot
+baked before MMDS was configured on the build VM has no MMDS device, so the
+restore path's `PUT /mmds` has nothing to talk to.
+
+**Fix.** Re-bake the template snapshots:
+
+```bash
+sudo FORCE=1 scripts/bake-templates.sh
+```
+
+---
+
+## Databases
+
+### `connection_url` missing, or connection refused
+
+**Symptom.** `GET /v1/databases/{id}` returns the database with no
+`connection_url`, or your client cannot connect.
+
+**Cause.** If `status` is `provisioning`, PostgreSQL has not published
+credentials yet. If it is suspended, [idle auto-suspend](/docs/concepts/databases#idle-auto-suspend)
+stopped the VM.
+
+**Fix.** For `provisioning`, poll until `status` is `running` — create can take
+60–180s. For a suspended database, connect anyway (the proxy wakes it), or wake
+it explicitly:
+
+```bash
+curl -X POST https://api.pandastack.ai/v1/databases/$ID/wake \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+To keep a database from ever suspending, set `always_on`:
+
+```bash
+curl -X PATCH https://api.pandastack.ai/v1/databases/$ID \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
+  -H "Content-Type: application/json" -d '{"always_on": true}'
+```
+
+### 411 Length Required on a POST
+
+**Symptom.** A `POST` with no body — `wake`, `failover`, `reset-credentials` —
+returns `411`, with no JSON body.
+
+**Cause.** An edge proxy in front of the API rejects a bodyless `POST` before it
+reaches the API.
+
+**Fix.** Always send a body, even an empty object, and set the content type:
+
+```bash
+curl -X POST .../wake -H "Content-Type: application/json" -d '{}'
+```
+
+### TLS errors connecting to a managed database
+
+**Symptom.** Your client refuses the connection, or reports a certificate
+problem.
+
+**Cause.** Managed databases **require** TLS. Clients that default to plaintext
+fail to connect at all.
+
+**Fix.** Enable TLS normally:
+
+- `psql` → append `?sslmode=require` to the URL.
+- Node (`pg`) → `ssl: true`.
+- Most ORMs → an `ssl` / `DB_SSL` flag.
+
+If a tool asks you to disable certificate verification to connect, that is a
+misconfiguration on the client side, not a requirement of the service.
+
+### `failover` or `reset-credentials` returns 501
+
+**Cause.** Both require a multi-node deployment — failover needs a second host
+to move to, and both are wired through the control plane's agent director.
+
+**Fix.** On a single-node deployment, restore from your own `pg_dump` or add a
+second agent host. See [Databases](/docs/concepts/databases#failover).
+
+---
+
+## Authentication
+
+### 401 Unauthorized
+
+**Cause.** Missing, malformed, or revoked API key — or JWT auth is disabled on
+the API while the dashboard is sending a user token.
+
+**Fix.** Send the key as a bearer token, and confirm the variable is actually
+set in the shell you are running in:
+
+```bash
+curl https://api.pandastack.ai/v1/sandboxes \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY"
+```
+
+The environment variable the SDKs and CLI read is **`PANDASTACK_API_KEY`**. If
+the body says `jwt auth disabled`, the API has no `SUPABASE_JWKS_URL` — see
+[Supabase auth](/docs/self-host/auth-supabase#detailjwt-auth-disabled).
+
+### 404 on a resource you know exists
+
+**Cause.** Resources are scoped to a workspace. A valid ID belonging to a
+different workspace reads as "not found" — deliberately, so IDs cannot be probed
+across tenants.
+
+**Fix.** Confirm you are using the key for the right workspace, and that your
+current organization is the one that owns the resource (`GET /v1/me`).
+
+---
+
+## Still stuck?
+
+- `GET /v1/sandboxes/{id}/logs` returns the Firecracker console — the fastest signal when a VM never becomes reachable.
+- `GET /v1/sandboxes/{id}/events` streams lifecycle transitions, which usually shows exactly where a create stalled.
+- The agent's `/metrics` endpoint and the [observability](/docs/concepts/observability) pipeline carry boot histograms and per-sandbox resource curves.
+- Still wrong? Open an issue with the resource ID and the timestamp at
+  [github.com/pandastack-io/pandastack-ai/issues](https://github.com/pandastack-io/pandastack-ai/issues).

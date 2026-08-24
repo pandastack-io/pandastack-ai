@@ -5,13 +5,15 @@ description: How PandaStack fits together — control plane, data plane, and the
 
 PandaStack has three main layers:
 
-1. **Control plane** — API, auth, organizations, tokens, templates, billing, and orchestration.
+1. **Control plane** — API, auth, organizations, tokens, templates, databases, and orchestration.
 2. **Data plane** — agents that run sandbox operations on hosts.
 3. **Workload microVMs** — Firecracker sandboxes created from templates.
 
 ## Public surfaces
 
-- Marketing: `pandastack.ai`
+On a self-hosted deployment these are whatever hostnames you choose; the hosted
+service uses:
+
 - Dashboard: `app.pandastack.ai`
 - API: `api.pandastack.ai`
 - Docs: `docs.pandastack.ai`
@@ -25,7 +27,7 @@ GET /metrics
 GET /v1/me
 POST /v1/sandboxes
 GET /v1/templates
-POST /v1/billing/sync
+POST /v1/databases
 ```
 
 Sandbox operations are scoped under `/v1/sandboxes/{id}`. Filesystem access uses `/fs`, lifecycle uses routes such as `/pause`, `/resume`, `/snapshots`, `/fork`, `/hibernate`, and `/wake`, and streaming uses `/exec/stream`, `/events`, and WebSocket upgrades.
@@ -45,7 +47,7 @@ GET /v1/sandboxes/{id}/lsp/{lang}
 ## Client configuration
 
 ```bash
-export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API_KEY=pds_abc123def456...
 export PANDASTACK_API=https://api.pandastack.ai
 ```
 

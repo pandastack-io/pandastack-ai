@@ -1,6 +1,6 @@
 # Build & Deploy a Global Template
 
-Global (public/seeded) templates like `code-interpreter`, `ubuntu-24.04-net`, and `nextjs` are
+Global (public/seeded) templates like `base`, `code-interpreter`, and `agent` are
 **not** built via `pandastack template build`. They are baked directly on an agent VM from
 shell scripts, stored in GCS, and synced to every agent at boot.
 
@@ -32,7 +32,7 @@ agent boots Firecracker VM → takes snapshot             # warm boot cache
 
 ## Prerequisites
 
-- SSH access to an agent VM (xdzz or hn84) via IAP
+- SSH access to an agent VM (e.g. `AGENT_VM_A`, `AGENT_VM_B` below) via IAP
 - GCS bucket name: `your-pandastack-bucket` (read from VM metadata)
 - Run all bake commands **as root** on the agent VM
 
@@ -41,8 +41,8 @@ agent boots Firecracker VM → takes snapshot             # warm boot cache
 ## Step 1 — SSH into an agent VM
 
 ```bash
-gcloud compute ssh pandastack-agent-xdzz \
-  --zone=us-central1-b \
+gcloud compute ssh "$AGENT_VM_A" \
+  --zone="$AGENT_VM_A_ZONE" \
   --tunnel-through-iap
 ```
 
@@ -73,8 +73,8 @@ This will:
 ```bash
 # From your local machine:
 gcloud compute scp scripts/bake-templates.sh \
-  pandastack-agent-xdzz:/tmp/bake-templates.sh \
-  --zone=us-central1-b \
+  "$AGENT_VM_A":/tmp/bake-templates.sh \
+  --zone="$AGENT_VM_A_ZONE" \
   --tunnel-through-iap
 ```
 
@@ -134,7 +134,7 @@ gcloud storage cp \
 Agent VMs pull from GCS on boot. To sync without rebooting:
 
 ```bash
-# Run on EACH agent VM (xdzz and hn84):
+# Run on EACH agent VM:
 GCS_BUCKET=your-pandastack-bucket
 
 sudo gcloud storage rsync --recursive \
@@ -146,11 +146,11 @@ sudo gcloud storage rsync --recursive \
   /var/lib/pandastack/template-snaps/
 ```
 
-To sync to hn84:
+To sync a second agent without logging into it:
 
 ```bash
-gcloud compute ssh pandastack-agent-hn84 \
-  --zone=us-central1-a \
+gcloud compute ssh "$AGENT_VM_B" \
+  --zone="$AGENT_VM_B_ZONE" \
   --tunnel-through-iap \
   --command="sudo gcloud storage rsync --recursive gs://your-pandastack-bucket/templates/ /var/lib/pandastack/templates/"
 ```
@@ -161,13 +161,13 @@ gcloud compute ssh pandastack-agent-hn84 \
 
 ```bash
 # Check template is present on agent:
-gcloud compute ssh pandastack-agent-xdzz \
-  --zone=us-central1-b \
+gcloud compute ssh "$AGENT_VM_A" \
+  --zone="$AGENT_VM_A_ZONE" \
   --tunnel-through-iap \
   --command="cat /var/lib/pandastack/templates/code-interpreter/meta.json && ls -lh /var/lib/pandastack/templates/code-interpreter/"
 
 # Create a test sandbox using the template via the API:
-curl -X POST https://api.pandastack.ai/v1/sandboxes \
+curl -X POST "$PANDASTACK_API/v1/sandboxes" \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"template": "code-interpreter"}'
@@ -190,11 +190,19 @@ After editing, repeat Steps 3–6.
 
 ## Agent VMs Reference
 
-| VM | Zone | Purpose |
-|----|------|---------|
-| `pandastack-agent-xdzz` | `us-central1-b` | Primary agent |
-| `pandastack-agent-hn84` | `us-central1-a` | Secondary agent |
-| `pandastack-edge-3tmq` | `us-central1-b` | Edge / API proxy |
-| `pandastack-edge-ccbk` | — | Edge / API proxy |
+Fill these in for your own deployment; every command above reads them from the
+environment so nothing here is deployment-specific:
+
+```bash
+export AGENT_VM_A=<primary-agent-vm>     AGENT_VM_A_ZONE=<zone>
+export AGENT_VM_B=<secondary-agent-vm>   AGENT_VM_B_ZONE=<zone>
+export PANDASTACK_API=https://<your-api-host>
+```
+
+| Role | Variable | Purpose |
+|------|----------|---------|
+| Primary agent | `$AGENT_VM_A` | Bakes templates, serves sandboxes |
+| Secondary agent | `$AGENT_VM_B` | Serves sandboxes; pulls baked templates from the bucket |
+| Edge | — | API + dashboard hosts (not involved in baking) |
 
 GCS bucket: `your-pandastack-bucket`

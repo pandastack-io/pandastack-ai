@@ -15,7 +15,7 @@ npm install @pandastack/sdk
 ## Configure
 
 ```bash
-export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API_KEY=pds_abc123def456...
 export PANDASTACK_API=https://api.pandastack.ai   # optional, this is the default
 ```
 
@@ -47,7 +47,7 @@ const sandbox = await client.sandboxes.create({ template: "code-interpreter" });
 ```ts
 new Client(config?: {
   apiUrl?: string;       // default: process.env.PANDASTACK_API ?? "https://api.pandastack.ai"
-  apiKey?: string;       // default: process.env.PANDASTACK_TOKEN
+  apiKey?: string;       // default: process.env.PANDASTACK_API_KEY
   timeoutMs?: number;    // default: 30_000
 })
 ```
@@ -220,7 +220,7 @@ const sandbox = await client.sandboxes.create({
 await sandbox.exec("mkdir -p /mnt/models && mount -o ro /dev/vdb /mnt/models");
 ```
 
-`VolumeInfo` has `name`, `size_mb`, `created_at`. Quotas are per plan (Free 1 × 1 GiB · Pro 10 × 10 GiB · Team 50 × 50 GiB · Enterprise unlimited; 64 GiB hard per-volume ceiling). Exceeding the quota returns a 429 (`BadRequestError`); storage above your plan's included total bills at **$0.15 per provisioned GiB-month**. Live rates and per-tier limits: `GET /v1/pricing`.
+`VolumeInfo` has `name`, `size_mb`, `created_at`. There is no volume count or storage quota — the open-source edition is unmetered. A hard **64 GiB per-volume ceiling** applies, and a host with no free space returns 507. See [Volumes](/docs/concepts/volumes).
 
 ## Tokens
 
@@ -238,7 +238,7 @@ Every SDK exception inherits from `PandaStackError` with `.statusCode` and `.res
 | ----------------- | ----------------------------------------------------- |
 | `AuthError`       | 401 / 403 — bad / missing token.                      |
 | `NotFoundError`   | 404 — sandbox / template / snapshot doesn't exist.    |
-| `BadRequestError` | Other 4xx — bad payload, quota exceeded.              |
+| `BadRequestError` | Other 4xx — bad payload, rate-limit guard.            |
 | `ServerError`     | 5xx — orchestrator transient. Usually safe to retry.  |
 | `NetworkError`    | Underlying `fetch` failure (DNS, TCP, TLS).           |
 

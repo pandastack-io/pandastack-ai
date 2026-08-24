@@ -9,7 +9,7 @@ Base URL for the hosted API:
 https://api.pandastack.ai
 ```
 
-Token-based requests use `Authorization: Bearer $PANDASTACK_TOKEN`. Token examples use the `pds_` prefix.
+Token-based requests use `Authorization: Bearer $PANDASTACK_API_KEY`. Token examples use the `pds_` prefix.
 
 ## Public
 
@@ -131,10 +131,23 @@ Managed PostgreSQL 16 (Beta). See [Databases](/docs/concepts/databases).
 POST   /v1/databases
 GET    /v1/databases
 GET    /v1/databases/{id}
+PATCH  /v1/databases/{id}
 DELETE /v1/databases/{id}
 GET    /v1/databases/{id}/connection
+GET    /v1/databases/{id}/stats
+GET    /v1/databases/{id}/logs
+GET    /v1/databases/{id}/metrics
+POST   /v1/databases/{id}/failover
+POST   /v1/databases/{id}/reset-credentials
+POST   /v1/databases/{id}/wake
 ANY    /v1/databases/{id}/proxy/{path}
 ```
+
+`PATCH` updates `always_on` (see [idle auto-suspend](/docs/concepts/databases#idle-auto-suspend)).
+`failover` and `reset-credentials` require a multi-node deployment and return
+`501` otherwise. Database branching, cloning, point-in-time restore, and the
+connection allow list are [PandaStack Cloud features](/docs/concepts/open-source-vs-cloud)
+and are not part of this API surface.
 
 Create body (`label` optional):
 
@@ -159,7 +172,7 @@ GET    /v1/volumes/{name}
 DELETE /v1/volumes/{name}
 ```
 
-Create body — `name` is required, `size_mb` optional (defaults to 256 MiB, hard ceiling 65536 MiB / 64 GiB; tier quotas apply below the ceiling):
+Create body — `name` is required, `size_mb` optional (defaults to 256 MiB, hard ceiling 65536 MiB / 64 GiB):
 
 ```json
 {
@@ -168,10 +181,15 @@ Create body — `name` is required, `size_mb` optional (defaults to 256 MiB, har
 }
 ```
 
-Over-quota creates return `429`; a host with no storage headroom returns `507`. A volume is host-pinned to the agent that creates it for its lifetime. Listing is per-agent (it queries the scheduler-picked agent), so a volume created on one agent may not appear in a list served by another until a control-plane volume registry exists.
+A host with no storage headroom returns `507`. A volume is host-pinned to the agent that creates it for its lifetime. Listing is per-agent (it queries the scheduler-picked agent), so a volume created on one agent may not appear in a list served by another until a control-plane volume registry exists.
 
-## Billing
+## Metrics
 
 ```http
-POST /v1/billing/sync
+GET /v1/metrics/overview
+GET /v1/metrics/sandbox/{id}
 ```
+
+Backed by ClickHouse. When `PANDASTACK_CLICKHOUSE_URL` is unset, these return
+`503` and the rest of the API is unaffected. See
+[Observability](/docs/concepts/observability).

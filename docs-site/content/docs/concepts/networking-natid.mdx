@@ -12,7 +12,7 @@ Firecracker snapshots include the kernel's network state — interface IPs, ARP 
 leases. If we restore a snapshot into a VM that has a *different* IP than the one baked
 into the snapshot, the guest networking is broken until DHCP renegotiates.
 
-For 180 ms cold boots, we can't afford that.
+For sub-100 ms cold boots, we can't afford that.
 
 ## The solution
 

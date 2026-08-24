@@ -17,7 +17,7 @@ go build -o /usr/local/bin/pandastack ./
 
 ```bash
 export PANDASTACK_API=https://api.pandastack.ai
-export PANDASTACK_TOKEN=pds_abc123def456...
+export PANDASTACK_API_KEY=pds_abc123def456...
 ```
 
 Use your local API origin instead of `https://api.pandastack.ai` when developing against a local control plane.
@@ -27,7 +27,7 @@ Use your local API origin instead of `https://api.pandastack.ai` when developing
 ```bash
 pandastack version
 pandastack template list
-pandastack sandbox create --template base --ttl 1h --cpu 2 --memory-mb 2048
+pandastack sandbox create --template base --ttl 1h
 pandastack sandbox exec <id> -- uname -a
 pandastack sandbox delete <id>
 ```

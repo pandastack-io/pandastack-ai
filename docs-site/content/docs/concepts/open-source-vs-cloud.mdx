@@ -1,0 +1,114 @@
+---
+title: Open source vs Cloud
+description: What the Apache-2.0 PandaStack repository gives you, and what the hosted PandaStack Cloud service adds on top of it.
+---
+
+PandaStack is open core. The [repository](https://github.com/pandastack-io/pandastack-ai)
+is the real engine — the same Firecracker orchestration, snapshot machinery,
+scheduler, and managed-Postgres control plane that PandaStack Cloud runs — under
+the Apache License 2.0.
+
+**PandaStack Cloud** is the hosted service operated by the PandaStack team. It
+runs that same core, adds a small set of hosted-only database features, and
+takes the fleet off your hands.
+
+This page states exactly where the line is, so you can decide without guessing.
+
+## The short version
+
+- The open-source edition ships **unmetered and uncapped**. There is no billing,
+  metering, quota, subscription, or usage-tracking code anywhere in the
+  repository — nothing to strip out and nothing to trip over. Run as many
+  sandboxes as your hosts can hold.
+- Three database capabilities are **deliberately Cloud-only**: branching,
+  point-in-time restore with a backup browser and retention policies, and
+  connection hardening (IP allow lists, connection rate limits, pooled URLs).
+- Everything else — the whole sandbox lifecycle, snapshots and forks, memory and
+  rootfs streaming, templates, volumes, the multi-node scheduler, managed
+  Postgres with WAL archiving and failover, and the observability pipeline — is
+  in the repository.
+
+## Feature comparison
+
+### Sandboxes
+
+| | Open source | PandaStack Cloud |
+| --- | --- | --- |
+| Create, delete, list, metadata, TTL | Yes | Yes |
+| [Exec](/docs/concepts/exec), [REPL](/docs/concepts/repl), [LSP](/docs/concepts/lsp), [terminal](/docs/concepts/terminal), [filesystem](/docs/concepts/filesystem) | Yes | Yes |
+| Pause / resume, hibernate / wake, idle reaping | Yes | Yes |
+| [Snapshots and instant fork](/docs/concepts/snapshots-and-forks), including fork trees | Yes | Yes |
+| [UFFD memory streaming](/docs/internals/streaming-restore) from object storage | Yes | Yes |
+| [Demand-paged rootfs streaming](/docs/internals/streaming-restore#streaming-the-rootfs) over in-kernel NBD | Yes | Yes |
+| [Preview URLs](/docs/concepts/preview-urls) for ports inside a sandbox | Yes | Yes |
+| [Per-sandbox MCP](/docs/concepts/mcp) and the [workspace MCP server](/docs/concepts/mcp-server) | Yes | Yes |
+| Memory admission control, host-pressure ladder, CPU tiers | Yes | Yes |
+| Concurrency, CPU, or runtime caps | None | Plan-based |
+
+### Templates and volumes
+
+| | Open source | PandaStack Cloud |
+| --- | --- | --- |
+| [First-party templates](/docs/concepts/templates) — `base`, `code-interpreter`, `agent`, `postgres-16` | Yes | Yes, kept baked and warm for you |
+| Build your own from any Debian-based OCI image | Yes | Yes |
+| Live build logs, layer/content caching | Yes | Yes |
+| [Named persistent volumes](/docs/concepts/volumes) (rw-exclusive, ro-shared) | Yes | Yes |
+| Storage quota | None | Plan-based |
+
+### Managed PostgreSQL
+
+| | Open source | PandaStack Cloud |
+| --- | --- | --- |
+| [Per-database Firecracker microVM](/docs/concepts/databases), native `postgres://` URL | Yes | Yes |
+| [REST query broker](/docs/concepts/databases#2-rest-query-broker-http) | Yes | Yes |
+| Continuous WAL archiving + daily base backups | Yes | Yes |
+| [Failover](/docs/concepts/databases#failover) — rebuild on a healthy host from the latest backup | Yes | Yes |
+| [Credential rotation](/docs/concepts/databases#reset-credentials) | Yes | Yes |
+| [Idle auto-suspend and wake-on-connect](/docs/concepts/databases#idle-auto-suspend) | Yes | Yes |
+| **Database branching** — fork a running database, warm memory-forked cache | — | Yes |
+| **Point-in-time restore** — backup browser, clone into a new database, restore to any second in the window | Restore-to-latest only (used by failover) | Yes, with tiered retention policies |
+| **Connection hardening** — IP allow lists, per-database connection rate limits, pooled (PgBouncer) URL | Direct URL only, TLS required | Yes |
+
+### Platform
+
+| | Open source | PandaStack Cloud |
+| --- | --- | --- |
+| Multi-node scheduler, capacity scoring, leases, slot reconciliation | Yes | Yes |
+| [Observability](/docs/concepts/observability) — audit log, events, metrics, Postgres + ClickHouse | Yes, you run the pipeline | Yes, pre-wired and retained |
+| Auth | Bring your own: `stub` mode or JWKS-verified JWTs ([Supabase guide](/docs/self-host/auth-supabase)) | Hosted sign-in, orgs, invites |
+| Fleet operations — KVM hosts, object storage, kernel and Firecracker upgrades | You run them | Managed |
+| Support | Community: [GitHub issues and discussions](https://github.com/pandastack-io/pandastack-ai/discussions) | Support channel and SLA |
+
+## Why those three are Cloud-only
+
+The three held-back items are all managed-database features whose value is
+tightly coupled to running a fleet:
+
+- **Branching** memory-forks a live database VM so the branch comes up with the
+  parent's cache already hot. It depends on the same warm-fork path Cloud
+  operates and monitors across a multi-host fleet.
+- **Point-in-time restore** is not just WAL replay: it is a catalog of base
+  backups and WAL segments, a browsable backup history, and retention policies
+  that decide what to keep and for how long. The open-source edition keeps the
+  parts failover actually needs — continuous archiving and restore-to-latest.
+- **Connection hardening** — IP allow lists, per-database connection rate
+  limits, and the pooled connection URL — are edge policy applied at a managed
+  proxy tier.
+
+Self-hosting gets you the durable path either way: your databases are
+continuously archived, and a failed database can be rebuilt from object storage
+on a healthy host. If you need branching, a backup browser, or edge connection
+policy, that is what Cloud is for.
+
+## Choosing
+
+Run the **open-source edition** when you want the platform on your own hardware
+or cloud account, need full control of the data path, want to modify or extend
+the engine, or simply want no usage limits.
+
+Use **PandaStack Cloud** when you would rather not operate Firecracker hosts,
+object storage, and Postgres archiving yourself — or when you specifically want
+database branching, point-in-time restore, or connection hardening.
+
+They are not mutually exclusive: the REST API is the same, so a project can
+start self-hosted and move, or run both.

@@ -39,7 +39,7 @@ and always belong to a workspace.
 
 | Transition         | P50      | P99      | Notes |
 | ------------------ | -------- | -------- | ----- |
-| Create → running   | **179 ms** | 203 ms  | Snapshot-natid path on every create, n=50 prod. See [Performance](/docs/concepts/performance). |
+| Create → running   | **49 ms**  | 64 ms   | Snapshot-natid path on every create, n=50 prod. See [Performance](/docs/concepts/performance). |
 | Pause → resume     | &lt;5 ms   | 8 ms     | Just `firecracker pause` / `resume`. No memory writes. |
 | Hibernate → wake   | ~150 ms  | 220 ms   | Memory written to disk, restored on demand. |
 | Fork (CoW + reflink) | ~50 ms | 80 ms    | Cheaper than create; shares pages with parent. |

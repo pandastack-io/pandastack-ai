@@ -1,9 +1,9 @@
 ---
 title: Snapshot & Restore
-description: How a sandbox boots in 179 ms — the path from snapshot file on disk to sshd accepting connections.
+description: How a sandbox boots in 49 ms — the path from snapshot file on disk to sshd accepting connections.
 ---
 
-PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux **once** at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we `mmap` that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is **179 ms** and p99 is **203 ms** on bare-metal Intel Cascade Lake.
+PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux **once** at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we `mmap` that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is **49 ms** and p99 is **64 ms** on bare-metal Intel Cascade Lake.
 
 This page walks the full path, end to end.
 
@@ -38,7 +38,7 @@ We pre-allocate the tap, configure it with the baked host IP, set the tap MAC to
 
 This is the trick that makes cross-host time-travel fork work — see [fork-cow](/docs/internals/fork-cow).
 
-## The 179 ms walk
+## The 49 ms walk
 
 ```
 t=0       create request enters agent
@@ -55,7 +55,7 @@ t=0       create request enters agent
    ├──── HTTP PUT  /snapshot/state Resume    ~6 ms
    ├──── poll TCP :22 on guest IP            ~40 ms  (sshd was already up in the snapshot)
    │
-   └── return sandbox JSON  (boot_ms ≈ 179)
+   └── return sandbox JSON  (boot_ms ≈ 49)
 ```
 
 This is the path **every create** takes — there is no warm pool of idle VMs and no separate fast/slow tier. The only slower case is the very first create of a template on a host, which does a full cold boot (~3 s) and bakes the snapshot as a side effect; every subsequent create restores it.

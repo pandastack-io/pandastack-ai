@@ -49,8 +49,8 @@ def _selected() -> list[str]:
 
 @pytest.mark.parametrize("template", _selected())
 def test_cookbook_example(template: str) -> None:
-    if not os.environ.get("PANDASTACK_TOKEN", "").strip():
-        pytest.skip("PANDASTACK_TOKEN not set")
+    if not os.environ.get("PANDASTACK_API_KEY", "").strip():
+        pytest.skip("PANDASTACK_API_KEY not set")
     script = COOKBOOK_DIR / template / "main.py"
     assert script.is_file(), script
     timeout = int(os.environ.get("COOKBOOK_TIMEOUT", "600"))
