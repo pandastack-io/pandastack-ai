@@ -41,7 +41,7 @@ func newOrgsAPI(db *sql.DB, log *slog.Logger) *orgsAPI {
 	return &orgsAPI{db: db, log: log}
 }
 
-// SetupSchema ensures the orgs / multi-tenancy tables exist. Idempotent.
+// SetupSchema creates the org/tenancy tables. Idempotent.
 func (a *orgsAPI) SetupSchema(ctx context.Context) error {
 	if a.db == nil {
 		return errors.New("orgs: nil db")
@@ -52,8 +52,10 @@ func (a *orgsAPI) SetupSchema(ctx context.Context) error {
 	return nil
 }
 
-// Org / multi-tenancy DDL, inlined so the api binary can ensure the schema
-// exists at startup (idempotent CREATEs).
+// Same DDL as agent/migrations/postgres/00010_orgs_billing.sql, inlined so
+// the api binary can ensure the schema exists at startup (idempotent CREATEs).
+// This build carries no billing, so the metering/tier/quota columns that
+// migration also defines are deliberately absent here.
 const orgsSchema = `
 CREATE TABLE IF NOT EXISTS orgs (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -145,13 +147,20 @@ func writeErrOrg(w http.ResponseWriter, code int, msg string) {
 	writeJSONOrg(w, code, map[string]string{"error": msg})
 }
 
+// slugFromName makes a URL-safe org slug from a display name. Keeps a-z/0-9/-
+// only, collapses runs of '-'. If empty after sanitizing, falls back to a
+// short random suffix.
+// reservedOrgSlugs are workspace names that carry special meaning to the agent
+// (fleet-wide "see everything" scope) or to routing/infra, and must never be
+// claimable by a tenant. "admin"/"default"/"" are the agent's magic-superuser
+// values; the rest are defense-in-depth against confusable/infra names.
 var reservedOrgSlugs = map[string]bool{
 	"admin": true, "default": true, "system": true, "internal": true,
 	"root": true, "superuser": true, "pandastack": true, "api": true,
 	"agent": true, "edge": true, "app": true, "apps": true, "www": true,
-	"dashboard": true, "webhook": true, "webhooks": true, "healthz": true,
-	"metrics": true, "v1": true, "me": true, "orgs": true, "public": true,
-	"null": true, "undefined": true,
+	"dashboard": true, "billing": true, "stripe": true, "webhook": true,
+	"webhooks": true, "healthz": true, "metrics": true, "v1": true,
+	"me": true, "orgs": true, "public": true, "null": true, "undefined": true,
 }
 
 func isReservedOrgSlug(slug string) bool {
@@ -159,11 +168,16 @@ func isReservedOrgSlug(slug string) bool {
 }
 
 // isValidOrgSlug enforces the workspace-key charset: 2-40 chars, lowercase
-// [a-z0-9], hyphen-separated, no leading/trailing/double hyphen.
+// [a-z0-9], hyphen-separated, no leading/trailing/double hyphen. This blocks
+// slugs that could break out of a downstream string context (e.g. a trailing
+// backslash escaping a SQL/analytics literal — see the function-metrics query).
 func isValidOrgSlug(slug string) bool {
 	slug = strings.TrimSpace(slug)
 	n := len(slug)
-	if n < 2 || n > 40 || slug[0] == '-' || slug[n-1] == '-' {
+	if n < 2 || n > 40 {
+		return false
+	}
+	if slug[0] == '-' || slug[n-1] == '-' {
 		return false
 	}
 	prevHyphen := false
@@ -174,19 +188,48 @@ func isValidOrgSlug(slug string) bool {
 			prevHyphen = false
 		case c == '-':
 			if prevHyphen {
-				return false
+				return false // no double hyphen
 			}
 			prevHyphen = true
 		default:
+			return false // any other byte (uppercase, '_', '.', '\\', etc.) is invalid
+		}
+	}
+	// Reject UUID-shaped slugs (8-4-4-4-12 hex). A Supabase user_id IS a UUID,
+	// and a user with no current org has their resources isolated by the agent
+	// under a workspace keyed on that raw user_id (org_resolver fallback).
+	// Allowing an org slug identical to a user_id would let an attacker's org
+	// share a victim's raw-user_id workspace namespace — a cross-tenant
+	// isolation break (mint a pds_ token scoped to the victim's uid → read/exec
+	// their sandboxes). Slugs never legitimately need UUID shape.
+	if looksLikeUUID(slug) {
+		return false
+	}
+	return true
+}
+
+// looksLikeUUID reports whether s is a canonical 8-4-4-4-12 lowercase-hex UUID —
+// the shape of a Supabase user_id, which must never be claimable as an org slug
+// (see isValidOrgSlug).
+func looksLikeUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
 	}
 	return true
 }
 
-// slugFromName makes a URL-safe org slug from a display name. Keeps a-z/0-9/-
-// only, collapses runs of '-'. If empty after sanitizing, falls back to a
-// short random suffix.
 func slugFromName(name string) string {
 	var b strings.Builder
 	last := byte('-')
@@ -313,10 +356,12 @@ func (a *orgsAPI) createOrg(w http.ResponseWriter, r *http.Request) {
 	if slug == "" {
 		slug = slugFromName(body.Name)
 	}
-	// SECURITY (tenancy): the org slug becomes the workspace key on
-	// X-Fcs-Workspace; the agent treats the literal "admin"/"default"/"" as a
-	// fleet-wide see-everything scope. A user-chosen slug MUST NOT name those,
-	// nor any shape that could break out of a downstream string context.
+	// SECURITY (tenancy): the org slug becomes the workspace key on X-Fcs-Workspace,
+	// and the agent treats the literal values "admin"/"default" (and empty) as a
+	// see-everything superuser scope. A user-chosen slug MUST NOT be able to name
+	// those, or any slug shape that could break out of a downstream string context.
+	// Enforce a strict charset + a reserved-name denylist here, before the slug is
+	// ever persisted or reflected into a workspace header.
 	if !isValidOrgSlug(slug) || isReservedOrgSlug(slug) {
 		writeErrOrg(w, 400, "invalid organization slug: use 2-40 lowercase letters, digits, and single hyphens (reserved names are not allowed)")
 		return
@@ -739,16 +784,8 @@ func (a *orgsAPI) setCurrentOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSONOrg(w, 200, map[string]string{"org_id": body.OrgID})
 }
 
-func nullTimeJSON(t sql.NullTime) any {
-	if !t.Valid {
-		return nil
-	}
-	return t.Time
-}
-
 // --- helpers ---------------------------------------------------------------
 
-// isUniqueViolation matches the pgx unique_violation SQLSTATE.
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

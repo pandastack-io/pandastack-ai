@@ -27,6 +27,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,16 @@ const (
 )
 
 // failover handles POST /v1/databases/{id}/failover.
+//
+// PREFLIGHT-THEN-ACT (the B1/B2 fix): every check that could make this a
+// no-op runs BEFORE anything touches the primary — (1) refuse a database
+// that is running on a healthy agent unless force:true (the old code would
+// happily drain a healthy primary and strand it when the restore failed),
+// (2) require a valid restore target, (3) require a restorable GCS archive.
+// Only after all three pass does the drain+restore start — and it runs in
+// the BACKGROUND with a 202 (the B3 fix: the old synchronous handler held
+// the request through a multi-minute restore and the CDN cut it at ~100s,
+// surfacing as a raw 502 while work was still in flight).
 func (d *databasesAPI) failover(w http.ResponseWriter, r *http.Request) {
 	workspace := dbWorkspace(r)
 	if workspace == "" {
@@ -58,68 +69,195 @@ func (d *databasesAPI) failover(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 
+	// Optional body: {"force": true} turns the healthy-primary refusal into a
+	// planned migration. Absent/invalid body = force off.
+	var req struct {
+		Force bool `json:"force"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+	}
+
 	// Ownership + template check straight from the shared sandboxes table.
 	// verifyDB/agentCall would route the lookup to the OWNING agent — which
 	// is presumed dead; that's the whole reason failover is being invoked.
-	meta, ok := d.failoverAuthorize(w, r, workspace, id)
+	meta, template, ok := d.failoverAuthorize(w, r, workspace, id)
 	if !ok {
 		return
 	}
 
-	// Identify the current (presumed-dead) owner so we can exclude it from
-	// target selection and best-effort kill any half-alive VM (split-brain
-	// guard: two postgres instances both archiving WAL under one id).
+	// GUARD 1 (B1): without force, failover is ONLY for databases whose row
+	// says "failed". This gate deliberately depends on nothing that can be
+	// stale or error transiently (lease rows, heartbeat caches) — the July
+	// E2E proved a healthy running primary could be drained; fail CLOSED on
+	// every other status instead:
+	//   running    → the primary is fine; forcing is a planned migration.
+	//   hibernated → use POST /v1/databases/{id}/wake, not failover.
+	//   anything else / unknown → refuse rather than guess.
+	if !req.Force {
+		switch st := d.sandboxStatus(r.Context(), id); st {
+		case "failed":
+			// legitimate failover — proceed
+		case "hibernated":
+			writeErrOrg(w, http.StatusConflict,
+				"database is hibernated, not failed — use POST /v1/databases/{id}/wake")
+			return
+		case "running":
+			writeErrOrg(w, http.StatusConflict,
+				"database is running; failover is for failed databases. "+
+					`POST {"force":true} to run a planned migration anyway`)
+			return
+		default:
+			writeErrOrg(w, http.StatusConflict,
+				"database status is '"+st+"' — failover only applies to failed databases "+
+					`(POST {"force":true} to override)`)
+			return
+		}
+	}
+
+	// Identify the current owner so we can exclude it from target selection
+	// and stop any half-alive postgres (split-brain guard: two instances both
+	// archiving WAL under one id). Lookup failure is tolerable HERE — it only
+	// degrades drain/exclusion, never the guard above.
 	current, err := d.director.sched.LookupLease(r.Context(), id)
 	if err != nil {
 		d.log.Warn("databases: failover lease lookup failed (continuing)", "id", id, "err", err)
 	}
 
+	// GUARD 2 (B2): a valid restore target must exist BEFORE anything touches
+	// the primary. No target → clean no-op, primary untouched.
 	target := d.pickFailoverTarget(r.Context(), current)
 	if target == nil {
-		writeErrOrg(w, http.StatusServiceUnavailable, "no healthy agent available to fail over to")
+		writeErrOrg(w, http.StatusServiceUnavailable,
+			"no healthy agent available to fail over to (primary left untouched)")
 		return
 	}
 
+	// GUARD 3 (B2): a restorable archive must exist. Draining the primary
+	// when the restore cannot possibly succeed would destroy the only
+	// running copy for nothing.
+	if ok, reason := dbArchiveExists(r.Context(), id); !ok {
+		writeErrOrg(w, http.StatusPreconditionFailed,
+			"no restorable archive ("+reason+"); refusing to touch the primary")
+		return
+	}
+
+	// Serialize per id: a second POST while a failover is in flight must not
+	// spawn a second drain+restore pipeline racing over the same volume,
+	// archive, and lease.
+	d.failoverMu.Lock()
+	if d.failoverInFlight[id] {
+		d.failoverMu.Unlock()
+		writeErrOrg(w, http.StatusConflict, "a failover for this database is already in progress")
+		return
+	}
+	d.failoverInFlight[id] = true
+	d.failoverMu.Unlock()
+
+	// All preflights passed: run drain+restore in the background and answer
+	// 202 immediately. Callers poll GET /v1/databases/{id}; note the row can
+	// briefly report not-found between the drain and the restore's create.
+	go d.runFailover(workspace, id, template, meta, current, target)
+
+	writeJSON(w, http.StatusAccepted, DatabaseInfo{
+		ID:       id,
+		Status:   "restoring",
+		Template: template,
+		Size:     dbSizeOfTemplate(template),
+		Label:    meta["db.label"],
+		Error: "failover started (target agent " + target.ID + "); poll GET /v1/databases/{id} — " +
+			"the database may briefly report not-found while the restore provisions",
+	})
+}
+
+// runFailover is the background half of failover: drain the old owner,
+// restore on the target, repoint the lease cache, and log readiness. All
+// preflights already passed; errors here are logged (the caller has its 202).
+func (d *databasesAPI) runFailover(workspace, id, template string, meta map[string]string, current, target *scheduler.Agent) {
+	defer func() {
+		d.failoverMu.Lock()
+		delete(d.failoverInFlight, id)
+		d.failoverMu.Unlock()
+	}()
+	// TUSK T1.1 + T1.4: this is an ownership change — bump the archive
+	// generation (fences the old host's future uploads behind a lower gen) and
+	// stamp the new value into the metadata the restored row will carry, so
+	// the new owner's WAL relay stamps its base backups with it. Also lease
+	// the archive chain: the restore is about to replay from it, and the
+	// retention pruner must not GC the anchor mid-replay.
+	fctx, fcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	gen, gerr := d.bumpArchiveGenerationRetry(fctx, id, "failover:"+target.ID)
+	if gerr != nil {
+		// ABORT rather than proceed unfenced. An unfenced failover can restore the
+		// database onto an abandoned timeline (see bumpArchiveGenerationRetry). The
+		// database stays in its current state and the failover is retryable — a
+		// delayed-but-correct failover beats a fast-but-silently-wrong one.
+		fcancel()
+		d.log.Error("databases: failover aborted — could not fence archive generation", "id", id, "err", gerr)
+		return
+	}
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	meta["db.archive_gen"] = strconv.FormatInt(gen, 10)
+	leaseHolder := "failover:" + target.ID
+	if lerr := d.acquireArchiveLease(fctx, id, leaseHolder, "failover", 45*time.Minute); lerr != nil {
+		d.log.Warn("databases: failover archive lease failed (continuing)", "id", id, "err", lerr)
+	}
+	fcancel()
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		d.releaseArchiveLease(rctx, id, leaseHolder)
+		rcancel()
+	}()
 	if current != nil {
 		d.drainOldAgent(current, id)
 	}
-
-	if !d.restoreOnAgent(w, target, id, meta) {
+	if err := d.restoreOnAgent(target, id, template, meta); err != nil {
+		d.log.Error("databases: failover restore failed", "id", id, "agent", target.ID, "err", err)
 		return
 	}
 
 	// Bust this edge's lease cache (persistent sandboxes are cached 1h) so
-	// the readiness poll below — and every subsequent request through this
-	// edge — routes to the new owner immediately. The PG lease row itself was
-	// already retargeted by the upsert inside the agent's Create.
+	// subsequent requests through this edge route to the new owner. The PG
+	// lease row itself was retargeted by the upsert inside the agent's Create.
 	d.director.sched.RememberLeasePersistent(id, *target)
-
 	d.log.Info("databases: failover restore accepted",
 		"id", id, "target_agent", target.ID, "endpoint", target.Endpoint)
 
-	// Wait for postgres to replay WAL and publish fresh credentials, then
-	// return the same shape as create: full connection info on success,
-	// status "provisioning" + error hint if it is still recovering.
-	result := DatabaseInfo{
-		ID:       id,
-		Status:   "running",
-		Template: dbTemplate,
-		Label:    meta["db.label"],
-	}
-	if info := d.waitPGReady(r, workspace, id); info != nil {
-		result = mergeInfo(result, info, id)
+	if info := d.waitPGReadyCtx(workspace, id); info != nil {
+		d.log.Info("databases: failover complete — postgres ready", "id", id, "agent", target.ID)
 	} else {
-		result.Status = "provisioning"
-		result.Error = "database restored on a new agent but postgres is still recovering; poll GET /v1/databases/{id}"
+		d.log.Warn("databases: failover restored but postgres not ready in window (still recovering?)",
+			"id", id, "agent", target.ID)
 	}
-	writeJSON(w, http.StatusOK, result)
+}
+
+// agentHealthy mirrors pickFailoverTarget's health rule: active + fresh
+// heartbeat. Package-level and pure so the failover guard is unit-testable.
+func agentHealthy(a *scheduler.Agent) bool {
+	return a != nil && a.Status == "active" && a.Endpoint != "" &&
+		time.Since(a.LastHeartbeat) <= 30*time.Second
+}
+
+// sandboxStatus reads the sandbox row status from the shared control-plane
+// table (NOT lease-routed — same reasoning as failoverAuthorize). Empty
+// string when the row is missing or the query fails.
+func (d *databasesAPI) sandboxStatus(ctx context.Context, id string) string {
+	var status string
+	if err := d.db.QueryRowContext(ctx,
+		`SELECT status FROM sandboxes WHERE id = $1`, id).Scan(&status); err != nil {
+		return ""
+	}
+	return status
 }
 
 // failoverAuthorize verifies the sandbox row exists, is a managed database,
 // and belongs to the caller's workspace. Returns the row's metadata (which
-// carries workspace + db.label and is re-applied to the restored sandbox).
+// carries workspace + db.label and is re-applied to the restored sandbox)
+// and the row's TEMPLATE (so failover/clone preserve the RAM tier).
 // Writes the error response itself when returning ok=false.
-func (d *databasesAPI) failoverAuthorize(w http.ResponseWriter, r *http.Request, workspace, id string) (map[string]string, bool) {
+func (d *databasesAPI) failoverAuthorize(w http.ResponseWriter, r *http.Request, workspace, id string) (map[string]string, string, bool) {
 	var template string
 	var metaRaw sql.NullString
 	err := d.db.QueryRowContext(r.Context(),
@@ -127,16 +265,16 @@ func (d *databasesAPI) failoverAuthorize(w http.ResponseWriter, r *http.Request,
 		Scan(&template, &metaRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeErrOrg(w, http.StatusNotFound, "database not found")
-		return nil, false
+		return nil, "", false
 	}
 	if err != nil {
 		d.log.Error("databases: failover sandbox lookup failed", "id", id, "err", err)
 		writeErrOrg(w, http.StatusInternalServerError, "sandbox lookup failed")
-		return nil, false
+		return nil, "", false
 	}
-	if template != dbTemplate {
+	if !isDBTemplate(template) {
 		writeErrOrg(w, http.StatusNotFound, "database not found")
-		return nil, false
+		return nil, "", false
 	}
 	meta := map[string]string{}
 	if metaRaw.Valid && metaRaw.String != "" {
@@ -146,12 +284,12 @@ func (d *databasesAPI) failoverAuthorize(w http.ResponseWriter, r *http.Request,
 	// everything, everyone else only their own rows (no empty-owner leak).
 	if workspace != "admin" && workspace != "default" && meta["workspace"] != workspace {
 		writeErrOrg(w, http.StatusNotFound, "database not found")
-		return nil, false
+		return nil, "", false
 	}
 	if meta["workspace"] == "" {
 		meta["workspace"] = workspace
 	}
-	return meta, true
+	return meta, template, true
 }
 
 // pickFailoverTarget returns the healthiest agent that is not the current
@@ -183,66 +321,67 @@ func (d *databasesAPI) pickFailoverTarget(ctx context.Context, current *schedule
 	return target
 }
 
-// drainOldAgent best-effort deletes the sandbox on the old owner. Errors are
-// logged and ignored — the old host is normally unreachable, that is why we
-// are here. If it IS half-alive, this prevents two postgres instances from
-// both archiving WAL under the same id.
+// drainOldAgent best-effort STOPS the database VM on the old owner via
+// hibernate. Errors are logged and ignored — the old host is normally
+// unreachable, that is why we are here. If it IS half-alive, this stops
+// postgres so two instances never archive WAL under the same id.
+//
+// Deliberately hibernate, NOT delete: (a) the agent's managed-sandbox guard
+// 409s a plain DELETE anyway, and a force-DELETE would destroy the old
+// volume — the last local copy of up to archive_timeout worth of tail WAL;
+// (b) hibernate keeps the row + volume, so if the restore then fails the
+// database is still recoverable via wake instead of gone.
 func (d *databasesAPI) drainOldAgent(current *scheduler.Agent, id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), dbFailoverDrainTimeout)
 	defer cancel()
-	resp, err := d.directAgentCall(ctx, http.MethodDelete,
-		strings.TrimRight(current.Endpoint, "/")+"/sandboxes/"+id, nil)
+	resp, err := d.directAgentCall(ctx, http.MethodPost,
+		strings.TrimRight(current.Endpoint, "/")+"/sandboxes/"+id+"/hibernate", nil)
 	if err != nil {
 		d.log.Info("databases: failover old-agent drain failed (expected if host is dead)",
 			"id", id, "agent", current.ID, "err", err)
 		return
 	}
 	defer resp.Body.Close()
-	d.log.Info("databases: failover drained old agent", "id", id, "agent", current.ID, "status", resp.StatusCode)
+	d.log.Info("databases: failover drained old agent (hibernate)",
+		"id", id, "agent", current.ID, "status", resp.StatusCode)
 }
 
-// restoreOnAgent invokes POST /db/{id}/restore on the target agent and
-// writes the error response itself on failure (returning false).
-func (d *databasesAPI) restoreOnAgent(w http.ResponseWriter, target *scheduler.Agent, id string, meta map[string]string) bool {
-	body, _ := json.Marshal(map[string]any{"metadata": meta})
-	// Background-derived context: a client that gives up mid-restore must not
-	// abort the multi-minute volume rebuild on the agent.
+// restoreOnAgent invokes POST /db/{id}/restore on the target agent.
+// template preserves the database's RAM tier across the move.
+func (d *databasesAPI) restoreOnAgent(target *scheduler.Agent, id, template string, meta map[string]string) error {
+	body, _ := json.Marshal(map[string]any{"metadata": meta, "template": template})
+	// Background context: nothing client-derived here — a caller that gave up
+	// must not abort the multi-minute volume rebuild on the agent.
 	ctx, cancel := context.WithTimeout(context.Background(), dbFailoverRestoreTimeout)
 	defer cancel()
 	resp, err := d.directAgentCall(ctx, http.MethodPost,
 		strings.TrimRight(target.Endpoint, "/")+"/db/"+id+"/restore", body)
 	if err != nil {
-		d.log.Error("databases: failover restore call failed", "id", id, "agent", target.ID, "err", err)
-		writeErrOrg(w, http.StatusBadGateway, "restore on target agent failed: "+err.Error())
-		return false
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		d.log.Error("databases: failover restore rejected",
-			"id", id, "agent", target.ID, "status", resp.StatusCode, "body", string(b))
-		writeErrOrg(w, http.StatusBadGateway, "restore on target agent failed: "+strings.TrimSpace(string(b)))
-		return false
+		return errors.New("restore rejected by agent (HTTP " +
+			resp.Status + "): " + strings.TrimSpace(string(b)))
 	}
-	return true
+	return nil
 }
 
-// waitPGReady polls postgres-info (now lease-routed to the NEW agent) until
-// credentials appear or the deadline passes. nil on timeout.
-func (d *databasesAPI) waitPGReady(r *http.Request, workspace, id string) *pgInfoResponse {
-	deadline := time.Now().Add(dbFailoverReadyTimeout)
+// waitPGReadyCtx polls postgres-info (now lease-routed to the NEW agent)
+// until credentials appear or the deadline passes. nil on timeout. Uses its
+// own context — it runs from the background failover goroutine.
+func (d *databasesAPI) waitPGReadyCtx(workspace, id string) *pgInfoResponse {
+	ctx, cancel := context.WithTimeout(context.Background(), dbFailoverReadyTimeout)
+	defer cancel()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
-		if info, err := d.fetchPGInfo(r, workspace, id); err == nil && info != nil {
+		if info, err := d.fetchPGInfoCtx(ctx, workspace, id); err == nil && info != nil {
 			return info
 		}
-		if time.Now().After(deadline) {
-			d.log.Warn("databases: postgres not ready after failover (still recovering?)", "id", id)
-			return nil
-		}
 		select {
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 		}

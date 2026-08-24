@@ -1,0 +1,6061 @@
+{
+  "components": {
+    "schemas": {
+      "CreateSandboxRequest": {
+        "description": "Sandbox create request. CPU/memory may be overridden by the template's baked snapshot dimensions.",
+        "properties": {
+          "cpu": {
+            "description": "Requested vCPUs",
+            "type": "integer"
+          },
+          "disk_gb": {
+            "description": "Optional rootfs size in GiB",
+            "type": "integer"
+          },
+          "from_snapshot": {
+            "description": "Restore from this snapshot ID instead of booting the template",
+            "type": "string"
+          },
+          "memory_mb": {
+            "description": "Requested memory in MiB",
+            "type": "integer"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Free-form string metadata; keys starting with secret. are write-only",
+            "type": "object"
+          },
+          "persistent": {
+            "description": "true exempts the sandbox from the idle reaper",
+            "type": "boolean"
+          },
+          "template": {
+            "description": "Template name (e.g. base, code-interpreter, agent, browser). Public templates or ones owned by the caller's workspace only",
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "description": "Idle TTL in seconds; null uses the platform default",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "volumes": {
+            "description": "Durable volumes to attach",
+            "items": {
+              "$ref": "#/components/schemas/VolumeMount"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "DatabaseCreateRequest": {
+        "description": "Options for provisioning a managed database. All fields optional.",
+        "properties": {
+          "always_on": {
+            "description": "Opt the database out of idle auto-suspend.",
+            "type": "boolean"
+          },
+          "cpu": {
+            "default": 2,
+            "description": "vCPU count hint (the baked template snapshot governs the effective value).",
+            "type": "integer"
+          },
+          "label": {
+            "description": "Display label, surfaced in list/get.",
+            "type": "string"
+          },
+          "memory_mb": {
+            "default": 1024,
+            "description": "Memory hint in MiB (the RAM tier/template governs the effective value).",
+            "type": "integer"
+          },
+          "size": {
+            "default": "1g",
+            "description": "RAM tier. Create-time only — resizing later means clone with a new size.",
+            "enum": [
+              "1g",
+              "4g",
+              "16g"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DatabaseInfo": {
+        "description": "A managed PostgreSQL database (a postgres-16 family Firecracker sandbox). Connection fields are populated only while the database is running.",
+        "properties": {
+          "always_on": {
+            "description": "true = opted out of idle auto-suspend.",
+            "type": "boolean"
+          },
+          "broker_token": {
+            "description": "Per-database REST query-broker bearer token (pds_pg_…); only returned while running.",
+            "type": "string"
+          },
+          "broker_url": {
+            "description": "Public REST query-broker base URL (/v1/databases/{id}/proxy).",
+            "type": "string"
+          },
+          "cloned_from": {
+            "description": "Source database id for clones/PITR restores.",
+            "type": "string"
+          },
+          "branched_from": {
+            "description": "Parent database id for reflink branches (TUSK T4.1).",
+            "type": "string"
+          },
+          "connection_url": {
+            "description": "Ready-to-use postgres:// URL (TLS required).",
+            "type": "string"
+          },
+          "pooled_connection_url": {
+            "description": "postgres:// URL routed through the guest's pgbouncer (transaction pooling) on port 6432. Recommended for serverless/agent workloads that open many short connections.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "Creation time, epoch seconds. Omitted when unknown.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "database": {
+            "description": "Default database name.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Set when the VM is up but Postgres has not published credentials, or as a human-readable progress hint on async 202 responses.",
+            "type": "string"
+          },
+          "failover_available": {
+            "description": "Only on failed databases: whether a restore on another agent is possible.",
+            "type": "boolean"
+          },
+          "failover_eta_seconds": {
+            "description": "Expected restore time (RTO) in seconds when failover is available.",
+            "type": "integer"
+          },
+          "failover_reason": {
+            "description": "Why failover is or is not available.",
+            "type": "string"
+          },
+          "host": {
+            "description": "SNI host for native connections (<id>.db.pandastack.ai).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Database id (currently doubles as the sandbox id).",
+            "type": "string"
+          },
+          "label": {
+            "description": "User-supplied display label.",
+            "type": "string"
+          },
+          "password": {
+            "description": "PostgreSQL password (rotates on restore/failover and on reset-credentials).",
+            "type": "string"
+          },
+          "port": {
+            "description": "PostgreSQL port (5432).",
+            "type": "integer"
+          },
+          "sandbox_id": {
+            "description": "Underlying sandbox id (explicit DB↔sandbox correlation).",
+            "type": "string"
+          },
+          "size": {
+            "description": "RAM tier, derived from the template.",
+            "enum": [
+              "1g",
+              "4g",
+              "16g"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "Public status: provisioning | running | hibernated | failed | restoring (internal \"creating\" maps to provisioning).",
+            "type": "string"
+          },
+          "template": {
+            "description": "Backing template: postgres-16.",
+            "type": "string"
+          },
+          "username": {
+            "description": "PostgreSQL user.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "template"
+        ],
+        "type": "object"
+      },
+      "DatabaseStats": {
+        "description": "Live PostgreSQL + disk stats snapshot.",
+        "properties": {
+          "cache_hit_ratio": {
+            "description": "Buffer-cache hit ratio 0..1.",
+            "type": "number"
+          },
+          "connections": {
+            "description": "Current client-backend connections.",
+            "type": "integer"
+          },
+          "db_size_bytes": {
+            "description": "Total size of all databases in bytes.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_avail_bytes": {
+            "description": "Bytes available on the data volume.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_size_bytes": {
+            "description": "Durable data volume size in bytes.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_used_bytes": {
+            "description": "Bytes used on the data volume.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_used_pct": {
+            "description": "Percent of the data volume used (0–100).",
+            "type": "number"
+          },
+          "max_connections": {
+            "description": "Configured max_connections.",
+            "type": "integer"
+          },
+          "postgres_version": {
+            "description": "PostgreSQL server version.",
+            "type": "string"
+          },
+          "uptime_seconds": {
+            "description": "Seconds since postmaster start.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "db_size_bytes",
+          "connections",
+          "max_connections",
+          "uptime_seconds",
+          "cache_hit_ratio",
+          "disk_size_bytes",
+          "disk_used_bytes",
+          "disk_avail_bytes",
+          "disk_used_pct"
+        ],
+        "type": "object"
+      },
+      "DirEntry": {
+        "properties": {
+          "is_dir": {
+            "description": "True if a directory",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "File mode string",
+            "type": "string"
+          },
+          "mtime": {
+            "description": "Modification time (Unix epoch seconds)",
+            "type": "integer"
+          },
+          "name": {
+            "description": "File or directory name",
+            "type": "string"
+          },
+          "size": {
+            "description": "Size in bytes",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "error": {
+            "description": "Human-readable error message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ExecRequest": {
+        "properties": {
+          "cmd": {
+            "description": "Shell command, run with /bin/sh -c",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "Optional command timeout in seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cmd"
+        ],
+        "type": "object"
+      },
+      "ExecResult": {
+        "properties": {
+          "exit_code": {
+            "description": "Process exit code",
+            "type": "integer"
+          },
+          "stderr": {
+            "description": "Captured standard error",
+            "type": "string"
+          },
+          "stdout": {
+            "description": "Captured standard output",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ForkResult": {
+        "properties": {
+          "at": {
+            "description": "When the fork completed",
+            "format": "date-time",
+            "type": "string"
+          },
+          "children": {
+            "description": "IDs of the newly created child sandboxes",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parent_id": {
+            "description": "Parent sandbox ID",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "Intermediate snapshot used for the fork",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LifecycleInfo": {
+        "properties": {
+          "idle_seconds": {
+            "description": "Seconds since the last guest-using activity",
+            "type": "integer"
+          },
+          "persistent": {
+            "description": "Whether the sandbox is exempt from the idle reaper",
+            "type": "boolean"
+          },
+          "ttl_seconds": {
+            "description": "Idle TTL in seconds (0 = never reaped for idleness)",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Me": {
+        "properties": {
+          "auth_method": {
+            "description": "How the request was authenticated: jwt, stub, or token",
+            "type": "string"
+          },
+          "current_org": {
+            "description": "Active org, or null when none",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Org"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "email": {
+            "description": "User email (empty for token callers)",
+            "type": "string"
+          },
+          "orgs": {
+            "description": "Orgs the user belongs to (empty for token callers)",
+            "items": {
+              "$ref": "#/components/schemas/Org"
+            },
+            "type": "array"
+          },
+          "user_id": {
+            "description": "Authenticated user ID (workspace slug for pds_ token callers)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Org": {
+        "properties": {
+          "created_at": {
+            "description": "Creation time",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "Org ID",
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name",
+            "type": "string"
+          },
+          "owner_user_id": {
+            "description": "User ID of the org owner",
+            "type": "string"
+          },
+          "role": {
+            "description": "Caller's role in this org (present in membership-scoped responses)",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          },
+          "slug": {
+            "description": "URL-safe unique slug (also the workspace key)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrgInvite": {
+        "properties": {
+          "email": {
+            "description": "Invited email (lowercased)",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Expiry (7 days after creation)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "invite_url": {
+            "description": "Dashboard URL the invitee should visit",
+            "type": "string"
+          },
+          "invited_by": {
+            "description": "User ID of the inviter",
+            "type": "string"
+          },
+          "org_id": {
+            "description": "Org the invite is for",
+            "type": "string"
+          },
+          "role": {
+            "description": "Role granted on acceptance",
+            "enum": [
+              "member",
+              "admin"
+            ],
+            "type": "string"
+          },
+          "token": {
+            "description": "Invite token (single use)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrgMember": {
+        "properties": {
+          "email": {
+            "description": "Member email",
+            "type": "string"
+          },
+          "joined_at": {
+            "description": "When the member joined",
+            "format": "date-time",
+            "type": "string"
+          },
+          "role": {
+            "description": "Member role",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          },
+          "user_id": {
+            "description": "Member user ID",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PortInfo": {
+        "properties": {
+          "label": {
+            "description": "User-assigned label (declared ports only)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listening": {
+            "description": "Whether something is currently listening on this port in the guest",
+            "type": "boolean"
+          },
+          "port": {
+            "description": "Guest TCP port",
+            "type": "integer"
+          },
+          "proxy_url": {
+            "description": "Authenticated proxy path (/v1/sandboxes/{id}/proxy/{port}/)",
+            "type": "string"
+          },
+          "source": {
+            "description": "user = explicitly declared; detected = auto-discovered listening socket",
+            "enum": [
+              "user",
+              "detected"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Sandbox": {
+        "description": "A Firecracker microVM sandbox. secret.* metadata keys are redacted from all responses.",
+        "properties": {
+          "boot_mode": {
+            "description": "How the sandbox booted",
+            "enum": [
+              "cold",
+              "warm",
+              "snapshot",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boot_ms": {
+            "description": "Boot duration in milliseconds",
+            "type": "integer"
+          },
+          "cpu": {
+            "description": "vCPU count (may be overridden to match the template's baked snapshot)",
+            "type": "integer"
+          },
+          "created_at": {
+            "description": "Creation timestamp",
+            "format": "date-time",
+            "type": "string"
+          },
+          "from_snapshot": {
+            "description": "Snapshot ID this sandbox was restored from, if any",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guest_ip": {
+            "description": "Guest IP inside its /30 subnet",
+            "type": "string"
+          },
+          "host_tap": {
+            "description": "Host-side TAP/netns identifier",
+            "type": "string"
+          },
+          "id": {
+            "description": "Sandbox UUID",
+            "type": "string"
+          },
+          "mac": {
+            "description": "Guest NIC MAC address",
+            "type": "string"
+          },
+          "memory_mb": {
+            "description": "Memory in MiB (may be overridden to match the template's baked snapshot)",
+            "type": "integer"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Free-form string metadata; metadata.workspace is stamped server-side",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "Current lifecycle status",
+            "enum": [
+              "creating",
+              "running",
+              "paused",
+              "stopping",
+              "deleted",
+              "failed",
+              "hibernated"
+            ],
+            "type": "string"
+          },
+          "template": {
+            "description": "Template the sandbox was created from (e.g. base, code-interpreter)",
+            "type": "string"
+          },
+          "vsock_cid": {
+            "description": "vsock context ID for guest-agent communication",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SandboxEvent": {
+        "description": "A lifecycle event from the sandbox event bus (e.g. sandbox.created, sandbox.paused, sandbox.resumed).",
+        "properties": {
+          "data": {
+            "description": "Event-specific payload",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "sandbox_id": {
+            "description": "Sandbox the event belongs to",
+            "type": "string"
+          },
+          "timestamp": {
+            "description": "When the event occurred",
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "description": "Event type (dotted name)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SnapshotInfo": {
+        "description": "A snapshot as recorded in the control-plane registry.",
+        "properties": {
+          "created_at": {
+            "description": "RFC3339 UTC creation time (empty string if unknown)",
+            "type": "string"
+          },
+          "id": {
+            "description": "Snapshot ID",
+            "type": "string"
+          },
+          "sandbox_id": {
+            "description": "Source sandbox ID",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Snapshot size in bytes, when known",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "template": {
+            "description": "Template of the source sandbox, when known",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace": {
+            "description": "Owning workspace",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SnapshotResult": {
+        "description": "Result of creating a snapshot on the agent.",
+        "properties": {
+          "created_at": {
+            "description": "Snapshot creation time",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "New snapshot UUID",
+            "type": "string"
+          },
+          "mem_path": {
+            "description": "Agent-local path of the memory file",
+            "type": "string"
+          },
+          "sandbox_id": {
+            "description": "Source sandbox ID",
+            "type": "string"
+          },
+          "state_path": {
+            "description": "Agent-local path of the VM state file",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "StatusHibernated": {
+        "properties": {
+          "status": {
+            "const": "hibernated",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "StatusRunning": {
+        "properties": {
+          "status": {
+            "const": "running",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SuspendedError": {
+        "properties": {
+          "detail": {
+            "description": "Human-readable explanation",
+            "type": "string"
+          },
+          "error": {
+            "description": "Short error code message",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Template": {
+        "description": "A template in the catalog: a baked microVM rootfs + Firecracker snapshot that sandboxes boot from. Globals are first-party and non-deletable; custom templates are owned by one workspace",
+        "properties": {
+          "base": {
+            "description": "Base image/stack summary (e.g. \"ubuntu:24.04 + mise\")",
+            "type": "string"
+          },
+          "category": {
+            "description": "Catalog category (e.g. base, data, agents, custom)",
+            "type": "string"
+          },
+          "cpu": {
+            "description": "vCPUs baked into the template snapshot (sandboxes on this template run at exactly this size)",
+            "type": "integer"
+          },
+          "description": {
+            "description": "Human-readable description",
+            "type": "string"
+          },
+          "is_global": {
+            "description": "True for first-party curated templates (non-deletable)",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "Display label",
+            "type": "string"
+          },
+          "memory_mb": {
+            "description": "RAM in MiB baked into the template snapshot",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Unique template name",
+            "type": "string"
+          },
+          "rootfs_path": {
+            "description": "Canonical agent-local rootfs path (synthesized: /var/lib/pandastack/templates/<name>/rootfs.ext4)",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Provisioned rootfs.ext4 size in bytes",
+            "format": "int64",
+            "type": "integer"
+          },
+          "tools": {
+            "description": "Notable pre-installed tools/runtimes",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "workspace": {
+            "description": "Owning workspace for custom templates (omitted for globals)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "rootfs_path",
+          "size_bytes",
+          "cpu",
+          "memory_mb",
+          "is_global"
+        ],
+        "type": "object"
+      },
+      "TemplateBuild": {
+        "description": "A template build job. Server-side (Cloud Build) builds have ids prefixed \"tb_\" and omit the timing/bytes fields; agent-direct builds include them",
+        "properties": {
+          "bytes": {
+            "description": "Uploaded rootfs tarball size in bytes (agent-direct rootfs uploads only)",
+            "format": "int64",
+            "type": "integer"
+          },
+          "cpu": {
+            "description": "vCPUs baked into the snapshot",
+            "type": "integer"
+          },
+          "ended_at": {
+            "description": "Build end time (agent-direct builds only)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "description": "Failure detail when status is failed",
+            "type": "string"
+          },
+          "id": {
+            "description": "Build id (\"tb_…\" for server-side builds)",
+            "type": "string"
+          },
+          "image_ref": {
+            "description": "OCI image ingested by the build (when applicable)",
+            "type": "string"
+          },
+          "memory_mb": {
+            "description": "RAM in MiB baked into the snapshot",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Target template name",
+            "type": "string"
+          },
+          "owner_workspace": {
+            "description": "Workspace that initiated the build (agent-direct builds only)",
+            "type": "string"
+          },
+          "size_mb": {
+            "description": "Target rootfs size in MiB",
+            "type": "integer"
+          },
+          "started_at": {
+            "description": "Build start time (agent-direct builds only)",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "description": "Build status",
+            "enum": [
+              "queued",
+              "building",
+              "running",
+              "done",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "type": "object"
+      },
+      "TemplateBuildRequest": {
+        "description": "Form fields for POST /v1/templates/build. Exactly one of dockerfile, image_ref, or rootfs must be provided. With dockerfile, every additional multipart FILE field is a build-context file keyed by its field name (the path inside the build context)",
+        "properties": {
+          "cpu": {
+            "deprecated": true,
+            "description": "Deprecated: accepted for compatibility but ignored — every template runs 8 burstable vCPUs (CPU bills by active seconds; RAM is the only template knob)",
+            "type": "string"
+          },
+          "dockerfile": {
+            "description": "Dockerfile content — triggers the server-side Cloud Build path (build id prefixed \"tb_\"); no local Docker needed",
+            "type": "string"
+          },
+          "image_ref": {
+            "description": "OCI image reference in the trusted registry for the agent to pull and flatten to a rootfs (preferred over rootfs upload)",
+            "type": "string"
+          },
+          "kernel": {
+            "description": "Guest kernel image (agent path only; default vmlinux-5.10)",
+            "type": "string"
+          },
+          "memory_mb": {
+            "description": "RAM in MiB to bake into the snapshot, 128..65536 (default 1024)",
+            "type": "string"
+          },
+          "name": {
+            "description": "Template name, [a-zA-Z0-9._-], max 64 chars (required)",
+            "type": "string"
+          },
+          "replace": {
+            "description": "\"true\" to overwrite an existing template you own (agent path; otherwise 409)",
+            "type": "string"
+          },
+          "rootfs": {
+            "description": "Legacy: inline rootfs tarball (tar/tar.gz) upload",
+            "format": "binary",
+            "type": "string"
+          },
+          "size_mb": {
+            "description": "Target rootfs ext4 size in MiB, max 16384 (default 1024)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "TokenCreated": {
+        "properties": {
+          "created_at": {
+            "description": "Creation time",
+            "format": "date-time",
+            "type": "string"
+          },
+          "label": {
+            "description": "Optional label (omitted when empty)",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Masked identifier used for listing/revocation",
+            "type": "string"
+          },
+          "token": {
+            "description": "Full pds_ API token — shown only once",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TokenItem": {
+        "properties": {
+          "created_at": {
+            "description": "Creation time",
+            "format": "date-time",
+            "type": "string"
+          },
+          "label": {
+            "description": "Optional label (omitted when empty)",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Masked token identifier (e.g. pds_ab12cd34)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Volume": {
+        "description": "A persistent volume: a per-workspace ext4 image on one agent host, attachable to sandboxes at create time",
+        "properties": {
+          "name": {
+            "description": "Volume name (unique per workspace)",
+            "type": "string"
+          },
+          "size_bytes": {
+            "description": "Provisioned size in bytes",
+            "format": "int64",
+            "type": "integer"
+          },
+          "size_mb": {
+            "description": "Size in MiB (integer-truncated from size_bytes)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "size_mb",
+          "size_bytes"
+        ],
+        "type": "object"
+      },
+      "VolumeCreateRequest": {
+        "description": "Body for POST /v1/volumes",
+        "properties": {
+          "name": {
+            "description": "Volume name, [a-zA-Z0-9._-], max 64 chars (required)",
+            "type": "string"
+          },
+          "size_mb": {
+            "description": "Size in MiB; default 256, hard max 65536",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "VolumeHeadroomError": {
+        "description": "507 host storage headroom response: the host's oversubscription budget or free-space reserve would be exceeded",
+        "properties": {
+          "error": {
+            "description": "Always \"insufficient host storage headroom\"",
+            "type": "string"
+          },
+          "free_reserve_bytes": {
+            "description": "Free-space reserve the host refuses to dip below",
+            "format": "int64",
+            "type": "integer"
+          },
+          "fs_free_bytes": {
+            "description": "Volumes filesystem free bytes",
+            "format": "int64",
+            "type": "integer"
+          },
+          "fs_size_bytes": {
+            "description": "Volumes filesystem total size in bytes",
+            "format": "int64",
+            "type": "integer"
+          },
+          "hint": {
+            "description": "Suggested remediation (retry; scheduler will pick another host)",
+            "type": "string"
+          },
+          "oversub_factor": {
+            "description": "Allowed oversubscription multiple of the filesystem size",
+            "type": "number"
+          },
+          "provisioned_bytes": {
+            "description": "Total bytes already provisioned to volumes on this host",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Which headroom check failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "reason",
+          "hint"
+        ],
+        "type": "object"
+      },
+      "VolumeMount": {
+        "properties": {
+          "name": {
+            "description": "Volume name",
+            "type": "string"
+          },
+          "read_only": {
+            "description": "Mount read-only",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "DatabaseMetricPoint": {
+        "type": "object",
+        "required": [
+          "ts",
+          "cpu_pct",
+          "mem_bytes",
+          "net_rx_bytes",
+          "net_tx_bytes",
+          "disk_rd_bytes",
+          "disk_wr_bytes"
+        ],
+        "properties": {
+          "ts": {
+            "type": "string",
+            "description": "Bucket start (ClickHouse UTC, 'YYYY-MM-DD HH:MM:SS[.fff]')."
+          },
+          "cpu_pct": {
+            "type": "number",
+            "format": "float",
+            "description": "Average CPU utilization in the bucket, 0-100."
+          },
+          "mem_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Average guest working-set bytes in the bucket."
+          },
+          "net_rx_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes received in the bucket."
+          },
+          "net_tx_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes transmitted in the bucket."
+          },
+          "disk_rd_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes read from disk in the bucket."
+          },
+          "disk_wr_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes written to disk in the bucket."
+          }
+        }
+      },
+      "DatabaseMetrics": {
+        "type": "object",
+        "required": [
+          "range",
+          "bucket",
+          "bucket_seconds",
+          "from",
+          "to",
+          "points",
+          "empty"
+        ],
+        "properties": {
+          "range": {
+            "type": "string",
+            "enum": [
+              "1h",
+              "24h",
+              "7d",
+              "30d"
+            ]
+          },
+          "bucket": {
+            "type": "string",
+            "enum": [
+              "15s",
+              "1m",
+              "5m",
+              "30m",
+              "2h"
+            ]
+          },
+          "bucket_seconds": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatabaseMetricPoint"
+            }
+          },
+          "empty": {
+            "type": "boolean",
+            "description": "True when the pipeline is wired but no samples exist yet in the window."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "description": "pds_... API token",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "url": "https://pandastack.ai"
+    },
+    "description": "REST API for PandaStack — Firecracker microVM sandboxes, managed Postgres, git-driven apps, serverless functions, and outbound webhooks. Authenticate with a pds_ bearer token from the dashboard's API Tokens page.",
+    "title": "PandaStack API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/databases": {
+      "get": {
+        "operationId": "listDatabases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "count": {
+                      "description": "Number of items.",
+                      "type": "integer"
+                    },
+                    "items": {
+                      "items": {
+                        "$ref": "#/components/schemas/DatabaseInfo"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "count"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Databases in the workspace (connection fields are not included in list items)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Agent unreachable."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List all managed databases in the caller's workspace",
+        "tags": [
+          "Databases"
+        ]
+      },
+      "post": {
+        "operationId": "createDatabase",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatabaseCreateRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseInfo"
+                }
+              }
+            },
+            "description": "Database sandbox accepted. Poll GET /v1/databases/{id} until status is \"running\" (connection credentials appear then)."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid size (valid: 1g, 4g, 16g)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set (unauthenticated)."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Failed to decode the agent's sandbox response."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Agent error while creating the underlying sandbox."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Provision a new managed PostgreSQL 16 database (async; returns 202 with status \"provisioning\")",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}": {
+      "delete": {
+        "operationId": "deleteDatabase",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Database deleted; backup archive cleanup runs best-effort."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "A clone of this database is still provisioning from its backups — retry once the clone is running."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Agent delete failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database host transiently unreachable (agent restarting) — retry shortly. Includes Retry-After: 15.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Destroy a database and purge its GCS backup archive (irreversible)",
+        "tags": [
+          "Databases"
+        ]
+      },
+      "get": {
+        "operationId": "getDatabase",
+        "parameters": [
+          {
+            "description": "Database id (doubles as the sandbox id).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseInfo"
+                }
+              }
+            },
+            "description": "Database details. When the VM is up but Postgres has not published credentials yet, status reports \"provisioning\" with an error hint. A failed database includes failover_available/failover_reason/failover_eta_seconds."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found (or the sandbox is not a managed-database template)."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Agent unreachable."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a database with connection info (credentials populated once running)",
+        "tags": [
+          "Databases"
+        ]
+      },
+      "patch": {
+        "operationId": "updateDatabase",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "always_on": {
+                    "description": "true opts the database out of idle auto-suspend.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseInfo"
+                }
+              }
+            },
+            "description": "Refreshed database view reflecting the update."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid body, or no updatable fields provided (supported: always_on)."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Config update failed on the agent."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update mutable database config (currently only always_on, the idle auto-suspend opt-out)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/metrics": {
+      "get": {
+        "operationId": "getDatabaseMetrics",
+        "summary": "Historical CPU + memory + net/disk I/O for one database (bucketed time series)",
+        "tags": [
+          "Databases"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Database id."
+          },
+          {
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1h",
+                "24h",
+                "7d",
+                "30d"
+              ],
+              "default": "24h"
+            },
+            "description": "Window to query. Defaults to 24h."
+          },
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "15s",
+                "1m",
+                "5m",
+                "30m",
+                "2h"
+              ]
+            },
+            "description": "Bucket size. Optional — defaults per range (1h→15s, 24h→5m, 7d→30m, 30d→2h). Bucket must be allowed for the range (buckets that would produce >~360 points are rejected)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Time series of samples. If the metrics pipeline is not wired or has no samples in the window yet, `empty` is true and `points` is empty (still 200).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseMetrics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid range or bucket.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Workspace not set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Database not found (or not owned by this workspace).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/databases/{id}/connection": {
+      "get": {
+        "operationId": "getDatabaseConnection",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "broker_token": {
+                      "description": "Per-database broker bearer token (pds_pg_…).",
+                      "type": "string"
+                    },
+                    "broker_url": {
+                      "description": "Public REST query-broker base URL (this API's /proxy path).",
+                      "type": "string"
+                    },
+                    "connection_url": {
+                      "description": "Native postgres:// URL via SNI routing (<id>.db.pandastack.ai:5432).",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "connection_url",
+                    "broker_url",
+                    "broker_token"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Connection details."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Postgres not ready (still provisioning, hibernated, or failed)."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Return just the connection details of a running database",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/failover": {
+      "post": {
+        "operationId": "failoverDatabase",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "force": {
+                    "description": "true turns the healthy-primary refusal into a planned migration. Default false.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseInfo"
+                }
+              }
+            },
+            "description": "Failover started in the background (status \"restoring\"). Poll GET /v1/databases/{id}; the database may briefly report not-found while the restore provisions. Password rotates on restore."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found (or not owned by this workspace)."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Without force: database is running (use force for planned migration), hibernated (use wake), or in another non-failed state; or a failover for this database is already in progress."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No restorable GCS archive — primary left untouched."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox lookup failed."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Failover requires a multi-node deployment."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No healthy agent available to fail over to (primary left untouched)."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Rebuild a failed database on a healthy agent from its GCS archive (preflight-then-act, async 202)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/logs": {
+      "get": {
+        "operationId": "getDatabaseLogs",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of trailing log lines (values outside 10–2000 fall back to 300).",
+            "in": "query",
+            "name": "lines",
+            "required": false,
+            "schema": {
+              "default": 300,
+              "maximum": 2000,
+              "minimum": 10,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "logs": {
+                      "description": "Raw log text.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "logs"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Log tail (falls back to initdb.log, then a placeholder message)."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "In-guest log command failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database is not running."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Tail of the in-guest postgresql.log (snapshot, not streaming)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/proxy/{path}": {
+      "get": {
+        "operationId": "databaseBrokerProxyGet",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Broker path tail (e.g. v1/health).",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Broker response, passed through verbatim."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Wrong credential type or broker rejected the token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Broker unreachable."
+          }
+        },
+        "security": [],
+        "summary": "GET variant of the query-broker proxy (e.g. broker health); same auth and routing as POST",
+        "tags": [
+          "Databases"
+        ]
+      },
+      "post": {
+        "description": "Catch-all proxy to the database's in-VM query broker (port 5544). ALL HTTP methods are forwarded, and the bare /v1/databases/{id}/proxy root also routes here. This path BYPASSES the unified API auth: the credential is the per-database broker_token (Bearer pds_pg_…) returned by GET /v1/databases/{id}, enforced by the in-VM broker itself. The primary broker endpoint is POST {proxy}/v1/query. Auto-wakes a suspended database on connect.",
+        "operationId": "databaseBrokerProxy",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Broker path tail (e.g. v1/query).",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "description": "Broker request body (e.g. {\"query\": \"SELECT ...\", \"params\": [...]} for v1/query); validated by the in-VM broker.",
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Broker response, passed through verbatim."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An account API key (pds_…) was sent instead of the per-database broker_token (pds_pg_…), or the broker rejected the token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found (id is not a managed database)."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Broker unreachable (transient failures during wake are retried once internally)."
+          }
+        },
+        "security": [],
+        "summary": "HTTP proxy to the in-VM REST query broker (auth: per-database broker_token, NOT the account API key)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/reset-credentials": {
+      "post": {
+        "operationId": "resetDatabaseCredentials",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/DatabaseInfo"
+                    },
+                    {
+                      "properties": {
+                        "detail": {
+                          "description": "Where to fetch the new credentials.",
+                          "type": "string"
+                        },
+                        "id": {
+                          "description": "Database id.",
+                          "type": "string"
+                        },
+                        "status": {
+                          "description": "\"rotated\".",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "detail"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Rotation complete. Normally a full DatabaseInfo with the fresh credentials; if the credential read-back raced, a fallback {id, status: \"rotated\", detail} object — fetch the new values via GET /v1/databases/{id}. Any error status means the rotation did not complete and retrying is safe."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database is not running, or a credential rotation for it is already in progress."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Credential reset requires a multi-node deployment."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Rotation failed to reach the host agent or was incomplete — safe to retry."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Could not resolve the database's host agent — retry shortly."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Rotate the postgres password and broker token of a RUNNING database (synchronous; 200 carries the new, verified credentials)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/stats": {
+      "get": {
+        "operationId": "getDatabaseStats",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatabaseStats"
+                }
+              }
+            },
+            "description": "Live stats snapshot. Polling this endpoint does NOT keep an idle database awake."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Workspace not set."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "In-guest stats command failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database is not running, or Postgres is not ready (no stats available)."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Live PostgreSQL stats (size, connections, uptime, cache hit ratio, disk usage)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/databases/{id}/wake": {
+      "post": {
+        "operationId": "wakeDatabase",
+        "parameters": [
+          {
+            "description": "Database id.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "description": "Human-readable next step (poll GET /v1/databases/{id}).",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Database id.",
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "Always \"waking\".",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "status",
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Wake accepted."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Wake failed on the agent."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database host transiently unreachable — retry shortly. Includes Retry-After: 15.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Explicitly wake a hibernated database (async 202; poll GET until running)",
+        "tags": [
+          "Databases"
+        ]
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "description": "For JWT/stub callers, returns the user's orgs and auto-provisions a personal org on first login (403 for disposable email domains). For pds_ API-token callers, returns a minimal identity with empty orgs.",
+        "operationId": "getMe",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            },
+            "description": "Identity and org context"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Disposable/temporary email addresses cannot be provisioned a workspace (first login only)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Current user identity, orgs, and active org",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/me/current-org": {
+      "post": {
+        "description": "Requires user (JWT/stub) auth and membership in the target org.",
+        "operationId": "setCurrentOrg",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "org_id": {
+                    "description": "Org to make current",
+                    "format": "uuid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "org_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "org_id": {
+                      "description": "The now-current org",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Current org switched"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Bad JSON"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller is not a member of that org"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Switch the caller's active org",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/me/tokens": {
+      "get": {
+        "description": "Requires user (JWT/stub) auth. Tokens are returned masked (prefix only).",
+        "operationId": "listApiTokens",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "items": {
+                      "items": {
+                        "$ref": "#/components/schemas/TokenItem"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Masked tokens"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT required (pds_ API tokens rejected)"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List API tokens for the caller's workspace",
+        "tags": [
+          "Auth"
+        ]
+      },
+      "post": {
+        "description": "Requires user (JWT/stub) auth. The full token value is returned only once, at creation.",
+        "operationId": "createApiToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "label": {
+                    "description": "Optional human-readable label",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreated"
+                }
+              }
+            },
+            "description": "Token created (full value shown once)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT required (pds_ API tokens rejected)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Token store error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Mint a new pds_ API token",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/me/tokens/{prefix}": {
+      "delete": {
+        "description": "Requires user (JWT/stub) auth. Prefix is the masked identifier returned by list/create (e.g. pds_ab12cd34).",
+        "operationId": "revokeApiToken",
+        "parameters": [
+          {
+            "description": "Token prefix (masked form, e.g. pds_ab12cd34)",
+            "in": "path",
+            "name": "prefix",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Token revoked"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT required (pds_ API tokens rejected)"
+          },
+          "404": {
+            "description": "No token with that prefix in the caller's workspace"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Revoke an API token by its prefix",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/metrics/overview": {
+      "get": {
+        "description": "Workspace is injected server-side from the token. Step whitelisted to 15s/1m/5m/1h. Returns 503 when the metrics store is unavailable.",
+        "operationId": "getMetricsOverview",
+        "responses": {
+          "200": {
+            "description": "Aggregated metrics"
+          },
+          "503": {
+            "description": "Metrics store unavailable"
+          }
+        },
+        "summary": "Workspace metrics overview (boot times, exec counts) from ClickHouse",
+        "tags": [
+          "Metrics"
+        ]
+      }
+    },
+    "/v1/metrics/sandbox/{id}": {
+      "get": {
+        "operationId": "getSandboxMetrics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metric series"
+          },
+          "503": {
+            "description": "Metrics store unavailable"
+          }
+        },
+        "summary": "Per-sandbox metrics series",
+        "tags": [
+          "Metrics"
+        ]
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "description": "Requires user (JWT/stub) auth; pds_ API tokens are rejected with 401.",
+        "operationId": "listOrgs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Org"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Orgs the caller belongs to, each with the caller's role"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required (API tokens rejected)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List orgs the current user is a member of",
+        "tags": [
+          "Orgs"
+        ]
+      },
+      "post": {
+        "description": "Requires user (JWT/stub) auth. Slug defaults to a sanitized form of the name; reserved and malformed slugs are rejected.",
+        "operationId": "createOrg",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "name": {
+                    "description": "Display name (required)",
+                    "type": "string"
+                  },
+                  "slug": {
+                    "description": "Optional URL-safe slug: 2-40 chars, lowercase [a-z0-9], single hyphens; reserved names rejected. Derived from name when omitted.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "Org created; caller is owner and it becomes the current org if it is their first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Bad JSON, missing name, or invalid/reserved slug"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Org ownership limit reached for the caller's plan"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Disposable/temporary email addresses may not create orgs"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Slug already taken"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a new org (caller becomes owner)",
+        "tags": [
+          "Orgs"
+        ]
+      }
+    },
+    "/v1/orgs/invites/{token}/accept": {
+      "post": {
+        "description": "Called by the invitee after login. If the caller's email is known it must match the invited email. Idempotency: a used invite returns 410.",
+        "operationId": "acceptOrgInvite",
+        "parameters": [
+          {
+            "description": "Invite token",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "org_id": {
+                      "description": "Org joined",
+                      "type": "string"
+                    },
+                    "role": {
+                      "description": "Role granted",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Invite accepted; caller joined the org"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invite was for a different email"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invite not found"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invite already used or expired"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Accept an org invite",
+        "tags": [
+          "Orgs"
+        ]
+      }
+    },
+    "/v1/orgs/{id}": {
+      "get": {
+        "description": "Returns the org with the caller's role. Requires membership.",
+        "operationId": "getOrg",
+        "parameters": [
+          {
+            "description": "Org ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Org"
+                }
+              }
+            },
+            "description": "Org details"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found or caller is not a member"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get org details",
+        "tags": [
+          "Orgs"
+        ]
+      }
+    },
+    "/v1/orgs/{id}/members": {
+      "get": {
+        "description": "Requires at least member role in the org.",
+        "operationId": "listOrgMembers",
+        "parameters": [
+          {
+            "description": "Org ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OrgMember"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Members ordered by join time"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller is not a member"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List org members",
+        "tags": [
+          "Orgs"
+        ]
+      },
+      "post": {
+        "description": "Requires admin role. Creates a 7-day invite token and returns the invite URL.",
+        "operationId": "inviteOrgMember",
+        "parameters": [
+          {
+            "description": "Org ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "email": {
+                    "description": "Invitee email (lowercased, required)",
+                    "type": "string"
+                  },
+                  "role": {
+                    "default": "member",
+                    "description": "Role granted on acceptance",
+                    "enum": [
+                      "member",
+                      "admin"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "email"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgInvite"
+                }
+              }
+            },
+            "description": "Invite created"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Bad JSON, missing email, or invalid role"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Seat limit reached for the org's plan"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Insufficient role (admin required)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller is not a member"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Invite a member by email",
+        "tags": [
+          "Orgs"
+        ]
+      }
+    },
+    "/v1/orgs/{id}/members/{user_id}": {
+      "delete": {
+        "description": "Requires admin role. The org owner cannot be removed; admins cannot remove other admins or owners.",
+        "operationId": "removeOrgMember",
+        "parameters": [
+          {
+            "description": "Org ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "User ID of the member to remove",
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Member removed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing user_id or attempt to remove the org owner"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "JWT auth required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Insufficient role, or admin attempting to remove an admin/owner"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller is not a member"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Database error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Remove a member from an org",
+        "tags": [
+          "Orgs"
+        ]
+      }
+    },
+    "/v1/sandboxes": {
+      "get": {
+        "operationId": "listSandboxes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Sandbox"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Array of sandboxes owned by the caller's workspace"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "List failed"
+          }
+        },
+        "summary": "List the caller's sandboxes (workspace-scoped; internal pool/tombstone rows filtered out)",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "post": {
+        "operationId": "createSandbox",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSandboxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sandbox"
+                }
+              }
+            },
+            "description": "Sandbox created and running"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed JSON body or invalid template name"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuspendedError"
+                }
+              }
+            },
+            "description": "Account suspended, or template owned by another workspace"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Create failed"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "No available compute node"
+          },
+          "507": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Host memory admission refused (control plane places elsewhere)"
+          }
+        },
+        "summary": "Create a sandbox (snapshot-restore boot, ~180ms p50)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}": {
+      "delete": {
+        "operationId": "deleteSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Managed sandbox (a database or hosted app VM) — delete it via its owning feature's API instead"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Delete failed"
+          }
+        },
+        "summary": "Delete a sandbox (irreversible; does not wake a hibernated sandbox first)",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "get": {
+        "operationId": "getSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sandbox"
+                }
+              }
+            },
+            "description": "Sandbox (secret.* metadata keys redacted)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found (or owned by another workspace)"
+          }
+        },
+        "summary": "Get a sandbox (does not wake a hibernated sandbox)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/bake-image": {
+      "post": {
+        "operationId": "bakeImage",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "image_name": {
+                    "description": "Name for the baked template image (e.g. app-<app8>-<dep8>)",
+                    "type": "string"
+                  },
+                  "start_unit": {
+                    "description": "systemd unit file contents baked in to start the app on boot",
+                    "type": "string"
+                  },
+                  "workspace": {
+                    "description": "Owning workspace stamped into the image metadata",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "image_name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "image": {
+                      "description": "Baked image name",
+                      "type": "string"
+                    },
+                    "status": {
+                      "const": "baked",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Image baked"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed body"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Bake failed"
+          }
+        },
+        "summary": "Capture the running sandbox's rootfs as a custom template image (rootfs.ext4 + meta.json), optionally baking in a systemd start unit. No memory snapshot — booting the image is an ordinary cold-boot create",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/events": {
+      "get": {
+        "operationId": "getSandboxEvents",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of past events to return/replay",
+            "in": "query",
+            "name": "tail",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Set to 1 to stream as SSE (replays tail, then live `event` events)",
+            "in": "query",
+            "name": "follow",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "events": {
+                      "items": {
+                        "$ref": "#/components/schemas/SandboxEvent"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Past events, or an SSE stream when follow=1"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Event tail failed"
+          }
+        },
+        "summary": "Lifecycle events (created, paused, resumed, hibernated, ...). JSON tail by default; live SSE with ?follow=1",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/exec": {
+      "post": {
+        "operationId": "execCommand",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecResult"
+                }
+              }
+            },
+            "description": "Command result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed body or missing cmd"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found or guest unreachable"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Exec failed"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Auto-wake of hibernated sandbox failed"
+          }
+        },
+        "summary": "Execute a shell command in the guest and wait for completion (auto-wakes a hibernated sandbox)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/exec/pty": {
+      "get": {
+        "operationId": "openPty",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Initial terminal rows",
+            "in": "query",
+            "name": "rows",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Initial terminal columns",
+            "in": "query",
+            "name": "cols",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols — WebSocket PTY session established"
+          },
+          "404": {
+            "description": "Sandbox not found or guest unreachable"
+          }
+        },
+        "summary": "Open an interactive PTY over WebSocket (xterm.js compatible). Client binary frames = stdin; text frames = JSON control ({\"resize\":{\"rows\":N,\"cols\":N}}). Server binary frames = terminal output; text frames = JSON status ({\"exit\":0} or {\"error\":\"...\"}).",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/exec/stream": {
+      "post": {
+        "operationId": "execCommandStream",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "SSE stream. `stdout`/`stderr` events carry {\"chunk\": string}; the terminal `exit` event carries {\"exit_code\": int}; `error` carries {\"error\": string}."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed body or missing cmd"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found or guest unreachable"
+          }
+        },
+        "summary": "Execute a shell command, streaming output as Server-Sent Events (events: stdout, stderr, exit, error)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/exec/ws": {
+      "get": {
+        "operationId": "openExecWebSocket",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching Protocols — WebSocket exec channel established"
+          },
+          "404": {
+            "description": "Sandbox not found or guest unreachable"
+          }
+        },
+        "summary": "Multiplexed exec over one persistent WebSocket. Client text frames: {\"id\",\"cmd\",\"timeout_seconds\"?} or {\"id\",\"cancel\":true}. Server text frames: {\"id\",\"stream\":\"stdout\"|\"stderr\",\"data\"}, {\"id\",\"exit\":int}, {\"id\",\"error\"}. Multiple in-flight commands allowed.",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/fork": {
+      "post": {
+        "operationId": "forkSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set to 1 to force warm (snapshot-restore) fork mode",
+            "in": "query",
+            "name": "warm",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "count": {
+                    "default": 1,
+                    "description": "Number of children to create (default 1)",
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "description": "cold (default) = disk-state fork with fresh boot; warm = snapshot-restore clone",
+                    "enum": [
+                      "cold",
+                      "warm"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForkResult"
+                }
+              }
+            },
+            "description": "Fork result"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Fork failed"
+          }
+        },
+        "summary": "Fork N children that inherit the parent's DISK state (packages, files). Children boot fresh — parent memory/processes are not cloned. mode=warm requests warm-clone",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/fork-tree": {
+      "post": {
+        "operationId": "forkTree",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "count": {
+                    "default": 2,
+                    "description": "Number of children (default 2)",
+                    "type": "integer"
+                  },
+                  "metadata": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Extra metadata stamped onto each child",
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForkResult"
+                }
+              }
+            },
+            "description": "Fork-tree result"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Fork-tree failed"
+          }
+        },
+        "summary": "Snapshot the parent once, then spawn N children in parallel with the parent's memory+disk state and fresh network identities. Children carry fork_tree_id metadata for /promote",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/fs": {
+      "delete": {
+        "operationId": "deletePath",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Absolute guest path to delete",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Delete failed"
+          }
+        },
+        "summary": "Delete a file or directory in the guest",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "get": {
+        "operationId": "readFile",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Absolute guest path to read",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "File contents"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Read failed (e.g. no such file)"
+          }
+        },
+        "summary": "Read a file's raw bytes from the guest filesystem",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "put": {
+        "operationId": "writeFile",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Absolute guest path to write",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "description": "Raw file bytes, max 32 MiB",
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "bytes": {
+                      "description": "Byte count written",
+                      "type": "integer"
+                    },
+                    "path": {
+                      "description": "Guest path written",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Written"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Body too large (>32 MiB) or unreadable"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Write failed"
+          }
+        },
+        "summary": "Write raw request-body bytes to a guest file (32 MiB cap)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/fs/dir": {
+      "get": {
+        "operationId": "listDirectory",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Guest directory path (default /)",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": "/",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "entries": {
+                      "items": {
+                        "$ref": "#/components/schemas/DirEntry"
+                      },
+                      "type": "array"
+                    },
+                    "path": {
+                      "description": "Listed directory",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Directory listing"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "List failed"
+          }
+        },
+        "summary": "List a guest directory (metadata only; does not wake a hibernated sandbox)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/fs/stat": {
+      "get": {
+        "operationId": "statPath",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Guest path to stat",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirEntry"
+                }
+              }
+            },
+            "description": "File/directory metadata"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox or path not found"
+          }
+        },
+        "summary": "Stat a guest path (metadata only; does not wake a hibernated sandbox)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/hibernate": {
+      "post": {
+        "operationId": "hibernateSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusHibernated"
+                }
+              }
+            },
+            "description": "Hibernated"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Hibernate failed (VM is resumed on failure)"
+          }
+        },
+        "summary": "Snapshot memory+state to disk and stop the VM (scale-to-zero; wake restores it)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/lifecycle": {
+      "get": {
+        "operationId": "getSandboxLifecycle",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleInfo"
+                }
+              }
+            },
+            "description": "Lifecycle info"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Lookup failed"
+          }
+        },
+        "summary": "Get lifecycle config (idle TTL, persistence) and current idle time",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "patch": {
+        "operationId": "updateSandboxLifecycle",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "persistent": {
+                    "description": "true exempts the sandbox from the idle reaper entirely.",
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "ttl_seconds": {
+                    "description": "Idle TTL in seconds; 0 disables the idle reaper. Must be non-negative.",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleInfo"
+                }
+              }
+            },
+            "description": "Updated lifecycle info"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed body or negative ttl_seconds"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "summary": "Update idle TTL and/or persistence; returns the merged lifecycle state",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/logs": {
+      "get": {
+        "operationId": "getSandboxLogs",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set to 1 to stream as SSE (replays last ~4 KB then tails)",
+            "in": "query",
+            "name": "follow",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Full log file (text/plain) or SSE stream when follow=1. SSE `line` events carry {\"line\": string}."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found/not running, or log file missing"
+          }
+        },
+        "summary": "Firecracker console/host logs. Plain text by default; SSE tail with ?follow=1 (events: open, line, error)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/pause": {
+      "post": {
+        "operationId": "pauseSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Paused"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Pause failed"
+          }
+        },
+        "summary": "Pause the VM (vCPUs stop; memory stays resident)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/ports": {
+      "get": {
+        "operationId": "listPorts",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PortInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Ports, sorted ascending"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          }
+        },
+        "summary": "List declared and auto-detected listening TCP ports with their proxy URLs (does not wake a hibernated sandbox)",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "post": {
+        "operationId": "declarePort",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "label": {
+                    "description": "Human label (default \"service\")",
+                    "type": "string"
+                  },
+                  "port": {
+                    "description": "Guest TCP port (22 is reserved for the SSH bridge)",
+                    "maximum": 65535,
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "port"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortInfo"
+                }
+              }
+            },
+            "description": "Port declared"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Port out of range or reserved (22)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          }
+        },
+        "summary": "Declare (label) a port so it appears in the port list and gets a stable proxy URL",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/ports/{port}": {
+      "delete": {
+        "operationId": "undeclarePort",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Declared port number",
+            "in": "path",
+            "name": "port",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid port"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          }
+        },
+        "summary": "Remove a declared port label",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/promote": {
+      "post": {
+        "operationId": "promoteForkWinner",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cleanup_siblings": {
+                    "default": false,
+                    "description": "true deletes all other children of the tree",
+                    "type": "boolean"
+                  },
+                  "tree_id": {
+                    "description": "fork_tree_id from the fork-tree children's metadata",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "deleted": {
+                      "description": "Sibling sandbox IDs that were deleted",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "failures": {
+                      "description": "Siblings that failed to delete (only when cleanup_siblings=true)",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": [
+                        "array",
+                        "null"
+                      ]
+                    },
+                    "tree_id": {
+                      "description": "The fork tree ID",
+                      "type": "string"
+                    },
+                    "winner": {
+                      "description": "Winning sandbox ID",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Promotion result"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Promotion failed (e.g. bad tree_id)"
+          }
+        },
+        "summary": "Mark sandbox {id} as the winner of a fork-tree and optionally delete its sibling children",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/proxy/{port}/{path}": {
+      "get": {
+        "operationId": "proxyToPort",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Guest TCP port to proxy to",
+            "in": "path",
+            "name": "port",
+            "required": true,
+            "schema": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Remainder path forwarded to the guest service (may be empty)",
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid port"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not found"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Upstream (guest service) error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Sandbox not running or has no guest IP"
+          },
+          "default": {
+            "description": "Whatever the guest service returns (status, headers, and body are passed through)"
+          }
+        },
+        "summary": "Authenticated HTTP reverse proxy to any guest TCP port (all methods accepted, not just GET). The caller's Authorization header is stripped before reaching the guest. Tokenless alternative: when a preview host suffix is configured, the same port is public at https://{port}-{sandbox_id}.{suffix}/ (the sandbox UUID is the credential)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/resume": {
+      "post": {
+        "operationId": "resumeSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Resumed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resume failed"
+          }
+        },
+        "summary": "Resume a paused VM",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/snapshots": {
+      "post": {
+        "operationId": "createSnapshot",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResult"
+                }
+              }
+            },
+            "description": "Snapshot created"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Snapshot failed"
+          }
+        },
+        "summary": "Create a full snapshot (memory + state + rootfs) of a running sandbox; recorded in the control-plane snapshot registry",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/start": {
+      "post": {
+        "operationId": "startSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusRunning"
+                }
+              }
+            },
+            "description": "Running"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Wake failed"
+          }
+        },
+        "summary": "Public alias for wake",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/stop": {
+      "post": {
+        "operationId": "stopSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusHibernated"
+                }
+              }
+            },
+            "description": "Hibernated"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Hibernate failed"
+          }
+        },
+        "summary": "Public alias for hibernate",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/sandboxes/{id}/wake": {
+      "post": {
+        "operationId": "wakeSandbox",
+        "parameters": [
+          {
+            "description": "Sandbox UUID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusRunning"
+                }
+              }
+            },
+            "description": "Running"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Wake failed"
+          }
+        },
+        "summary": "Wake a hibernated sandbox (restore from its snapshot). Most guest-using calls auto-wake, so this is rarely required",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/snapshots": {
+      "get": {
+        "operationId": "listSnapshots",
+        "parameters": [
+          {
+            "description": "Filter to snapshots of one sandbox",
+            "in": "query",
+            "name": "sandbox_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "snapshots": {
+                      "items": {
+                        "$ref": "#/components/schemas/SnapshotInfo"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Snapshot list"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "List failed"
+          }
+        },
+        "summary": "List the caller's snapshots, newest first (max 500)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/snapshots/{id}": {
+      "delete": {
+        "operationId": "deleteSnapshot",
+        "parameters": [
+          {
+            "description": "Snapshot ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "deleted": {
+                      "description": "ID of the deleted snapshot",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Deleted"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Delete failed"
+          }
+        },
+        "summary": "Delete a snapshot: removes the registry row and the durable GCS copy",
+        "tags": [
+          "Sandboxes"
+        ]
+      },
+      "get": {
+        "operationId": "getSnapshot",
+        "parameters": [
+          {
+            "description": "Snapshot ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotInfo"
+                }
+              }
+            },
+            "description": "Snapshot"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Lookup failed"
+          }
+        },
+        "summary": "Get one snapshot from the registry (workspace-scoped)",
+        "tags": [
+          "Sandboxes"
+        ]
+      }
+    },
+    "/v1/templates": {
+      "get": {
+        "operationId": "listTemplates",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Template"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Bare JSON array of templates (globals sorted first, then by name)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Catalog query failed"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List the template catalog (global first-party templates plus the caller's workspace-owned custom templates)",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/templates/build": {
+      "post": {
+        "operationId": "buildTemplate",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateBuildRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateBuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateBuild"
+                }
+              }
+            },
+            "description": "Content-hash dedup hit: an identical successful build already exists for this workspace; its terminal record is returned without rebuilding"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateBuild"
+                }
+              }
+            },
+            "description": "Build accepted and running asynchronously. Server-side (dockerfile) builds return an id prefixed \"tb_\"; agent-direct builds return the agent build state"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid name ([a-zA-Z0-9._-], max 64), size_mb > 16384, cpu outside 1..64, memory_mb outside 128..65536, unreadable build-context file, or neither image_ref nor rootfs provided"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller has no workspace resolved"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Replace refused: template is public/seeded, or owned by another workspace"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Template already exists and replace=true was not passed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Build could not be recorded or staged"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "dockerfile path requested but server-side build is not enabled on this deployment"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Build a custom template. Three mutually-exclusive inputs: dockerfile (server-side Cloud Build, self-serve), image_ref (agent pulls an OCI image from the trusted registry), or rootfs (legacy inline tarball upload). Async: poll GET /v1/templates/builds/{id}",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/templates/builds": {
+      "get": {
+        "operationId": "listTemplateBuilds",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateBuild"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Bare JSON array of build states"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List agent-side template builds (proxied to an agent; in-memory build ledger, unordered)",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/templates/builds/{id}": {
+      "get": {
+        "operationId": "getTemplateBuild",
+        "parameters": [
+          {
+            "description": "Build id (\"tb_…\" for server-side builds, agent-generated id otherwise)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateBuild"
+                }
+              }
+            },
+            "description": "Build status record"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Build not found (or owned by another workspace)"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get one build's status. Ids prefixed \"tb_\" (server-side Cloud Build) are served from the control-plane DB (workspace-scoped); other ids proxy to the agent's in-memory ledger",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/templates/builds/{id}/logs": {
+      "get": {
+        "operationId": "streamTemplateBuildLogs",
+        "parameters": [
+          {
+            "description": "Build id (\"tb_…\" server-side builds tail the DB log; agent ids proxy through)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "\"1\" or \"true\" to tail live until the build reaches a terminal status (done/failed)",
+            "in": "query",
+            "name": "follow",
+            "required": false,
+            "schema": {
+              "enum": [
+                "1",
+                "true"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "description": "SSE frames: `data: <log line>`, closed by `event: done` / `data: end`",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "SSE stream of log lines"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Build not found (or owned by another workspace)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Streaming unsupported by the connection"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Stream a build's logs as Server-Sent Events (each line as `data: <line>`; terminal frame `event: done` / `data: end`). Without follow, emits the log captured so far and closes",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/templates/{name}": {
+      "delete": {
+        "operationId": "deleteTemplate",
+        "parameters": [
+          {
+            "description": "Template name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted (no body)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Caller has no workspace resolved"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Global (first-party) templates cannot be deleted"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Template not found (also returned when it is owned by another workspace)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Delete failed"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete a workspace-owned custom template (registry row plus best-effort rootfs/snapshot purge on every agent); global templates cannot be deleted",
+        "tags": [
+          "Templates"
+        ]
+      },
+      "get": {
+        "operationId": "getTemplate",
+        "parameters": [
+          {
+            "description": "Template name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Template"
+                }
+              }
+            },
+            "description": "The template"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Template not found (also returned for another workspace's private template)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Catalog query failed"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get a single template by name (custom templates are only visible to their owning workspace)",
+        "tags": [
+          "Templates"
+        ]
+      }
+    },
+    "/v1/volumes": {
+      "get": {
+        "operationId": "listVolumes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Volume"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Bare JSON array of volumes, sorted by name"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List the caller's persistent volumes (per-workspace namespace). Note: volumes are host-pinned and listing is per-agent — the response reflects the agent the request was routed to",
+        "tags": [
+          "Volumes"
+        ]
+      },
+      "post": {
+        "operationId": "createVolume",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VolumeCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Volume"
+                }
+              }
+            },
+            "description": "Volume created and formatted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid name ([a-zA-Z0-9._-], max 64) or size_mb > 65536"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Volume with this name already exists in the workspace"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Volume image allocation or mkfs failed"
+          },
+          "507": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeHeadroomError"
+                }
+              }
+            },
+            "description": "Insufficient host storage headroom (oversubscription budget or free-space reserve); retry — the scheduler will pick another host or capacity will be added"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Create a persistent ext4 volume (attachable to sandboxes at create time; mounted in-guest as /dev/vdb, /dev/vdc, …). Routed to the agent with the most storage headroom and pinned to that host for the volume's life",
+        "tags": [
+          "Volumes"
+        ]
+      }
+    },
+    "/v1/volumes/{name}": {
+      "delete": {
+        "operationId": "deleteVolume",
+        "parameters": [
+          {
+            "description": "Volume name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted (no body)"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Invalid name ([a-zA-Z0-9._-], max 64)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Volume not found on the routed agent"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Backing file removal failed"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete a volume (removes the backing ext4 image; irreversible)",
+        "tags": [
+          "Volumes"
+        ]
+      },
+      "get": {
+        "operationId": "getVolume",
+        "parameters": [
+          {
+            "description": "Volume name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Volume"
+                }
+              }
+            },
+            "description": "The volume"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Volume not found on the routed agent"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get one volume by name (per-agent lookup: a 404 may mean the volume lives on a different host)",
+        "tags": [
+          "Volumes"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://api.pandastack.ai"
+    }
+  ]
+}

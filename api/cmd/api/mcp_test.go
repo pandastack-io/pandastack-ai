@@ -89,15 +89,15 @@ func TestMCPToolsList(t *testing.T) {
 		t.Fatalf("unexpected error: %+v", resp.Error)
 	}
 	tools := resp.Result.(map[string]any)["tools"].([]any)
-	if len(tools) < 13 {
-		t.Fatalf("tools = %d, want >= 13", len(tools))
+	if len(tools) < 11 {
+		t.Fatalf("tools = %d, want >= 11", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range tools {
 		names[tl.(map[string]any)["name"].(string)] = true
 	}
 	for _, want := range []string{"create_sandbox", "run_command", "read_file", "write_file",
-		"create_database", "delete_database", "deploy_app", "list_templates"} {
+		"create_database", "delete_database", "list_templates"} {
 		if !names[want] {
 			t.Errorf("missing tool %s", want)
 		}

@@ -7,25 +7,23 @@ import (
 	"strings"
 )
 
+// healthzResponse is the public health payload. It intentionally exposes ONLY a
+// coarse status — never the names of internal dependencies or their env vars. Leaking which backends the service runs, and under what
+// configuration keys, is information disclosure that helps an attacker map the
+// system; the readiness signal a load balancer needs is just ok / unhealthy.
 type healthzResponse struct {
-	Status string            `json:"status"`
-	Checks map[string]string `json:"checks"`
+	Status string `json:"status"`
 }
 
+// healthzStatus computes liveness/readiness. The DB DSN is the only hard gate:
+// without it the service can't serve, so it reports 503/unhealthy and an
+// orchestrator will pull it out of rotation. The dependency is never named in
+// the returned payload.
 func healthzStatus() (int, healthzResponse) {
-	checks := map[string]string{
-		"PANDASTACK_DB_DSN": "ok",
-	}
-	status := "ok"
-	code := http.StatusOK
-
 	if strings.TrimSpace(getenv("PANDASTACK_DB_DSN")) == "" {
-		checks["PANDASTACK_DB_DSN"] = "missing"
-		status = "unhealthy"
-		code = http.StatusServiceUnavailable
+		return http.StatusServiceUnavailable, healthzResponse{Status: "unhealthy"}
 	}
-
-	return code, healthzResponse{Status: status, Checks: checks}
+	return http.StatusOK, healthzResponse{Status: "ok"}
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {

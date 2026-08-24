@@ -2,9 +2,6 @@
 #
 # Build: docker build -f Dockerfile -t pandastack/api:dev ./api
 # Run:   docker run -p 8080:8080 -e PANDASTACK_AGENT_URL=... pandastack/api:dev
-#
-# Stripe metering is NOT compiled in. To enable, build with:
-#   docker build --build-arg GO_BUILD_TAGS=stripe -f Dockerfile -t pandastack/api:cloud ./api
 
 FROM golang:1.25-alpine AS build
 WORKDIR /src
