@@ -32,7 +32,7 @@
             "type": "boolean"
           },
           "template": {
-            "description": "Template name (e.g. base, code-interpreter, agent, browser). Public templates or ones owned by the caller's workspace only",
+            "description": "Template name (e.g. base, code-interpreter, agent). Public templates or ones owned by the caller's workspace only",
             "type": "string"
           },
           "ttl_seconds": {

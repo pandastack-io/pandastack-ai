@@ -6,7 +6,7 @@
 #
 # What this does:
 #  1. Installs system packages (certbot, cloudflare plugin, curl, jq)
-#  2. Obtains a wildcard TLS cert for *.db.pandastack.ai via Cloudflare DNS-01
+#  2. Obtains a wildcard TLS cert for *.$DOMAIN via Cloudflare DNS-01
 #  3. Downloads the db-proxy binary from GCS
 #  4. Writes a systemd service + environment file
 #  5. Sets up cert auto-renewal with SIGHUP reload
@@ -15,22 +15,24 @@
 #   CLOUDFLARE_API_TOKEN   Cloudflare API token with Zone.DNS edit permission
 #   PANDASTACK_DB_DSN      postgres://... (control-plane PG DSN)
 #   PANDASTACK_NODE_TOKEN  shared X-Node-Token for agent auth
-#   GCS_BUCKET             GCS bucket name (e.g. pandastacknode-builds)
+#   GCS_BUCKET             GCS bucket holding the db-proxy binary
+#   DOMAIN                 base domain you serve databases on (e.g. db.example.com)
+#   CERTBOT_EMAIL          registration email for Let's Encrypt
 #
 # Optional:
 #   BINARY_PATH            path inside bucket (default bin/pandastack-db-proxy)
-#   DOMAIN                 base domain (default db.pandastack.ai)
 #   LISTEN_ADDR            TCP listen (default :5432)
-#   SNI_SUFFIX             SNI suffix (default .db.pandastack.ai)
+#   SNI_SUFFIX             SNI suffix (default .$DOMAIN)
 #   METRICS_ADDR           Prometheus metrics (default :5433)
 
 set -euo pipefail
 
-DOMAIN="${DOMAIN:-db.pandastack.ai}"
+: "${DOMAIN:?set DOMAIN to the base domain you serve databases on, e.g. db.example.com}"
+: "${CERTBOT_EMAIL:?set CERTBOT_EMAIL to your Let's Encrypt registration email}"
 WILDCARD_DOMAIN="*.${DOMAIN}"
 CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 BINARY_DEST="/usr/local/bin/pandastack-db-proxy"
-GCS_BUCKET="${GCS_BUCKET:-pandastacknode-builds}"
+: "${GCS_BUCKET:?set GCS_BUCKET to the bucket holding the db-proxy binary}"
 BINARY_PATH="${BINARY_PATH:-bin/pandastack-db-proxy}"
 SERVICE_NAME="pandastack-db-proxy"
 ENV_FILE="/etc/pandastack-db-proxy.env"
@@ -61,7 +63,7 @@ if [ ! -f "${CERT_DIR}/fullchain.pem" ]; then
     certbot certonly \
         --non-interactive \
         --agree-tos \
-        --email "ops@pandastack.ai" \
+        --email "$CERTBOT_EMAIL" \
         --dns-cloudflare \
         --dns-cloudflare-credentials "$CF_CREDS_FILE" \
         --dns-cloudflare-propagation-seconds 30 \
@@ -97,7 +99,7 @@ PANDASTACK_DB_DSN=${PANDASTACK_DB_DSN}
 PANDASTACK_NODE_TOKEN=${PANDASTACK_NODE_TOKEN}
 PANDASTACK_CERT_DIR=${CERT_DIR}
 PANDASTACK_LISTEN_ADDR=${LISTEN_ADDR:-:5432}
-PANDASTACK_SNI_SUFFIX=${SNI_SUFFIX:-.db.pandastack.ai}
+PANDASTACK_SNI_SUFFIX=${SNI_SUFFIX:-.${DOMAIN}}
 PANDASTACK_METRICS_ADDR=${METRICS_ADDR:-:5433}
 EOF
 chmod 600 "$ENV_FILE"

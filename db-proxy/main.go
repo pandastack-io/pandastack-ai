@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -51,22 +52,24 @@ import (
 // ---------------------------------------------------------------------------
 
 type config struct {
-	DSN         string
-	NodeToken   string
-	CertDir     string
-	ListenAddr  string
-	SNISuffix   string
-	MetricsAddr string
+	DSN              string
+	NodeToken        string
+	CertDir          string
+	ListenAddr       string
+	PooledListenAddr string
+	SNISuffix        string
+	MetricsAddr      string
 }
 
 func configFromEnv() config {
 	return config{
-		DSN:         mustEnv("PANDASTACK_DB_DSN"),
-		NodeToken:   mustEnv("PANDASTACK_NODE_TOKEN"),
-		CertDir:     envOr("PANDASTACK_CERT_DIR", "/etc/letsencrypt/live/db.pandastack.ai"),
-		ListenAddr:  envOr("PANDASTACK_LISTEN_ADDR", ":5432"),
-		SNISuffix:   envOr("PANDASTACK_SNI_SUFFIX", ".db.pandastack.ai"),
-		MetricsAddr: envOr("PANDASTACK_METRICS_ADDR", ":5433"),
+		DSN:              mustEnv("PANDASTACK_DB_DSN"),
+		NodeToken:        mustEnv("PANDASTACK_NODE_TOKEN"),
+		CertDir:          envOr("PANDASTACK_CERT_DIR", "/etc/letsencrypt/live/db.pandastack.ai"),
+		ListenAddr:       envOr("PANDASTACK_LISTEN_ADDR", ":5432"),
+		PooledListenAddr: envOr("PANDASTACK_POOLED_LISTEN_ADDR", ":6432"),
+		SNISuffix:        envOr("PANDASTACK_SNI_SUFFIX", ".db.pandastack.ai"),
+		MetricsAddr:      envOr("PANDASTACK_METRICS_ADDR", ":5433"),
 	}
 }
 
@@ -185,7 +188,7 @@ type catalog struct {
 	log       *slog.Logger
 }
 
-// agentInfo returns the agent endpoint for a sandbox.
+// agentEndpoint returns the agent endpoint for a sandbox.
 func (c *catalog) agentEndpoint(ctx context.Context, sandboxID string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -212,6 +215,27 @@ func (c *catalog) agentEndpoint(ctx context.Context, sandboxID string) (string, 
 	return endpoint, nil
 }
 
+// dbStatus reads the sandbox's status + template so the proxy can distinguish
+// "unknown id" from "asleep, needs waking" from "failed" (TUSK T2.3). ok=false
+// when the row doesn't exist. A hibernated DB keeps its lease renewed, so
+// agentEndpoint usually still resolves for it; this is the authoritative
+// state signal.
+func (c *catalog) dbStatus(ctx context.Context, sandboxID string) (status, template string, ok bool) {
+	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	err := c.db.QueryRowContext(dctx,
+		`SELECT status, template FROM sandboxes WHERE id = $1`, sandboxID).Scan(&status, &template)
+	if err != nil {
+		return "", "", false
+	}
+	return status, template, true
+}
+
+// isDBTemplate reports whether a template name is a managed-Postgres tier.
+func isDBTemplate(t string) bool {
+	return strings.HasPrefix(t, "postgres-16")
+}
+
 // ---------------------------------------------------------------------------
 // Postgres SSLRequest / TLS handshake
 // ---------------------------------------------------------------------------
@@ -219,6 +243,11 @@ func (c *catalog) agentEndpoint(ctx context.Context, sandboxID string) (string, 
 const (
 	pgSSLRequestLen  = 8
 	pgSSLRequestCode = 80877103 // (1234 << 16 | 5679)
+
+	// tunnelUpgradeTimeout bounds the agent's pg-tunnel Upgrade handshake,
+	// sized to absorb a wake-on-connect memory-snapshot restore of an
+	// auto-suspended database (see openAgentTunnel).
+	tunnelUpgradeTimeout = 30 * time.Second
 )
 
 // readSSLRequest reads the 8-byte Postgres SSLRequest startup packet and
@@ -248,12 +277,18 @@ func readSSLRequest(conn net.Conn) error {
 // Tunnel: HTTP Upgrade to agent
 // ---------------------------------------------------------------------------
 
-func openAgentTunnel(ctx context.Context, agentEndpoint, sandboxID, nodeToken string, log *slog.Logger) (net.Conn, error) {
+func openAgentTunnel(ctx context.Context, agentEndpoint, sandboxID, nodeToken string, pooled bool, log *slog.Logger) (net.Conn, error) {
 	base, err := url.Parse(agentEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse agent endpoint: %w", err)
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/sandboxes/" + sandboxID + "/pg-tunnel"
+	// TUSK T2.1: the pooled listener targets the guest's pgbouncer (6432); the
+	// direct listener targets Postgres (5432, the agent default). The agent
+	// validates ?port against its own allowlist.
+	if pooled {
+		base.RawQuery = "port=6432"
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	if err != nil {
@@ -283,7 +318,14 @@ func openAgentTunnel(ctx context.Context, agentEndpoint, sandboxID, nodeToken st
 	bw := bufio.NewWriter(tcpConn)
 	br := bufio.NewReader(tcpConn)
 
-	tcpConn.SetDeadline(time.Now().Add(15 * time.Second))
+	// Wake-on-connect budget: the agent's activityTracker auto-wakes a
+	// hibernated (auto-suspended) database inline before answering this
+	// pg-tunnel upgrade — a memory-snapshot restore that is normally ~2-3s
+	// but can run longer under host contention or a cold path. A running
+	// database answers in <100ms regardless of this ceiling, so a generous
+	// deadline only affects the first connection after an idle period (the
+	// intended "slightly slower first query" UX) and never a warm one.
+	tcpConn.SetDeadline(time.Now().Add(tunnelUpgradeTimeout))
 	if err := req.Write(bw); err != nil {
 		tcpConn.Close()
 		return nil, fmt.Errorf("write upgrade request: %w", err)
@@ -351,9 +393,11 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 	if sandboxID == "" {
 		log.Warn("could not extract sandbox id", "sni", sni)
 		metricErrors.Add(1)
+		writePGError(tlsConn, sqlstateUnknownDB, "unknown database endpoint (bad hostname)")
+		drainStartup(tlsConn)
 		return
 	}
-	log = log.With("sandbox", sandboxID, "sni", sni)
+	log = log.With("sandbox", sandboxID, "sni", sni, "pooled", p.pooled)
 	log.Info("connection accepted")
 
 	// Step 4: catalog lookup
@@ -361,22 +405,70 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 	agentEndpoint, err := p.catalog.agentEndpoint(ctx, sandboxID)
 	cancel()
 	if err != nil {
-		log.Warn("catalog lookup failed", "err", err)
+		// No live lease. Distinguish unknown-id from failed from
+		// host-lost so the client sees an actionable message (T2.2/T2.3).
+		sctx, scancel := context.WithTimeout(context.Background(), 3*time.Second)
+		status, template, exists := p.catalog.dbStatus(sctx, sandboxID)
+		scancel()
 		metricLookupErr.Add(1)
 		metricErrors.Add(1)
-		// Send a Postgres ErrorResponse so psql shows a meaningful message
-		sendPGError(tlsConn, "sandbox not found or not running: "+sandboxID)
+		switch {
+		case !exists || !isDBTemplate(template):
+			log.Warn("unknown database", "err", err)
+			writePGError(tlsConn, sqlstateUnknownDB, "database not found: "+sandboxID)
+		case status == "failed":
+			writePGError(tlsConn, sqlstateCannotConnect, "database is in a failed state — restore it from the dashboard (failover)")
+		default:
+			log.Warn("database host unavailable", "status", status, "err", err)
+			writePGError(tlsConn, sqlstateCannotConnectNow,
+				"database is asleep and its host is currently unavailable — wake it from the dashboard or retry shortly")
+		}
+		drainStartup(tlsConn)
 		return
 	}
 
-	// Step 5: open HTTP Upgrade tunnel to agent
-	ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
-	agentConn, err := openAgentTunnel(ctx, agentEndpoint, sandboxID, p.nodeToken, log)
-	cancel()
-	if err != nil {
-		log.Error("tunnel failed", "err", err)
+	// TUSK T2.3: if the row says hibernated, fire an explicit wake (single-
+	// flight per DB) before dialing, so the retry loop below lands on a waking
+	// VM rather than racing the agent's own auto-wake.
+	if status, _, exists := p.catalog.dbStatus(context.Background(), sandboxID); exists &&
+		(status == "hibernated" || status == "paused" || status == "hibernating") {
+		log.Info("database asleep — waking", "status", status)
+		p.wakes.wake(context.Background(), agentEndpoint, sandboxID, p.nodeToken, log)
+	}
+
+	// Step 5: open the tunnel with wake-aware retry (T2.3). Attempt 1 carries
+	// the full budget (absorbs an inline restore); retries 2..N use a short
+	// budget with 200ms×2^i backoff, bounded so total stays under ~25s (below
+	// the common client connect_timeout).
+	var agentConn net.Conn
+	overall, cancelAll := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancelAll()
+	const attempts = 5
+	for i := 0; i < attempts; i++ {
+		budget := 5 * time.Second
+		if i == 0 {
+			budget = tunnelUpgradeTimeout + 5*time.Second
+		}
+		actx, acancel := context.WithTimeout(overall, budget)
+		agentConn, err = openAgentTunnel(actx, agentEndpoint, sandboxID, p.nodeToken, p.pooled, log)
+		acancel()
+		if err == nil {
+			break
+		}
+		if i < attempts-1 {
+			select {
+			case <-time.After(200 * time.Millisecond << i):
+			case <-overall.Done():
+				i = attempts // fall through to the error below
+			}
+		}
+	}
+	if err != nil || agentConn == nil {
+		log.Error("tunnel failed after retries", "err", err)
 		metricErrors.Add(1)
-		sendPGError(tlsConn, "could not connect to postgres sandbox: "+err.Error())
+		writePGError(tlsConn, sqlstateCannotConnectNow,
+			"database is still starting — retry in a few seconds")
+		drainStartup(tlsConn)
 		return
 	}
 	defer agentConn.Close()
@@ -394,20 +486,6 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 	log.Info("tunnel closed")
 }
 
-// sendPGError writes a minimal Postgres ErrorResponse (message type 'E')
-// so the client receives a human-readable error instead of a raw close.
-func sendPGError(w io.Writer, msg string) {
-	// Format: 'E' | int32(len) | 'M' | message | '\0' | '\0'
-	body := []byte{'M'}
-	body = append(body, []byte(msg)...)
-	body = append(body, 0, 0) // field terminator + message terminator
-	pkt := make([]byte, 1+4+len(body))
-	pkt[0] = 'E'
-	binary.BigEndian.PutUint32(pkt[1:5], uint32(4+len(body)))
-	copy(pkt[5:], body)
-	w.Write(pkt) //nolint:errcheck
-}
-
 // ---------------------------------------------------------------------------
 // Proxy
 // ---------------------------------------------------------------------------
@@ -415,9 +493,29 @@ func sendPGError(w io.Writer, msg string) {
 type proxy struct {
 	tlsBase   *tls.Config
 	catalog   *catalog
+	wakes     *wakeGate
 	nodeToken string
 	sniSuffix string
-	log       *slog.Logger
+	// pooled routes to the guest's pgbouncer (6432) instead of Postgres
+	// (5432) — the same code serves both the direct and pooled listeners
+	// (TUSK T2.1). All resolution and wake logic is identical; only the
+	// tunnel's target port differs.
+	pooled bool
+	log    *slog.Logger
+}
+
+// clientAddr extracts the client's IP from a net.Conn's RemoteAddr. ok=false
+// for a non-IP address (should never happen for a TCP listener).
+func clientAddr(c net.Conn) (netip.Addr, bool) {
+	ta, ok := c.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	a, ok := netip.AddrFromSlice(ta.IP)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return a.Unmap(), true
 }
 
 func (p *proxy) sandboxIDFromSNI(sni string) string {
@@ -485,32 +583,52 @@ func main() {
 	}
 
 	cat := &catalog{db: db, nodeToken: cfg.NodeToken, log: log}
+	wakes := newWakeGate()
 
 	p := &proxy{
-		tlsBase:   tlsCfg,
-		catalog:   cat,
-		nodeToken: cfg.NodeToken,
-		sniSuffix: cfg.SNISuffix,
-		log:       log,
+		tlsBase: tlsCfg, catalog: cat, wakes: wakes,
+		nodeToken: cfg.NodeToken, sniSuffix: cfg.SNISuffix, pooled: false, log: log,
+	}
+	// Pooled proxy → pgbouncer 6432. Same everything, different target port
+	// and its own log tag. (TUSK T2.1)
+	pooledProxy := &proxy{
+		tlsBase: tlsCfg, catalog: cat, wakes: wakes,
+		nodeToken: cfg.NodeToken, sniSuffix: cfg.SNISuffix, pooled: true,
+		log: log.With("listener", "pooled"),
 	}
 
 	// Metrics server (non-TLS)
 	go serveMetrics(cfg.MetricsAddr, log)
 
-	// TCP listener on :5432
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Direct listener (:5432).
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		log.Error("listen failed", "err", err, "addr", cfg.ListenAddr)
 		os.Exit(1)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	go p.serve(ctx, ln)
+
+	// Pooled listener (:6432) — best-effort: if the port is unavailable, the
+	// direct proxy still serves. Override with PANDASTACK_POOLED_LISTEN_ADDR;
+	// empty disables pooling.
+	var pooledLn net.Listener
+	if cfg.PooledListenAddr != "" {
+		pooledLn, err = net.Listen("tcp", cfg.PooledListenAddr)
+		if err != nil {
+			log.Error("pooled listen failed (pooling disabled)", "err", err, "addr", cfg.PooledListenAddr)
+		} else {
+			go pooledProxy.serve(ctx, pooledLn)
+		}
+	}
 
 	<-ctx.Done()
 	log.Info("shutting down")
 	ln.Close()
+	if pooledLn != nil {
+		pooledLn.Close()
+	}
 	db.Close()
 }
