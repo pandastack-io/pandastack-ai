@@ -2,6 +2,7 @@
 package api
 
 import (
+	"strconv"
 	"math"
 	"net/http"
 	"sort"
@@ -23,7 +24,14 @@ func registerBootStats(mux *http.ServeMux, mgr *sandbox.Manager) {
 			}
 		}
 		ws := r.Header.Get("X-Fcs-Workspace")
-		events, err := mgr.ListBootEvents(r.Context(), ws, 1000)
+		// since (unix seconds): scope the aggregate window (e.g. current month).
+		var since int64
+		if v := r.URL.Query().Get("since"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				since = n
+			}
+		}
+		events, err := mgr.ListBootEvents(r.Context(), ws, 1000, since)
 		if err != nil {
 			writeErr(w, 500, err)
 			return
@@ -104,8 +112,13 @@ func stats(v []int64) bucket {
 		return bucket{}
 	}
 	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	// Nearest-rank percentile: the smallest value at or below which at least
+	// p of the samples fall, i.e. the ceil(p*N)'th (1-based) element. The
+	// earlier form rounded over len(v)-1, which shifted P50 up by one rank —
+	// the median of 10 evenly spaced boot times read as the 6th sample instead
+	// of the 5th, over-reporting typical cold-start latency.
 	pick := func(p float64) int64 {
-		idx := int(math.Floor(p*float64(len(v)-1) + 0.5))
+		idx := int(math.Ceil(p*float64(len(v)))) - 1
 		if idx < 0 {
 			idx = 0
 		}

@@ -37,8 +37,8 @@ func registerPGInfo(mux *http.ServeMux, mgr *sandbox.Manager) {
 			writeErr(w, http.StatusNotFound, errString("sandbox not found"))
 			return
 		}
-		if sb.Template != pgTunnelTemplate {
-			writeErr(w, http.StatusForbidden, errString("sandbox is not a postgres-16 instance"))
+		if !sandbox.IsManagedDBTemplate(sb.Template) {
+			writeErr(w, http.StatusForbidden, errString("sandbox is not a managed database instance"))
 			return
 		}
 		if sb.Status != sandbox.StatusRunning {

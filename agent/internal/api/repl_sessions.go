@@ -25,13 +25,79 @@ import (
 // Each session spawns a long-lived interpreter in the guest. State (variables,
 // imports) persists across cells, exactly like a Jupyter kernel.
 
-const pyKernelSrc = `import sys, json, io, contextlib, traceback, ast
+// pyKernelSrc is a self-contained persistent Python kernel that speaks a
+// length-prefixed protocol over stdin/stdout (one JSON line per cell). State
+// (variables, imports) persists across cells, exactly like Jupyter.
+//
+// Beyond stdout/stderr/exit, each response carries a `results` array of MIME
+// bundles: {"type": "image/png", "data": "<b64>"}, {"type": "text/html", ...},
+// etc. — so a data-analyst agent gets a chart object back, not stdout to parse.
+// Rich output is best-effort: if IPython is importable (it is in the
+// code-interpreter template) the last expression is rendered via its
+// DisplayFormatter; matplotlib figures are captured headlessly. On templates
+// without those deps, it degrades to a text/plain repr() with no error.
+const pyKernelSrc = `import sys, json, io, contextlib, traceback, ast, base64
+
+# --- best-effort rich-output setup (no hard dependency) -------------------
+_HAVE_IPY = False
+try:
+    from IPython.core.formatters import DisplayFormatter
+    _FMT = DisplayFormatter()
+    _HAVE_IPY = True
+except Exception:
+    _FMT = None
+
+# Force matplotlib into a non-interactive backend so plt.show() never blocks;
+# we harvest open figures after each cell instead.
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+except Exception:
+    pass
+
+def _fig_pngs():
+    out = []
+    try:
+        import matplotlib.pyplot as plt
+        for num in plt.get_fignums():
+            fig = plt.figure(num)
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            out.append(base64.b64encode(buf.getvalue()).decode('ascii'))
+        plt.close('all')
+    except Exception:
+        pass
+    return out
+
+def _format_value(val):
+    # Returns a MIME bundle dict for a value, or None to skip.
+    if val is None:
+        return None
+    if _HAVE_IPY:
+        try:
+            data, _meta = _FMT.format(val)
+            if data:
+                # IPython may hand back bytes for image/* — base64 them.
+                bundle = {}
+                for mime, payload in data.items():
+                    if isinstance(payload, bytes):
+                        bundle[mime] = base64.b64encode(payload).decode('ascii')
+                    else:
+                        bundle[mime] = payload
+                return bundle
+        except Exception:
+            pass
+    try:
+        return {'text/plain': repr(val)}
+    except Exception:
+        return None
+
 ns = {'__name__':'__main__'}
+
 def run_cell(src):
-    out = io.StringIO(); err = io.StringIO(); rc = 0
+    out = io.StringIO(); err = io.StringIO(); rc = 0; results = []
     try:
         tree = ast.parse(src, mode='exec')
-        # If last stmt is an expression, evaluate and print its repr().
         last_expr = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             last_expr = ast.Expression(tree.body[-1].value)
@@ -41,13 +107,17 @@ def run_cell(src):
                 exec(compile(tree, '<cell>', 'exec'), ns)
             if last_expr is not None:
                 val = eval(compile(last_expr, '<cell>', 'eval'), ns)
-                if val is not None:
-                    print(repr(val))
+                bundle = _format_value(val)
+                if bundle:
+                    results.append(bundle)
     except SystemExit as e:
         rc = int(e.code) if isinstance(e.code, int) else 1
     except BaseException:
         traceback.print_exc(file=err); rc = 1
-    return {'stdout': out.getvalue(), 'stderr': err.getvalue(), 'exit': rc}
+    # Harvest any matplotlib figures the cell produced (incl. via plt.show()).
+    for png in _fig_pngs():
+        results.append({'image/png': png})
+    return {'stdout': out.getvalue(), 'stderr': err.getvalue(), 'exit': rc, 'results': results}
 
 w = sys.stdout
 sys.stdout.write('__FCS_READY__\n'); sys.stdout.flush()
@@ -74,20 +144,48 @@ type replSession struct {
 	CreatedAt time.Time `json:"created_at"`
 	Cells     int       `json:"cells"`
 
-	mu    sync.Mutex      `json:"-"`
-	proc  *guest.ProcSession `json:"-"`
-	stdin *bufio.Writer      `json:"-"`
-	out   *bufio.Reader      `json:"-"`
+	mu       sync.Mutex         `json:"-"`
+	proc     *guest.ProcSession `json:"-"`
+	stdin    *bufio.Writer      `json:"-"`
+	out      *bufio.Reader      `json:"-"`
+	lastUsed time.Time          `json:"-"`
 }
 
 var (
 	rsMu sync.Mutex
 	rs   = map[string]*replSession{} // key = sandboxID + "/" + sessionID
+
+	// replIdleTTL reaps a kernel session that hasn't run a cell in this long,
+	// so the in-memory map doesn't leak kernels for dead/abandoned sandboxes.
+	replIdleTTL    = 30 * time.Minute
+	replReaperOnce sync.Once
 )
 
 func rsKey(sb, sid string) string { return sb + "/" + sid }
 
+// startREPLReaper drops idle kernel sessions on a timer. Idempotent.
+func startREPLReaper() {
+	replReaperOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for range t.C {
+				cutoff := time.Now().Add(-replIdleTTL)
+				rsMu.Lock()
+				for k, v := range rs {
+					if v.lastUsed.Before(cutoff) {
+						_ = v.proc.Close()
+						delete(rs, k)
+					}
+				}
+				rsMu.Unlock()
+			}
+		}()
+	})
+}
+
 func registerREPLSessions(mux *http.ServeMux, mgr *sandbox.Manager) {
+	startREPLReaper()
 	mux.HandleFunc("POST /sandboxes/{id}/repl/sessions", func(w http.ResponseWriter, r *http.Request) {
 		sbid := r.PathValue("id")
 		gc, err := mgr.Guest(sbid)
@@ -116,6 +214,7 @@ func registerREPLSessions(mux *http.ServeMux, mgr *sandbox.Manager) {
 		rec := &replSession{
 			ID: sid, SandboxID: sbid, Language: "python",
 			CreatedAt: time.Now().UTC(),
+			lastUsed:  time.Now(),
 			proc:      sess,
 			stdin:     bufio.NewWriter(sess.Stdin),
 			out:       bufio.NewReaderSize(sess.Stdout, 64<<10),
@@ -236,6 +335,7 @@ func runCell(rec *replSession, code string, timeout time.Duration) (map[string]a
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.Cells++
+	rec.lastUsed = time.Now()
 	// Length-prefixed frame: "<n>\n<code-bytes>"
 	header := fmt.Sprintf("%d\n", len(code))
 	if _, err := rec.stdin.WriteString(header); err != nil {

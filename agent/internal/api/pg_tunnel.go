@@ -21,16 +21,39 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/pandastack/agent/internal/sandbox"
 )
 
-// pgTunnelPort is the Postgres port inside every postgres-16 sandbox.
+// pgTunnelPort is the default Postgres port inside every postgres-16 sandbox.
 const pgTunnelPort = 5432
 
-// pgTunnelTemplate is the only template allowed through the pg-tunnel.
-const pgTunnelTemplate = "postgres-16"
+// pgBouncerPort is the guest's pgbouncer (transaction pooler) port. The db-proxy's
+// pooled listener requests it via ?port=6432 (TUSK T2.1).
+const pgBouncerPort = 6432
+
+// resolveTunnelPort picks the guest port from an optional ?port query param,
+// allow-listed to the two ports we actually expose inside a managed-DB guest:
+// Postgres (5432) and pgbouncer (6432). Anything else (or absent) → 5432. This
+// prevents the tunnel from being used as a generic guest-port SSRF primitive.
+func resolveTunnelPort(raw string) (int, bool) {
+	if raw == "" {
+		return pgTunnelPort, true
+	}
+	switch raw {
+	case "5432":
+		return pgTunnelPort, true
+	case "6432":
+		return pgBouncerPort, true
+	default:
+		return 0, false
+	}
+}
+
+// Only managed-database templates (postgres-16 + its RAM tiers) are allowed
+// through the pg-tunnel — see sandbox.IsManagedDBTemplate.
 
 func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 	mux.HandleFunc("GET /sandboxes/{id}/pg-tunnel", func(w http.ResponseWriter, r *http.Request) {
@@ -48,8 +71,8 @@ func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 			writeErr(w, http.StatusNotFound, errString("sandbox not found"))
 			return
 		}
-		if sb.Template != pgTunnelTemplate {
-			writeErr(w, http.StatusForbidden, fmt.Errorf("pg-tunnel only available for %s sandboxes (got %q)", pgTunnelTemplate, sb.Template))
+		if !sandbox.IsManagedDBTemplate(sb.Template) {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("pg-tunnel only available for managed database sandboxes (got %q)", sb.Template))
 			return
 		}
 		if sb.Status != sandbox.StatusRunning {
@@ -61,8 +84,16 @@ func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 			return
 		}
 
-		// Dial guest_ip:5432
-		pgAddr := fmt.Sprintf("%s:%d", sb.GuestIP, pgTunnelPort)
+		// TUSK T2.1: optional ?port selects the pooler (6432) vs Postgres (5432),
+		// allow-listed so the tunnel can't reach arbitrary guest ports.
+		port, ok := resolveTunnelPort(r.URL.Query().Get("port"))
+		if !ok {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unsupported tunnel port %q (allowed: 5432, 6432)", r.URL.Query().Get("port")))
+			return
+		}
+
+		// Dial guest_ip:<port>
+		pgAddr := net.JoinHostPort(sb.GuestIP, strconv.Itoa(port))
 		pgConn, err := net.DialTimeout("tcp", pgAddr, 10*time.Second)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, fmt.Errorf("dial postgres: %w", err))

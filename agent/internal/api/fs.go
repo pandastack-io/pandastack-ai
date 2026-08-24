@@ -5,13 +5,29 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/pandastack/agent/internal/sandbox"
 )
 
+// isNoSuchFile reports whether a guest read error means the path doesn't exist,
+// so the handler can return 404 (not 500). The guest read surfaces the shell's
+// "No such file or directory" for a missing path.
+func isNoSuchFile(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "no such file") || strings.Contains(m, "not found")
+}
+
 func registerFS(mux *http.ServeMux, mgr *sandbox.Manager) {
 	// GET /sandboxes/{id}/fs?path=/etc/hostname
 	mux.HandleFunc("GET /sandboxes/{id}/fs", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.CheckRunnable(r.Context(), r.PathValue("id")); err != nil {
+			writeErr(w, 409, err)
+			return
+		}
 		gc, err := mgr.Guest(r.PathValue("id"))
 		if err != nil {
 			writeErr(w, 404, err)
@@ -20,7 +36,13 @@ func registerFS(mux *http.ServeMux, mgr *sandbox.Manager) {
 		path := r.URL.Query().Get("path")
 		data, err := gc.ReadFile(r.Context(), path)
 		if err != nil {
-			writeErr(w, 500, err)
+			// A missing file is a 404, not a server error — the guest read
+			// surfaces "No such file or directory" for it.
+			if isNoSuchFile(err) {
+				writeErr(w, 404, err)
+			} else {
+				writeErr(w, 500, err)
+			}
 			return
 		}
 		w.Header().Set("content-type", "application/octet-stream")
@@ -29,6 +51,10 @@ func registerFS(mux *http.ServeMux, mgr *sandbox.Manager) {
 
 	// PUT /sandboxes/{id}/fs?path=/tmp/foo  (body = raw bytes)
 	mux.HandleFunc("PUT /sandboxes/{id}/fs", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.CheckRunnable(r.Context(), r.PathValue("id")); err != nil {
+			writeErr(w, 409, err)
+			return
+		}
 		gc, err := mgr.Guest(r.PathValue("id"))
 		if err != nil {
 			writeErr(w, 404, err)
