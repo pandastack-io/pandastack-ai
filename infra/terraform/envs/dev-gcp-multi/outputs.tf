@@ -40,7 +40,7 @@ output "cloudsql_url" {
 
 output "db_proxy_ip" {
   value       = google_compute_address.db_proxy.address
-  description = "Static public IP of the DB Proxy VM (*.db.pandastack.ai points here)."
+  description = "Static public IP of the DB Proxy VM (*.db.<cloudflare_zone_name> points here)."
 }
 
 output "db_proxy_instance" {

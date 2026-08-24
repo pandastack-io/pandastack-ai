@@ -2,8 +2,8 @@
 //
 // One secret per value the edge/agent instances fetch at boot. The node role
 // (main.tf) is scoped to "${local.name}-*" so every secret here is readable by
-// edge + agent instances. GitHub-App / Supabase values are created even when
-// blank so they can be populated later via `aws secretsmanager put-secret-value`.
+// edge + agent instances. Supabase values are created even when blank so they
+// can be populated later via `aws secretsmanager put-secret-value`.
 
 # Shared node token (agent <-> edge auth). Generated if not supplied.
 resource "random_password" "node_token" {
@@ -57,26 +57,6 @@ resource "aws_secretsmanager_secret_version" "supabase" {
     supabase_url      = var.supabase_url
     supabase_jwks_url = var.supabase_jwks_url
     supabase_anon_key = var.supabase_anon_key
-  })
-}
-
-# GitHub App env (apps feature). Single JSON blob fetched by the edge.
-resource "aws_secretsmanager_secret" "github_env" {
-  name                    = "${local.name}-github-env"
-  recovery_window_in_days = 0
-  tags                    = local.tags
-}
-
-resource "aws_secretsmanager_secret_version" "github_env" {
-  secret_id = aws_secretsmanager_secret.github_env.id
-  secret_string = jsonencode({
-    GITHUB_APP_ID              = var.github_app_id
-    GITHUB_APP_INSTALLATION_ID = var.github_app_installation_id
-    GITHUB_APP_SLUG            = var.github_app_slug
-    GITHUB_APP_CLIENT_ID       = var.github_app_client_id
-    GITHUB_APP_CLIENT_SECRET   = var.github_app_client_secret
-    GITHUB_APP_PRIVATE_KEY     = var.github_app_private_key
-    GITHUB_APP_WEBHOOK_SECRET  = var.github_app_webhook_secret
   })
 }
 

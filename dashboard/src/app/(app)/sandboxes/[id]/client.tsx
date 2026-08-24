@@ -9,16 +9,15 @@ import {
   getAuthHeaders,
   previewHostSuffix,
   type DirEntry,
-  type ExecResult,
   type Metrics,
   type Port,
   type Sandbox,
-  type SandboxEvent,
 } from "@/lib/api";
 import { useConfirm } from "@/components/ui";
+import { formatResources } from "@/lib/resources";
 import { createClient } from "@/lib/supabase/client";
 
-type Tab = "files" | "exec" | "terminal" | "repl" | "ports" | "lsp" | "logs" | "metrics" | "events" | "raw";
+type Tab = "files" | "terminal" | "ports" | "logs" | "metrics" | "raw";
 
 export default function Detail({
   params,
@@ -31,6 +30,7 @@ export default function Detail({
   const [tab, setTab] = useState<Tab>("files");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const confirm = useConfirm();
 
   const refresh = useCallback(() => {
     api
@@ -41,7 +41,7 @@ export default function Detail({
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 3000);
+    const t = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
     return () => clearInterval(t);
   }, [refresh]);
 
@@ -86,7 +86,7 @@ export default function Detail({
             <div className="mt-2 flex flex-wrap gap-4">
               <Kv k="template" v={s.template} />
               <Kv k="guest_ip" v={s.guest_ip} />
-              <Kv k="cpu / mem" v={`${s.cpu}C / ${s.memory_mb} MiB`} />
+              <Kv k="resources" v={formatResources(s.memory_mb)} />
               <Kv k="vsock" v={String(s.vsock_cid)} />
             </div>
           )}
@@ -96,14 +96,14 @@ export default function Detail({
           <div className="flex flex-wrap gap-2 shrink-0">
             {s.status === "running" && (
               <>
-                <ActionBtn label="pause" busy={busy} onClick={() => act("pause", () => fetch(`${API_BASE}/v1/sandboxes/${id}/pause`, { method: "POST" }).then((r) => r.ok || Promise.reject(r.statusText)))} />
-                <ActionBtn label="snapshot" busy={busy} onClick={() => act("snapshot", () => fetch(`${API_BASE}/v1/sandboxes/${id}/snapshots`, { method: "POST" }).then((r) => r.json()))} />
+                <ActionBtn label="pause" busy={busy} onClick={() => act("pause", () => api.pause(id))} />
+                <ActionBtn label="snapshot" busy={busy} onClick={() => act("snapshot", () => api.snapshot(id))} />
                 <ActionBtn label="fork ×2" busy={busy} onClick={() => act("fork", () => api.fork(id, 2))} />
-                <ActionBtn label="Stop" busy={busy} onClick={() => act("stop", () => api.stop(id))} />
+                <ActionBtn label="Stop" busy={busy} onClick={async () => { const ok = await confirm({ title: "Stop this sandbox?", description: "The running VM will be stopped. Unsaved in-memory state is lost.", confirmLabel: "Stop", destructive: true }); if (ok) act("stop", () => api.stop(id)); }} />
               </>
             )}
             {s.status === "paused" && (
-              <ActionBtn label="resume" busy={busy} onClick={() => act("resume", () => fetch(`${API_BASE}/v1/sandboxes/${id}/resume`, { method: "POST" }).then((r) => r.ok || Promise.reject(r.statusText)))} />
+              <ActionBtn label="resume" busy={busy} onClick={() => act("resume", () => api.resume(id))} />
             )}
             {s.status === "hibernated" && (
               <ActionBtn label="Start" busy={busy} accent="emerald" onClick={() => act("start", () => api.start(id))} />
@@ -123,7 +123,7 @@ export default function Detail({
       )}
 
       <div className="flex items-center gap-0.5 overflow-x-auto" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-        {(["files", "exec", "terminal", "repl", "ports", "lsp", "logs", "metrics", "events", "raw"] as Tab[]).map(
+        {(["files", "terminal", "ports", "logs", "metrics", "raw"] as Tab[]).map(
           (t) => (
             <button
               key={t}
@@ -141,14 +141,10 @@ export default function Detail({
 
       <section className="mt-4">
         {tab === "files" && <FilesTab id={id} status={s?.status} />}
-        {tab === "exec" && <ExecTab id={id} status={s?.status} />}
         {tab === "terminal" && <TerminalTab id={id} status={s?.status} />}
-        {tab === "repl" && <REPLTab id={id} status={s?.status} />}
         {tab === "ports" && <PortsTab id={id} status={s?.status} />}
-        {tab === "lsp" && <LSPTab id={id} status={s?.status} />}
         {tab === "logs" && <LogsTab id={id} />}
         {tab === "metrics" && <MetricsTab id={id} status={s?.status} />}
-        {tab === "events" && <EventsTab id={id} />}
         {tab === "raw" && (
           <pre className="overflow-auto rounded-lg text-[12px] p-4" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", color: "var(--text-secondary)" }}>
             {JSON.stringify(s, null, 2)}
@@ -397,154 +393,6 @@ function FilesTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
   );
 }
 
-// ----------------------------------------------------------------- Exec tab
-
-type ExecEntry = {
-  cmd: string;
-  result?: ExecResult;
-  streaming?: { stdout: string; stderr: string; exit?: number };
-  err?: string;
-};
-
-function ExecTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
-  const [cmd, setCmd] = useState("ls -la /");
-  const [stream, setStream] = useState(true);
-  const [history, setHistory] = useState<ExecEntry[]>([]);
-  const [busy, setBusy] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [history]);
-
-  const run = async () => {
-    if (!cmd.trim() || busy) return;
-    setBusy(true);
-    if (!stream) {
-      try {
-        const result = await api.exec(id, cmd);
-        setHistory((h) => [...h, { cmd, result }]);
-      } catch (e) {
-        setHistory((h) => [...h, { cmd, err: String(e) }]);
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    // SSE streaming
-    const entry: ExecEntry = { cmd, streaming: { stdout: "", stderr: "" } };
-    const idx = history.length;
-    setHistory((h) => [...h, entry]);
-    try {
-      const r = await fetch(`${API_BASE}/v1/sandboxes/${id}/exec/stream`, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...(await getAuthHeaders()) },
-        body: JSON.stringify({ cmd }),
-      });
-      const reader = r.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const events = buf.split("\n\n");
-        buf = events.pop() ?? "";
-        for (const ev of events) {
-          const m = ev.match(/event: (\S+)\ndata: ([\s\S]+)/);
-          if (!m) continue;
-          const [, type, raw] = m;
-          const data = JSON.parse(raw);
-          setHistory((h) => {
-            const copy = [...h];
-            const e = copy[idx];
-            if (!e?.streaming) return copy;
-            if (type === "stdout") e.streaming.stdout += data.chunk;
-            if (type === "stderr") e.streaming.stderr += data.chunk;
-            if (type === "exit") e.streaming.exit = data.exit_code;
-            return copy;
-          });
-        }
-      }
-    } catch (e) {
-      setHistory((h) => {
-        const copy = [...h];
-        copy[idx] = { ...copy[idx], err: String(e) };
-        return copy;
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (status && status !== "running") {
-    return <OfflineBanner what="exec" status={status} />;
-  }
-
-  return (
-    <div className="rounded border border-zinc-800 bg-zinc-950">
-      <div
-        ref={scrollRef}
-        className="h-[480px] overflow-auto p-3 text-xs"
-      >
-        {history.map((h, i) => {
-          const s = h.streaming ?? {
-            stdout: h.result?.stdout ?? "",
-            stderr: h.result?.stderr ?? "",
-            exit: h.result?.exit_code,
-          };
-          return (
-            <div key={i} className="mb-3">
-              <div className="text-emerald-400">
-                <span className="text-zinc-500">$</span> {h.cmd}
-              </div>
-              {s.stdout && (
-                <pre className="whitespace-pre-wrap text-zinc-200">{s.stdout}</pre>
-              )}
-              {s.stderr && (
-                <pre className="whitespace-pre-wrap text-red-300">{s.stderr}</pre>
-              )}
-              {h.err && <pre className="text-red-400">{h.err}</pre>}
-              {s.exit !== undefined && (
-                <div className="text-zinc-600">
-                  → exit {s.exit}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {history.length === 0 && (
-          <p className="text-zinc-600">No commands yet. Try `uname -a`.</p>
-        )}
-      </div>
-      <div className="flex items-center gap-2 border-t border-zinc-800 p-2">
-        <span className="text-emerald-400">$</span>
-        <input
-          value={cmd}
-          onChange={(e) => setCmd(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && run()}
-          spellCheck={false}
-          className="flex-1 bg-transparent text-xs text-zinc-100 outline-none"
-        />
-        <label className="flex items-center gap-1 text-[10px] text-zinc-500">
-          <input
-            type="checkbox"
-            checked={stream}
-            onChange={(e) => setStream(e.target.checked)}
-          />
-          stream
-        </label>
-        <button
-          onClick={run}
-          disabled={busy}
-          className="rounded border border-emerald-700 px-2 py-0.5 text-emerald-300 disabled:opacity-30"
-        >
-          {busy ? "…" : "run"}
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // ----------------------------------------------------------------- Logs tab
 
@@ -733,7 +581,7 @@ function MetricsTab({ id, status }: { id: string; status?: Sandbox["status"] }) 
         })
         .catch((e) => setErr(String(e)));
     tick();
-    const t = setInterval(tick, 2000);
+    const t = setInterval(() => { if (!document.hidden) tick(); }, 2000);
     return () => clearInterval(t);
   }, [id, status]);
 
@@ -786,108 +634,6 @@ function fmtDuration(s: number): string {
   return `${Math.floor(s / 3600)}h${Math.floor((s % 3600) / 60)}m`;
 }
 
-// --------------------------------------------------------------- Events tab
-
-function EventsTab({ id }: { id: string }) {
-  const [events, setEvents] = useState<SandboxEvent[]>([]);
-  const [follow, setFollow] = useState(true);
-  const [filter, setFilter] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    setEvents([]);
-    setErr(null);
-    let abort: AbortController | null = null;
-
-    if (!follow) {
-      api
-        .events(id, 200)
-        .then((r) => setEvents(r.events ?? []))
-        .catch((e) => setErr(String(e)));
-      return;
-    }
-    abort = new AbortController();
-    (async () => {
-      try {
-        const r = await fetch(
-          `${API_BASE}/v1/sandboxes/${id}/events?tail=200&follow=1`,
-          { signal: abort!.signal, headers: await getAuthHeaders() }
-        );
-        const reader = r.body!.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const chunks = buf.split("\n\n");
-          buf = chunks.pop() ?? "";
-          for (const ev of chunks) {
-            const m = ev.match(/event: (\S+)\ndata: ([\s\S]+)/);
-            if (!m) continue;
-            const [, kind, raw] = m;
-            if (kind === "open" || kind === "ping") continue;
-            try {
-              const d = JSON.parse(raw) as SandboxEvent;
-              setEvents((es) => [...es.slice(-500), d]);
-            } catch {}
-          }
-        }
-      } catch (e) {
-        if ((e as Error).name !== "AbortError") setErr(String(e));
-      }
-    })();
-    return () => abort?.abort();
-  }, [id, follow]);
-
-  const view = events.filter((e) =>
-    filter ? e.type.toLowerCase().includes(filter.toLowerCase()) : true
-  );
-
-  return (
-    <div className="rounded border border-zinc-800 bg-zinc-950">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 p-2 text-xs text-zinc-500">
-        <span>events.jsonl</span>
-        <div className="flex items-center gap-3">
-          <input
-            placeholder="filter type…"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-200 outline-none focus:border-zinc-600"
-          />
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={follow}
-              onChange={(e) => setFollow(e.target.checked)}
-            />
-            follow
-          </label>
-        </div>
-      </div>
-      <div className="h-[480px] overflow-auto p-3 text-[11px]">
-        {err && <p className="text-red-400">{err}</p>}
-        {view.length === 0 && !err && (
-          <p className="text-zinc-600">no events yet…</p>
-        )}
-        {view.map((e, i) => (
-          <div
-            key={i}
-            className="grid grid-cols-[7rem_8rem_1fr] gap-2 border-b border-zinc-900 py-1"
-          >
-            <span className="text-zinc-600">
-              {new Date(e.time).toLocaleTimeString()}
-            </span>
-            <span className="text-emerald-300">{e.type}</span>
-            <span className="truncate text-zinc-400">
-              {e.payload ? JSON.stringify(e.payload) : ""}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 function TerminalTab({
   id,
@@ -1012,430 +758,7 @@ function TerminalTab({
   );
 }
 
-// ----------------------------------------------------------------- REPL tab
 
-type ReplCell = {
-  n: number;
-  code: string;
-  stdout: string;
-  stderr: string;
-  exit?: number;
-  ms?: number;
-  pending?: boolean;
-  error?: string;
-};
-
-function REPLTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
-  const [session, setSession] = useState<{ id: string; language: string } | null>(null);
-  const [language, setLanguage] = useState<string>("python");
-  const [code, setCode] = useState<string>("x = 5\nx * x + 1");
-  const [cells, setCells] = useState<ReplCell[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const counter = useRef(0);
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [cells.length]);
-
-  if (status && status !== "running") {
-    return <OfflineBanner what="repl" status={status} />;
-  }
-
-  const ensureSession = async () => {
-    if (session) return session;
-    setErr(null);
-    try {
-      const r = await api.replCreateSession(id, language);
-      const s = { id: r.id, language: r.language };
-      setSession(s);
-      return s;
-    } catch (e) {
-      setErr(String(e));
-      throw e;
-    }
-  };
-
-  const run = async () => {
-    if (!code.trim()) return;
-    setBusy(true);
-    setErr(null);
-    let s: { id: string; language: string };
-    try {
-      s = await ensureSession();
-    } catch {
-      setBusy(false);
-      return;
-    }
-    const n = ++counter.current;
-    const cell: ReplCell = { n, code, stdout: "", stderr: "", pending: true };
-    setCells((c) => [...c, cell]);
-    const submitted = code;
-    setCode("");
-    try {
-      const t0 = Date.now();
-      const r = await api.replRun(id, s.id, submitted);
-      const ms = Date.now() - t0;
-      setCells((c) =>
-        c.map((x) =>
-          x.n === n
-            ? {
-                ...x,
-                pending: false,
-                stdout: r.stdout ?? "",
-                stderr: r.stderr ?? "",
-                exit: r.exit ?? 0,
-                ms,
-              }
-            : x
-        )
-      );
-    } catch (e) {
-      setCells((c) =>
-        c.map((x) =>
-          x.n === n ? { ...x, pending: false, error: String(e) } : x
-        )
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const reset = async () => {
-    if (!session) return;
-    try {
-      await api.replDeleteSession(id, session.id);
-    } catch {}
-    setSession(null);
-    setCells([]);
-    counter.current = 0;
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <select
-          value={language}
-          disabled={!!session}
-          onChange={(e) => setLanguage(e.target.value)}
-          className="rounded border border-zinc-800 bg-zinc-950 px-2 py-1 text-zinc-200 disabled:opacity-60"
-        >
-          <option value="python">python</option>
-        </select>
-        {session ? (
-          <>
-            <span className="rounded border border-emerald-700 bg-emerald-500/15 px-2 py-0.5 text-[10px] uppercase text-emerald-300">
-              ● session {session.id.slice(0, 8)}
-            </span>
-            <button
-              onClick={reset}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-300 hover:bg-zinc-800"
-            >
-              reset session
-            </button>
-          </>
-        ) : (
-          <span className="text-zinc-500">no session yet — first run creates one</span>
-        )}
-      </div>
-
-      <div className="space-y-3">
-        {cells.map((c) => (
-          <div
-            key={c.n}
-            className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950"
-          >
-            <div className="flex items-center justify-between border-b border-zinc-900 px-3 py-1 text-[10px] uppercase tracking-wider text-zinc-500">
-              <span>In [{c.n}]</span>
-              <span>
-                {c.pending
-                  ? "running…"
-                  : c.error
-                  ? "error"
-                  : `exit=${c.exit} · ${c.ms}ms`}
-              </span>
-            </div>
-            <pre className="overflow-auto whitespace-pre-wrap px-3 py-2 text-xs text-zinc-200">
-              {c.code}
-            </pre>
-            {(c.stdout || c.stderr || c.error) && (
-              <div className="border-t border-zinc-900 bg-zinc-950/60 px-3 py-2 text-xs">
-                {c.stdout && (
-                  <pre className="whitespace-pre-wrap text-emerald-200">
-                    {c.stdout.replace(/\n$/, "")}
-                  </pre>
-                )}
-                {c.stderr && (
-                  <pre className="mt-1 whitespace-pre-wrap text-amber-300">
-                    {c.stderr.replace(/\n$/, "")}
-                  </pre>
-                )}
-                {c.error && (
-                  <pre className="mt-1 whitespace-pre-wrap text-red-300">
-                    {c.error}
-                  </pre>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-        <div ref={bottomRef} />
-      </div>
-
-      {err && (
-        <div className="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-300">
-          {err}
-        </div>
-      )}
-
-      <div className="rounded-md border border-zinc-800 bg-zinc-950">
-        <div className="flex items-center justify-between border-b border-zinc-900 px-3 py-1 text-[10px] uppercase tracking-wider text-zinc-500">
-          <span>In [{counter.current + 1}]</span>
-          <span className="text-zinc-600">⌘+↩ run</span>
-        </div>
-        <textarea
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault();
-              if (!busy) run();
-            }
-          }}
-          spellCheck={false}
-          rows={6}
-          className="block w-full resize-y bg-transparent px-3 py-2 font-mono text-xs text-zinc-100 outline-none"
-          placeholder="# state persists across cells"
-        />
-        <div className="flex justify-end gap-2 border-t border-zinc-900 px-2 py-1.5">
-          <button
-            onClick={() => setCells([])}
-            className="rounded px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-200"
-          >
-            clear history
-          </button>
-          <button
-            onClick={run}
-            disabled={busy || !code.trim()}
-            className="rounded border border-emerald-700 bg-emerald-900/40 px-3 py-1 text-[11px] text-emerald-200 hover:bg-emerald-900/70 disabled:opacity-50"
-          >
-            {busy ? "running…" : "run"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------- Ports tab
-
-function LSPTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
-  const [lang, setLang] = useState("python");
-  const [src, setSrc] = useState(
-    "import os, sys\nimport os\n\ndef bar(  ):\n    x = undefined_name\n    return x\n"
-  );
-  const [diags, setDiags] = useState<{ message: string; severity?: number; range?: { start: { line: number; character: number } } }[]>([]);
-  const [status2, setStatus2] = useState<string>("idle");
-  const [errs, setErrs] = useState<string[]>([]);
-  const wsRef = useRef<WebSocket | null>(null);
-
-  const wsUrl = useMemo(() => {
-    const base = API_BASE.replace(/^http/, "ws");
-    return `${base}/v1/sandboxes/${id}/lsp/${lang}`;
-  }, [id, lang]);
-
-  const stop = useCallback(() => {
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {}
-      wsRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => () => stop(), [stop]);
-
-  const analyze = useCallback(() => {
-    stop();
-    setDiags([]);
-    setErrs([]);
-    setStatus2("connecting");
-
-    (async () => {
-    const tok = (await createClient().auth.getSession()).data.session?.access_token ?? "";
-    const wsUrlWithTok = wsUrl + (tok ? `?access_token=${encodeURIComponent(tok)}` : "");
-    const ws = new WebSocket(wsUrlWithTok, "lsp");
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
-
-    let inbox: Uint8Array = new Uint8Array();
-    let initId = 1;
-    let didOpenSent = false;
-
-    const decoder = new TextDecoder();
-    const encoder = new TextEncoder();
-
-    const send = (msg: object) => {
-      const body = encoder.encode(JSON.stringify(msg));
-      const header = encoder.encode(`Content-Length: ${body.length}\r\n\r\n`);
-      const out = new Uint8Array(header.length + body.length);
-      out.set(header, 0);
-      out.set(body, header.length);
-      ws.send(out);
-    };
-
-    const drain = () => {
-      const text = decoder.decode(inbox);
-      const idx = text.indexOf("\r\n\r\n");
-      if (idx < 0) return;
-      let length = 0;
-      for (const line of text.slice(0, idx).split("\r\n")) {
-        if (line.toLowerCase().startsWith("content-length:")) {
-          length = parseInt(line.slice(15).trim(), 10);
-        }
-      }
-      if (!length) return;
-      const headerEnd = idx + 4;
-      if (inbox.length < headerEnd + length) return;
-      const body = inbox.subarray(headerEnd, headerEnd + length);
-      try {
-        const msg = JSON.parse(new TextDecoder().decode(body));
-        if (msg.id === 1 && msg.result) {
-          send({ jsonrpc: "2.0", method: "initialized", params: {} });
-          send({
-            jsonrpc: "2.0",
-            method: "workspace/didChangeConfiguration",
-            params: {
-              settings: {
-                pylsp: { plugins: { pycodestyle: { enabled: true, maxLineLength: 100 }, pyflakes: { enabled: true } } },
-              },
-            },
-          });
-          send({
-            jsonrpc: "2.0",
-            method: "textDocument/didOpen",
-            params: {
-              textDocument: { uri: "file:///tmp/lsp-analysis.py", languageId: lang, version: 1, text: src },
-            },
-          });
-          didOpenSent = true;
-          setStatus2("analyzing");
-        }
-        if (msg.method === "textDocument/publishDiagnostics" && didOpenSent) {
-          setDiags(msg.params?.diagnostics ?? []);
-          setStatus2(`done — ${msg.params?.diagnostics?.length ?? 0} diagnostic(s)`);
-        }
-      } catch {}
-      inbox = inbox.subarray(headerEnd + length);
-      drain();
-    };
-
-    ws.onopen = () => {
-      setStatus2("initializing");
-      send({
-        jsonrpc: "2.0",
-        id: initId,
-        method: "initialize",
-        params: { processId: null, rootUri: null, capabilities: {} },
-      });
-    };
-    ws.onmessage = (e) => {
-      if (typeof e.data === "string") {
-        try {
-          const obj = JSON.parse(e.data);
-          if (obj.error) setErrs((x) => [...x, obj.error + (obj.hint ? " — " + obj.hint : "")]);
-          if (obj.stream === "stderr") setErrs((x) => [...x, "[stderr] " + obj.line]);
-        } catch {}
-        return;
-      }
-      const chunk = new Uint8Array(e.data as ArrayBuffer);
-      const merged = new Uint8Array(inbox.length + chunk.length);
-      merged.set(inbox, 0);
-      merged.set(chunk, inbox.length);
-      inbox = merged;
-      drain();
-    };
-    ws.onerror = () => setErrs((x) => [...x, "WebSocket error"]);
-    ws.onclose = () => setStatus2((s) => (s === "done" ? s : "closed"));
-    })();
-  }, [wsUrl, src, lang, stop]);
-
-  const ready = status === "running";
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded-lg p-3 text-[12px]" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", color: "var(--text-secondary)" }}>
-        LSP-as-a-Service streams a real language server from inside this sandbox over a WebSocket.
-        v1 ships <code>python</code> (pylsp). First request in a fresh sandbox auto-installs pylsp
-        (~30–60s, progress streams below). Subsequent requests are instant.
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={lang}
-          onChange={(e) => setLang(e.target.value)}
-          disabled={!ready}
-          className="rounded-md px-2 py-1 text-[12px]"
-          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-        >
-          <option value="python">python</option>
-        </select>
-        <button
-          onClick={analyze}
-          disabled={!ready}
-          className="rounded-md px-3 py-1 text-[12px] font-medium"
-          style={{ background: "rgb(16,185,129)", color: "rgb(9,9,11)" }}
-        >
-          Analyze
-        </button>
-        <button
-          onClick={stop}
-          className="rounded-md px-3 py-1 text-[12px]"
-          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-        >
-          Stop
-        </button>
-        <span className="text-[12px]" style={{ color: "var(--text-secondary)" }}>{status2}</span>
-      </div>
-
-      <textarea
-        value={src}
-        onChange={(e) => setSrc(e.target.value)}
-        rows={10}
-        spellCheck={false}
-        className="w-full font-mono text-[12px] p-3 rounded-lg"
-        style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-      />
-
-      <div className="rounded-lg overflow-hidden" style={{ border: "1px solid var(--border-subtle)" }}>
-        <div className="px-3 py-2 text-[11px] uppercase tracking-wider" style={{ background: "var(--bg-elevated)", color: "var(--text-muted)" }}>
-          Diagnostics
-        </div>
-        {diags.length === 0 ? (
-          <div className="p-3 text-[12px]" style={{ color: "var(--text-secondary)" }}>No diagnostics yet — click Analyze.</div>
-        ) : (
-          <ul className="divide-y" style={{ borderColor: "var(--border-subtle)" }}>
-            {diags.map((d, i) => (
-              <li key={i} className="p-3 text-[12px]" style={{ color: "var(--text-primary)" }}>
-                <span className="mr-2 inline-block rounded px-1.5 py-0.5 text-[10px]" style={{ background: "rgba(245,158,11,0.15)", color: "var(--status-paused)" }}>
-                  {d.range?.start ? `L${d.range.start.line + 1}:${d.range.start.character + 1}` : ""}
-                </span>
-                {d.message}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {errs.length > 0 && (
-        <div className="rounded-lg p-3 text-[12px]" style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "var(--red-300)" }}>
-          {errs.map((e, i) => <div key={i}>{e}</div>)}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function PortsTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
   const [items, setItems] = useState<Port[]>([]);
@@ -1458,7 +781,7 @@ function PortsTab({ id, status }: { id: string; status?: Sandbox["status"] }) {
   useEffect(() => {
     if (status !== "running") return;
     refresh();
-    const t = setInterval(refresh, 3000);
+    const t = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
     return () => clearInterval(t);
   }, [refresh, status]);
 

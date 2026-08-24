@@ -15,29 +15,14 @@ const CONTEXTUAL: Record<string, { title: string; url: string }[]> = {
   '/databases': [
     { title: 'Creating a PostgreSQL database', url: '/docs/quickstart#create-database' },
     { title: 'Connection strings', url: '/docs/concepts/databases#connection' },
-    { title: 'Backup and restore', url: '/docs/concepts/databases#backup' },
-  ],
-  '/apps': [
-    { title: 'Deploying your first app', url: '/docs/guides/apps#deploy' },
-    { title: 'Framework detection', url: '/docs/guides/apps#framework-detection' },
-    { title: 'Custom build commands', url: '/docs/guides/apps#build-commands' },
-  ],
-  '/functions': [
-    { title: 'Creating a function', url: '/docs/guides/functions#create' },
-    { title: 'Runtime selection', url: '/docs/guides/functions#runtime' },
-    { title: 'Invoking functions', url: '/docs/guides/functions#invoke' },
-  ],
-  '/schedules': [
-    { title: 'Creating a schedule', url: '/docs/guides/schedules#create' },
-    { title: 'Cron syntax', url: '/docs/guides/schedules#cron' },
-    { title: 'Monitoring schedules', url: '/docs/guides/schedules#monitor' },
+    { title: 'Idle auto-suspend and resume', url: '/docs/concepts/databases#idle' },
   ],
 };
 
 const QUICK_LINKS = [
   { title: 'Documentation', url: 'https://docs.pandastack.ai' },
   { title: 'API Reference', url: '/docs/api' },
-  { title: 'Discord Community', url: 'https://discord.gg/C7Du7XbG' },
+  { title: 'Discord Community', url: 'https://discord.gg/GzxpktHpHD' },
 ];
 
 export function SupportWidget() {
@@ -309,7 +294,7 @@ export function SupportWidget() {
                 Can't find what you need?
               </p>
               <a
-                href={`mailto:support@pandastack.ai?subject=Support request from ${pathname}&body=Page: ${pathname}%0AWorkspace: (please include your workspace ID)`}
+                href={`mailto:hello@pandastack.ai?subject=Support request from ${pathname}&body=Page: ${pathname}%0AWorkspace: (please include your workspace ID)`}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all"
                 style={{
                   background: 'var(--brand)',

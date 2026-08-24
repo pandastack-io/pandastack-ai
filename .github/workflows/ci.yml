@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   lint-and-test-go:
-    name: Go vet/test (${{ matrix.os }})
+    name: Go vet/test (${{ matrix.module }} on ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -20,6 +20,10 @@ jobs:
             module: api
           - os: ubuntu-latest
             module: agent
+          - os: ubuntu-latest
+            module: db-proxy
+          - os: ubuntu-latest
+            module: cmd/pandastack
           - os: macos-latest
             module: api
     steps:
@@ -35,6 +39,7 @@ jobs:
           set -euo pipefail
           cd "${{ matrix.module }}"
           go vet ./...
+          go build ./...
           go test ./...
 
   lint-and-test-node:

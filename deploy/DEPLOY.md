@@ -5,6 +5,11 @@
 **Terraform state:** `gs://REPLACE_WITH_YOUR_TFSTATE_BUCKET/pandastack-ai/`  
 **Terraform env:** `infra/terraform/envs/dev-gcp-multi/`
 
+> Placeholders in this guide: `your-gcp-project`, `REPLACE_WITH_YOUR_*` and
+> `<your-zone>` (your public DNS zone, e.g. `example.com`). MIG-generated
+> instance names are shown as `<edge-instance-name>` — read the real ones from
+> `gcloud compute instance-groups managed list-instances`.
+
 ---
 
 ## Prerequisites
@@ -113,10 +118,10 @@ gcloud compute instance-groups managed rolling-action replace pandastack-edge-mi
 ## Smoke test
 
 ```bash
-curl -fsS https://api.pandastack.ai/healthz | jq .
+curl -fsS https://api.<your-zone>/healthz | jq .
 # Expected: {"status":"ok","checks":{"PANDASTACK_DB_DSN":"ok"}}
 
-curl -fsS https://api.pandastack.ai/version | jq .
+curl -fsS https://api.<your-zone>/version | jq .
 ```
 
 ---
@@ -132,8 +137,8 @@ gcloud compute instance-groups managed list-instances pandastack-edge-mig --regi
 gcloud compute instance-groups managed list-instances pandastack-agent-mig --region=us-central1
 
 # Serial logs for a specific instance (replace name/zone)
-gcloud compute instances get-serial-port-output pandastack-edge-b39v \
-  --zone=us-central1-b | tail -50
+gcloud compute instances get-serial-port-output <edge-instance-name> \
+  --zone=<zone> | tail -50
 ```
 
 ---
@@ -156,7 +161,7 @@ gcloud compute instances get-serial-port-output pandastack-clickhouse-1 \
 
 ---
 
-## Dashboard deploy (Cloudflare Pages → `app.pandastack.ai`)
+## Dashboard deploy (Cloudflare Pages → `app.<your-zone>`)
 
 Dashboard runs on **Cloudflare Pages** (not the edge VMs).
 
@@ -166,7 +171,7 @@ bash deploy/deploy-dashboard-cf.sh
 
 ---
 
-## Docs deploy (Cloudflare Pages → `docs.pandastack.ai`)
+## Docs deploy (Cloudflare Pages → `docs.<your-zone>`)
 
 ```bash
 bash deploy/deploy-docs-cf.sh
@@ -177,7 +182,8 @@ bash deploy/deploy-docs-cf.sh
 ## Notes
 
 - No public SSH on any VM — IAP tunnel only (but not needed for standard deploys)
-- Never use `git add -A`. Stage specific files explicitly.
+- Never use `git add -A`. Stage specific files explicitly — a saved terraform
+  plan embeds resource attributes and variable values, including sensitive ones.
 - GCS bucket for builds: `REPLACE_WITH_YOUR_BUILDS_BUCKET` (project `your-gcp-project`)
 - Terraform state backend: `gs://REPLACE_WITH_YOUR_TFSTATE_BUCKET/pandastack-ai/`
 

@@ -278,8 +278,6 @@ PANDASTACK_REGION=local
 PANDASTACK_ZONE=linux
 PANDASTACK_METRICS_LISTEN=127.0.0.1:9100
 PANDASTACK_CLICKHOUSE_URL=$CLICKHOUSE_URL
-STRIPE_API_KEY=
-STRIPE_WEBHOOK_SECRET=
 ENV
 
   sudo tee /etc/systemd/system/pandastack-agent-local-e2e.service >/dev/null <<'UNIT'
@@ -333,8 +331,6 @@ build_and_start_api() {
         PANDASTACK_STUB_USER_ID="$PANDASTACK_STUB_USER_ID" \
         PANDASTACK_STUB_ORG_ID="$PANDASTACK_STUB_ORG_ID" \
         PANDASTACK_STUB_WORKSPACE="$PANDASTACK_STUB_WORKSPACE" \
-        STRIPE_API_KEY= \
-        STRIPE_WEBHOOK_SECRET= \
         "$BIN_DIR/pandastack-api" -addr :8080 -token-file "$TOKENS_FILE" \
           >"$LOG_DIR/api.log" 2>&1 &
       echo $! > "$API_PID"

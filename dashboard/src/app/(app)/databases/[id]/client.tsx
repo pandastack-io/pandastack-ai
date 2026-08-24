@@ -1,71 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 "use client";
 
-import { use, useCallback, useEffect, useRef, useState, useTransition } from "react";
-import Link from "next/link";
+// Database detail — OVERVIEW. Status, live stats, and settings only. The log
+// tail lives on its own route (…/logs) so this page stays light: one status
+// poll, no log streaming. Connection details live behind the Quick connect
+// button (always visible once credentials exist — idle databases wake on
+// connect).
+
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeft, Copy, ExternalLink, Eye, EyeOff, RefreshCw, Trash2, RotateCcw } from "lucide-react";
-import { api, type DatabaseInfo, type DatabaseStats } from "@/lib/api";
+import { KeyRound, Moon, RefreshCw, RotateCcw, Trash2, Zap } from "lucide-react";
+import { api } from "@/lib/api";
 import { Badge, Btn, Card, useConfirm } from "@/components/ui";
-import { ErrorState, StatusBadge } from "@/components/list-quality";
+import { ErrorState } from "@/components/list-quality";
+import type { DatabaseStats } from "@/lib/api";
+import { BackLink, DbPageHeader, DbTabs, fmtBytes, fmtUptime, msg, useDb } from "./db-shared";
+import { DbMetricsCharts } from "./db-metrics-charts";
 
-function msg(e: unknown) { return e instanceof Error ? e.message : String(e); }
-
-function fmtBytes(n: number | undefined) {
-  if (!n || n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0; let v = n;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
-}
-
-function fmtUptime(s: number | undefined) {
-  if (!s || s <= 0) return "—";
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m ${s % 60}s`;
-}
-
-export default function ClientDatabasePage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+export default function ClientDatabasePage({ id }: { id: string }) {
   const router = useRouter();
   const confirm = useConfirm();
-  const [db, setDb] = useState<DatabaseInfo | null>(null);
+  const { db, setDb, error, refresh } = useDb(id, 5000);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
-  const [logs, setLogs] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
-  const [showPassword, setShowPassword] = useState(false);
-  const [pending, start] = useTransition();
-  const logsRef = useRef<HTMLPreElement>(null);
+  // Plain busy flag — NOT useTransition. startTransition does not support async
+  // callbacks: wrapping `await confirm()` (a user-driven dialog promise) in a
+  // transition leaves `pending` stuck true forever, so the disabled Delete button
+  // wedges and the flow never completes ("stuck, not erroring").
+  const [busy, setBusy] = useState(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      const d = await api.getDatabase(id);
-      setDb(d);
-      setError(null);
-      if (d.status === "running") {
-        api.databaseStats(id).then(setStats).catch(() => {});
-        api.databaseLogs(id).then((r) => setLogs(r.logs ?? "")).catch(() => {});
-      }
-    } catch (e) {
-      setError(msg(e));
-    }
+  const running = db?.status === "running";
+
+  const refreshStats = useCallback(() => {
+    api.databaseStats(id).then(setStats).catch(() => {});
   }, [id]);
 
   useEffect(() => {
-    void refresh();
-    const t = setInterval(refresh, 5000);
+    if (!running) return;
+    refreshStats();
+    const t = setInterval(refreshStats, 5000);
     return () => clearInterval(t);
-  }, [refresh]);
+  }, [running, refreshStats]);
 
-  useEffect(() => {
-    const el = logsRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [logs]);
-
-  const remove = () => start(async () => {
+  const remove = async () => {
     const ok = await confirm({
       title: `Delete database ${id.slice(0, 8)}?`,
       description: "This permanently destroys the database and all its data. This cannot be undone.",
@@ -73,29 +50,92 @@ export default function ClientDatabasePage({ params }: { params: Promise<{ id: s
       destructive: true,
     });
     if (!ok) return;
+    setBusy(true);
     const t = toast.loading("Deleting database…");
     try {
       await api.deleteDatabase(id);
       toast.success("Database deleted", { id: t });
       router.push("/databases");
-    } catch (e) { toast.error("Delete failed: " + msg(e), { id: t }); }
-  });
+    } catch (e) {
+      toast.error("Delete failed: " + msg(e), { id: t });
+      setBusy(false);
+    }
+  };
 
-  const failover = () => start(async () => {
+  const wake = async () => {
+    setBusy(true);
+    const t = toast.loading("Waking database…");
+    try {
+      await api.wakeDatabase(id);
+      toast.success("Database is waking — it will report running shortly", { id: t });
+      void refresh();
+    } catch (e) {
+      toast.error("Wake failed: " + msg(e), { id: t });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetCreds = async () => {
+    const ok = await confirm({
+      title: "Reset credentials?",
+      description: "Generates a NEW postgres password and broker token immediately. Every client using the current credentials will be disconnected and must switch to the new values.",
+      confirmLabel: "Reset credentials",
+      destructive: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    const t = toast.loading("Rotating credentials…");
+    try {
+      const fresh = await api.resetDatabaseCredentials(id);
+      // The API's read-back-race fallback returns {status:"rotated"} without
+      // credential fields — only merge a response that actually carries the
+      // new connection info; otherwise the poll below fetches it.
+      if (fresh && fresh.connection_url) setDb((prev) => (prev ? { ...prev, ...fresh } : fresh));
+      toast.success("Credentials rotated — the new values are in Quick connect", { id: t });
+      void refresh();
+    } catch (e) {
+      toast.error("Rotation failed (safe to retry): " + msg(e), { id: t });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setAlwaysOn = async (on: boolean) => {
+    setBusy(true);
+    const t = toast.loading(on ? "Keeping this database always on…" : "Enabling auto-suspend…");
+    try {
+      const updated = await api.updateDatabase(id, { always_on: on });
+      setDb((prev) => (prev ? { ...prev, ...updated } : updated));
+      toast.success(on ? "Auto-suspend disabled — this database stays on" : "Auto-suspend enabled", { id: t });
+      void refresh();
+    } catch (e) {
+      toast.error("Update failed: " + msg(e), { id: t });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const failover = async () => {
     const ok = await confirm({
       title: `Restore database ${id.slice(0, 8)}?`,
-      description: `This will restore the database on a healthy agent from the latest backup. Expected time: ~${db?.failover_eta_seconds ? Math.ceil(db.failover_eta_seconds / 60) : 3} minutes.`,
+      description: `This will restore the database on a healthy agent from the latest archived WAL state. Expected time: ~${db?.failover_eta_seconds ? Math.ceil(db.failover_eta_seconds / 60) : 3} minutes.`,
       confirmLabel: "Restore",
     });
     if (!ok) return;
+    setBusy(true);
     const t = toast.loading("Restoring database…");
     try {
       const restored = await api.failoverDatabase(id);
       setDb(restored);
       toast.success("Database restore initiated — waiting for PostgreSQL recovery…", { id: t });
       void refresh();
-    } catch (e) { toast.error("Restore failed: " + msg(e), { id: t }); }
-  });
+    } catch (e) {
+      toast.error("Restore failed: " + msg(e), { id: t });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (error && !db) {
     return <>
@@ -112,28 +152,58 @@ export default function ClientDatabasePage({ params }: { params: Promise<{ id: s
     </>;
   }
 
-  const running = db.status === "running";
-
   return <>
     <BackLink />
 
-    {/* Header */}
-    <div className="mb-4 flex flex-wrap items-center gap-3">
-      <h1 className="text-[18px] font-semibold" style={{ color: "var(--text-primary)" }}>
-        {db.label || "Untitled database"}
-      </h1>
-      <StatusBadge value={db.status} />
-      <Badge variant="warning">Beta</Badge>
-      <span className="font-mono text-[12px]" style={{ color: "var(--text-muted)" }}>{db.id}</span>
-      <div className="ml-auto flex items-center gap-2">
-        <Btn size="sm" variant="ghost" icon={<RefreshCw size={12} />} onClick={() => void refresh()}>Refresh</Btn>
-        <Btn size="sm" variant="danger" icon={<Trash2 size={12} />} onClick={remove} disabled={pending}>Delete</Btn>
-      </div>
-    </div>
+    <DbPageHeader
+      db={db}
+      id={id}
+      actions={<>
+        <Btn size="sm" variant="ghost" icon={<RefreshCw size={12} />} onClick={() => { void refresh(); refreshStats(); }}>Refresh</Btn>
+        {running && (
+          <Btn size="sm" variant="ghost" icon={<KeyRound size={12} />} onClick={resetCreds} disabled={busy}>Reset credentials</Btn>
+        )}
+        <Btn size="sm" variant="danger" icon={<Trash2 size={12} />} onClick={remove} disabled={busy}>Delete</Btn>
+      </>}
+    />
+
+    <DbTabs id={id} active="overview" />
 
     {db.error && (
       <Card className="mb-4 p-3">
         <p className="text-[12px]" style={{ color: "var(--status-error, #f87171)" }}>{db.error}</p>
+      </Card>
+    )}
+
+    {/* Provisioning — the state you land on right after creating a database.
+        The 5s poll flips this to the live view the moment postgres is up. */}
+    {["provisioning", "creating", "pending", "queued", "starting"].includes(db.status) && (
+      <Card className="mb-4 p-4">
+        <div className="flex items-center gap-3">
+          <RefreshCw size={16} className="animate-spin" style={{ color: "var(--brand)" }} />
+          <div>
+            <div className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>Provisioning your database…</div>
+            <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+              PostgreSQL cold boot typically takes 30–90s. Connection details appear here the moment it&apos;s ready — this page updates automatically.
+            </div>
+          </div>
+        </div>
+      </Card>
+    )}
+
+    {/* Idle (auto-suspended): a calm cost-saving state, not an error. It
+        resumes automatically on the next connection — the "Resume now" button
+        is only for impatience, never required. */}
+    {db.status === "hibernated" && (
+      <Card className="mb-4 p-4">
+        <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold" style={{ color: "var(--text-secondary)" }}>
+          <Moon size={13} /> Idle — compute paused
+        </div>
+        <p className="mb-3 text-[12px]" style={{ color: "var(--text-secondary)" }}>
+          This database paused its compute after a period with no connections. Your data and storage are untouched, and it
+          resumes automatically within a few seconds on the next connection — no action needed.
+        </p>
+        <Btn size="sm" variant="ghost" icon={<Zap size={12} />} onClick={wake} disabled={busy}>Resume now</Btn>
       </Card>
     )}
 
@@ -160,7 +230,7 @@ export default function ClientDatabasePage({ params }: { params: Promise<{ id: s
             variant="primary"
             icon={<RotateCcw size={12} />}
             onClick={failover}
-            disabled={pending}
+            disabled={busy}
           >
             Restore Database
           </Btn>
@@ -173,123 +243,87 @@ export default function ClientDatabasePage({ params }: { params: Promise<{ id: s
     )}
 
     {/* Live stats */}
-    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       <Stat label="Postgres" value={stats?.postgres_version ? `v${stats.postgres_version}` : "—"} />
-      <Stat label="Data size" value={fmtBytes(stats?.db_size_bytes)} />
-      <Stat label="Connections" value={stats ? `${stats.connections} / ${stats.max_connections}` : "—"} />
+      <Stat
+        label="Connections"
+        value={stats ? `${stats.connections} / ${stats.max_connections}` : "—"}
+        pct={stats ? stats.connections / Math.max(1, stats.max_connections) : undefined}
+      />
       <Stat label="Uptime" value={fmtUptime(stats?.uptime_seconds)} />
-      <Stat label="Cache hit" value={stats ? `${(stats.cache_hit_ratio * 100).toFixed(1)}%` : "—"} />
+      <Stat
+        label="Cache hit"
+        value={stats ? `${(stats.cache_hit_ratio * 100).toFixed(1)}%` : "—"}
+        pct={stats ? stats.cache_hit_ratio : undefined}
+      />
       <Stat
         label="Disk"
         value={stats && stats.disk_size_bytes > 0 ? `${fmtBytes(stats.disk_used_bytes)} / ${fmtBytes(stats.disk_size_bytes)}` : "—"}
         sub={stats && stats.disk_size_bytes > 0 ? `${stats.disk_used_pct.toFixed(1)}% used` : undefined}
+        pct={stats && stats.disk_size_bytes > 0 ? stats.disk_used_pct / 100 : undefined}
         warn={!!stats && stats.disk_used_pct >= 80}
       />
     </div>
 
-    {/* Connection */}
-    <Card className="mb-4 p-4">
-      <div className="mb-3 text-[12px] font-semibold" style={{ color: "var(--text-secondary)" }}>Connection</div>
-      {!running || !(db.connection_url || db.host) ? (
-        <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>
-          Connection info is not available — the database is {db.status}. It appears once postgres is running.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {db.connection_url && (
-            <CopyRow
-              label="Connection URL"
-              value={db.connection_url}
-              display={showPassword ? db.connection_url : db.password ? db.connection_url.replace(db.password, "••••••••") : db.connection_url}
-            />
-          )}
-          {db.host && <CopyRow label="Host" value={db.host} />}
-          {db.port ? <CopyRow label="Port" value={String(db.port)} /> : null}
-          {db.database && <CopyRow label="Database" value={db.database} />}
-          {db.username && <CopyRow label="Username" value={db.username} />}
-          {db.password && (
-            <div className="flex items-center gap-2">
-              <span className="w-28 shrink-0 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Password</span>
-              <code className="flex-1 truncate rounded px-2 py-1 font-mono text-[12px]" style={{ background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}>
-                {showPassword ? db.password : "••••••••••••"}
-              </code>
-              <Btn size="sm" variant="ghost" icon={showPassword ? <EyeOff size={12} /> : <Eye size={12} />} onClick={() => setShowPassword((v) => !v)}>
-                {showPassword ? "Hide" : "Show"}
-              </Btn>
-              <Btn size="sm" variant="ghost" icon={<Copy size={12} />} onClick={() => void navigator.clipboard.writeText(db.password!).then(() => toast.success("Copied"))}>Copy</Btn>
-            </div>
-          )}
-          {db.broker_url && <CopyRow label="REST query API" value={`${db.broker_url}/v1/query`} />}
-          {db.broker_token && (
-            <CopyRow label="Broker token" value={db.broker_token} display={showPassword ? db.broker_token : "••••••••••••"} />
-          )}
-          <p className="mt-1 text-[11px]" style={{ color: "var(--text-muted)" }}>
-            TLS is required for native connections. The password is only retrievable while the database is running — store it securely.
-          </p>
-          {db.broker_url && (
-            <p className="mt-1 text-[11px]" style={{ color: "var(--text-muted)" }}>
-              POST JSON <code className="font-mono">{`{"database":"${db.database || "pandastack"}","sql":"select 1"}`}</code> to the REST query API with{" "}
-              <code className="font-mono">Authorization: Bearer &lt;broker token&gt;</code>. Both{" "}
-              <code className="font-mono">database</code> and <code className="font-mono">sql</code> are required. Health check:{" "}
-              <code className="font-mono break-all">{`${db.broker_url}/v1/health`}</code>.
-            </p>
-          )}
-          <a
-            href="https://docs.pandastack.ai/docs/concepts/databases/"
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1 inline-flex items-center gap-1 text-[11px] hover:underline"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            How to connect <ExternalLink size={11} />
-          </a>
-        </div>
-      )}
-    </Card>
+    {/* Historical CPU + memory (15s cadence, 30d retention). Server-bucketed
+        per range; no auto-poll — the 5s stats poll above covers live "now". */}
+    <DbMetricsCharts id={id} running={running} />
 
-    {/* Logs */}
-    <Card className="p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-[12px] font-semibold" style={{ color: "var(--text-secondary)" }}>PostgreSQL logs</div>
-        <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>last 300 lines · refreshes every 5s</span>
-      </div>
-      {!running ? (
-        <p className="text-[12px]" style={{ color: "var(--text-muted)" }}>Logs are available while the database is running.</p>
-      ) : (
-        <pre
-          ref={logsRef}
-          className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md p-3 font-mono text-[11px] leading-relaxed"
-          style={{ background: "var(--bg-elevated)", color: "var(--text-secondary)", border: "1px solid var(--border-subtle)" }}
-        >{logs || "Waiting for logs…"}</pre>
-      )}
+    {/* Settings — low-key. Auto-suspend is on by default and invisible; this
+        is the escape hatch for latency-sensitive databases. */}
+    <Card className="mt-4 p-4">
+      <div className="mb-3 text-[12px] font-semibold" style={{ color: "var(--text-secondary)" }}>Settings</div>
+      <label className="flex items-start gap-3 text-[12px]" style={{ color: "var(--text-secondary)" }}>
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={!!db.always_on}
+          disabled={busy}
+          onChange={(e) => void setAlwaysOn(e.target.checked)}
+        />
+        <span>
+          <span className="font-medium" style={{ color: "var(--text-primary)" }}>Keep always on</span>
+          <br />
+          Disable automatic idle-pause. By default a database pauses its compute after a period with no connections, and
+          resumes within a few seconds on the next connection. Turn this on for latency-sensitive workloads that must
+          never pay a resume delay.
+        </span>
+      </label>
     </Card>
   </>;
 }
 
-function BackLink() {
-  return (
-    <Link href="/databases" className="mb-4 inline-flex items-center gap-1.5 text-[12px]" style={{ color: "var(--text-muted)" }}>
-      <ArrowLeft size={12} /> Databases
-    </Link>
-  );
-}
-
-function Stat({ label, value, sub, warn }: { label: string; value: string; sub?: string; warn?: boolean }) {
+function Stat({ label, value, sub, warn, pct }: { label: string; value: string; sub?: string; warn?: boolean; pct?: number }) {
   return (
     <Card className="p-3">
-      <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</div>
-      <div className="mt-1 truncate text-[14px] font-semibold" style={{ color: warn ? "var(--status-error, #f87171)" : "var(--text-primary)" }} title={value}>{value}</div>
-      {sub && <div className="text-[10px]" style={{ color: warn ? "var(--status-error, #f87171)" : "var(--text-muted)" }}>{sub}</div>}
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</div>
+          <div className="mt-1 truncate text-[14px] font-semibold" style={{ color: warn ? "var(--status-error, #f87171)" : "var(--text-primary)" }} title={value}>{value}</div>
+          {sub && <div className="text-[10px]" style={{ color: warn ? "var(--status-error, #f87171)" : "var(--text-muted)" }}>{sub}</div>}
+        </div>
+        {pct !== undefined && <Ring pct={pct} warn={warn} />}
+      </div>
     </Card>
   );
 }
 
-function CopyRow({ label, value, display }: { label: string; value: string; display?: string }) {
+// Ring — a small radial gauge for a 0–1 ratio, themed on the brand accent
+// (or the error color when a threshold is breached). Starts at 12 o'clock.
+function Ring({ pct, warn }: { pct: number; warn?: boolean }) {
+  const r = 13;
+  const c = 2 * Math.PI * r;
+  const frac = Math.max(0, Math.min(1, Number.isFinite(pct) ? pct : 0));
+  const color = warn ? "var(--status-error, #f87171)" : "var(--brand)";
   return (
-    <div className="flex items-center gap-2">
-      <span className="w-28 shrink-0 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</span>
-      <code className="flex-1 truncate rounded px-2 py-1 font-mono text-[12px]" style={{ background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}>{display ?? value}</code>
-      <Btn size="sm" variant="ghost" icon={<Copy size={12} />} onClick={() => void navigator.clipboard.writeText(value).then(() => toast.success("Copied"))}>Copy</Btn>
-    </div>
+    <svg width="34" height="34" viewBox="0 0 34 34" className="shrink-0 -rotate-90" aria-hidden="true">
+      <circle cx="17" cy="17" r={r} fill="none" stroke="var(--border-default)" strokeWidth="3.5" />
+      <circle
+        cx="17" cy="17" r={r} fill="none"
+        stroke={color} strokeWidth="3.5" strokeLinecap="round"
+        strokeDasharray={`${frac * c} ${c}`}
+        style={{ transition: "stroke-dasharray 500ms ease" }}
+      />
+    </svg>
   );
 }

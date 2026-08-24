@@ -165,16 +165,6 @@ type Manager struct {
 	// Guarded by actMu alongside lastActivity.
 	hibFails map[string]int
 
-	// seedBakeMu guards seedBakeLocks, a per-seed-name mutex registry that
-	// serializes BakeAppSeed for the SAME seed name. Two concurrent bakes of one
-	// seed (a deploy retry, a second API replica, a manual double-POST) would
-	// otherwise race: the loser's error-path os.RemoveAll(seedDir) could delete
-	// the winner's half-written-but-good seed (the "seed silently vanishes, every
-	// wake cold-boots" incident class). With the lock the second caller waits,
-	// then hits the completed-seed idempotency guard and reuses it.
-	seedBakeMu    sync.Mutex
-	seedBakeLocks map[string]*sync.Mutex
-
 	kernelCache cachedKernel
 
 	prefetcher *templatePrefetcher
@@ -220,7 +210,6 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 		lastActivity:  make(map[string]time.Time),
 		activeTunnels: make(map[string]int),
 		hibFails:      make(map[string]int),
-		seedBakeLocks: make(map[string]*sync.Mutex),
 		pendingPGCreds: make(map[string]*DBCreds),
 		lifecycle:     lc,
 		snapStore:     snapstore.NewFromEnv(),

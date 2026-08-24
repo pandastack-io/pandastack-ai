@@ -33,6 +33,18 @@ die() { log "ERROR: $*"; exit 1; }
 mkdir -p /run/pandastack /workspace /var/log/postgresql "${MOUNT}"
 chown postgres:postgres /var/log/postgresql "${MOUNT}"
 
+# ── Re-entry fast-path ───────────────────────────────────────────────────────
+# systemd restarts this unit on failure. If a previous run already brought the
+# database fully up (ready.json written, postgres answering), there is nothing
+# to redo — re-running the pipeline against a live database is what turned a
+# single mid-flight failure into a destructive crash-loop on the first live
+# failover restore. Never triggers during bake (no ready.json at the snapshot
+# boundary) or first boot.
+if [[ -f "${READY_FILE}" ]] && sudo -u postgres "${PG_BIN}/pg_isready" -q 2>/dev/null; then
+  log "re-entry: database already fully up — nothing to do"
+  exec tail -f /var/log/pds-query-broker.log
+fi
+
 # ── Phase 1: OS ready, postgres stopped, data device untouched ───────────────
 # This is the snapshot boundary. Do NOT start postgres and do NOT touch
 # /dev/vdb before this point — the snapshot must capture an unused data device.
@@ -62,6 +74,13 @@ if [[ -f "${CRED_TRIGGER}" ]]; then
   PG_PASSWORD="$(cat "${CRED_PASS}")"
   BROKER_TOKEN="$(cat "${CRED_TOK}")"
   rm -f "${CRED_TRIGGER}" "${CRED_PASS}" "${CRED_TOK}"
+elif [[ -f "${PANDASTACK_DIR}/pg.password" && -f "${PANDASTACK_DIR}/broker.token" ]]; then
+  # Re-run after a mid-flight failure: prefer the credentials a previous cycle
+  # already persisted (agent-delivered) over inventing new ones the control
+  # plane does not know about.
+  log "phase2: reusing previously persisted credentials"
+  PG_PASSWORD="$(cat "${PANDASTACK_DIR}/pg.password")"
+  BROKER_TOKEN="$(cat "${PANDASTACK_DIR}/broker.token")"
 else
   # Generate credentials without a pipe whose consumer closes early. The old
   # `tr </dev/urandom | head -c N` made head close the pipe after N bytes, which
@@ -172,6 +191,21 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 log "postgresql ready"
+
+# ── Wait for recovery completion (failover-restore boots) ────────────────────
+# A restored database starts in archive recovery (recovery.signal staged by
+# the agent's restore path) and is READ-ONLY until WAL replay finishes and it
+# self-promotes. The DDL bootstrap below dies on a read-only server — which is
+# exactly what crash-looped this unit on the first live failover restore.
+# Bounded wait: replay time scales with archived-WAL volume.
+RECOVERY_DEADLINE=$((SECONDS + 1800))
+while :; do
+  IN_RECOVERY="$(sudo -u postgres psql -tAc 'SELECT pg_is_in_recovery()' 2>/dev/null || echo unknown)"
+  [[ "${IN_RECOVERY}" == "f" ]] && break
+  [[ ${SECONDS} -ge ${RECOVERY_DEADLINE} ]] && die "postgres still in recovery after 30m — refusing DDL bootstrap on a read-only server"
+  log "phase2: postgres in recovery (WAL replay) — waiting for promotion"
+  sleep 5
+done
 
 # ── Bootstrap user/db/extensions (idempotent) ────────────────────────────────
 log "bootstrapping database objects"

@@ -21,7 +21,7 @@ ansible_ssh_common_args: >-
   -o ProxyCommand="{{ playbook_dir }}/iap-proxy.sh %h %p {{ pandastack_zone | default('') }}"
 
 # ─────────────────────────── Project / GCS ─────────────────────────────────
-gcp_project: demo
+gcp_project: REPLACE_WITH_YOUR_GCP_PROJECT_ID
 # Runtime bucket the agent VMs already read from (seeds + bin/). Matches
 # release.yml's GCS_BUCKET and cloud-init's PANDASTACK_GCS_BUCKET.
 agent_gcs_bucket: REPLACE_WITH_YOUR_GCS_BUCKET
@@ -48,5 +48,21 @@ agent_env_file: /etc/pandastack/env.agent
 agent_env_managed:
   PANDASTACK_STREAM_RESTORE: "1"
   PANDASTACK_HUGEPAGES: "1"
+  # Squeezable class: these templates cold-boot with 4 KiB pages even on a
+  # hugepage fleet, which is what makes cgroup memory.high enforcement and
+  # mem_file_path CoW sharing work. Only templates listed here can be squeezed
+  # by the memory pressure ladder. The postgres family is deliberately absent —
+  # a managed database is the guaranteed class and must never be squeezed.
+  # Keep in sync with cloud-init/user-data-agent.sh.
+  PANDASTACK_NOHUGE_TEMPLATES: "base,code-interpreter,agent"
   PANDASTACK_NATID: "1"
   PANDASTACK_NATID_POOL_SIZE: "24"
+  # Generic request-based idle sweeper. "0" disables it. Managed databases use
+  # the separate, postgres-activity-based PANDASTACK_DB_IDLE_AFTER_SECONDS
+  # instead, which is the right signal for long-lived-but-quiet connections.
+  PANDASTACK_IDLE_AFTER: "0"
+  # Vsock exec fast-path: routes the non-mux guest ops (exec + fs) to the
+  # in-guest pandastack-daemon over AF_VSOCK instead of a fresh SSH connection
+  # per call. SSH stays the automatic per-op fallback, so worst case this is a
+  # no-op. Requires the daemon baked into your snapshots — leave "0" until then.
+  PANDASTACK_VSOCK_EXEC: "0"

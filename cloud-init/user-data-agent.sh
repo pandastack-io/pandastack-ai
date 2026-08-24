@@ -32,8 +32,11 @@ apt-get update
 # Base runtime tooling + extras needed for template baking
 # (debootstrap/chroot used by scripts/build-base-rootfs.sh + scripts/bake-templates.sh).
 # postgresql-client: used by NATID claim (psql) and heartbeat timer.
+# zstd is not optional: agent/internal/seed/user_template.go bakes and pulls
+# custom templates with `tar --use-compress-program 'zstd -T0'`, so a host
+# without the binary fails every custom-template operation at runtime.
 apt-get install -y ca-certificates curl wget jq squashfs-tools iproute2 iptables \
-  uuid-runtime e2fsprogs sqlite3 xfsprogs debootstrap rsync coreutils postgresql-client
+  uuid-runtime e2fsprogs sqlite3 xfsprogs debootstrap rsync coreutils postgresql-client zstd
 
 # Install gcloud CLI (Google Cloud SDK) for Secret Manager access.
 if ! command -v gcloud >/dev/null 2>&1; then
@@ -145,8 +148,40 @@ echo "pandastack: hugepage reservation -> requested=${HUGEPAGE_RESERVE} actual=$
 
 # Ensure dm_snapshot kernel module is loaded at boot (required for Option B
 # dm-snapshot CoW rootfs — eliminates per-sandbox 100-400ms file copy).
-echo "dm_snapshot" > /etc/modules-load.d/pandastack.conf
+#
+# nbd is required for the streamed rootfs (PANDASTACK_STREAM_DISK): the rootfs
+# is demand-paged from object storage over a /dev/nbdN device that becomes the
+# dm-snapshot origin. The kernel pre-creates a FIXED pool of /dev/nbdN nodes at
+# module load (nbds_max, default 16), so the ceiling must be raised here — it
+# cannot be changed once the module is loaded. agent/internal/nbdstream/
+# origin_linux.go self-modprobes on first use as a fallback, but loading at boot
+# guarantees the device nodes exist before the first create races for one.
+printf 'dm_snapshot\nnbd\n' > /etc/modules-load.d/pandastack.conf
+printf 'options nbd nbds_max=64\n' > /etc/modprobe.d/pandastack-nbd.conf
 modprobe dm_snapshot || true
+modprobe nbd nbds_max=64 || true
+
+# ── Swap + zswap: the reclaim substrate the memory pressure ladder needs ─────
+# When the host crosses the ELEVATED rung, the ladder squeezes the coldest
+# squeezable VMs by lowering their cgroup memory.high
+# (agent/internal/sandbox/pressure.go). memory.high can only RECLAIM if anon
+# pages have somewhere to go — with no swap the squeeze stops growth but stalls
+# the workload instead of freeing memory, and pressure.go gates the squeeze rung
+# on SwapTotal for exactly that reason. zswap compresses reclaimed pages in RAM
+# with the disk swapfile as overflow, so the common case never touches the disk.
+if [ ! -f /swapfile ]; then
+  fallocate -l 16G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+fi
+grep -q "^/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+swapon --show --noheadings | grep -q /swapfile || swapon /swapfile
+modprobe zstd 2>/dev/null || true
+# zstd if the kernel can load it (better ratio), else the built-in lzo.
+(echo zstd > /sys/module/zswap/parameters/compressor 2>/dev/null || echo lzo > /sys/module/zswap/parameters/compressor)
+echo 25 > /sys/module/zswap/parameters/max_pool_percent
+echo Y > /sys/module/zswap/parameters/shrinker_enabled
+echo Y > /sys/module/zswap/parameters/enabled
 
 install -d -m 0755 /var/lib/pandastack /var/lib/pandastack-io /run/fcsandbox /etc/pandastack
 
@@ -155,11 +190,18 @@ install -d -m 0755 /var/lib/pandastack /var/lib/pandastack-io /run/fcsandbox /et
 # clone from ~5500ms (full copy) to ~1ms (reflink). Same FS is critical.
 if [ "$(stat -f -c %T /var/lib/pandastack)" != "xfs" ]; then
   if [ ! -f /opt/pandastack.img ]; then
-    # 300G XFS+reflink data volume. Must stay below agent_boot_disk_size_gb
-    # (400G) minus OS/headroom. Holds template-snaps + based rootfs (~95G of
-    # preseeded public-template artifacts) plus per-sandbox CoW rootfs, fork
-    # trees, user snapshots and volumes.
-    truncate -s 300G /opt/pandastack.img
+    # 600G XFS+reflink data volume, sized against the 800G
+    # agent_boot_disk_size_gb default minus OS/headroom (see
+    # infra/terraform/envs/dev-gcp-multi/variables.tf). Holds:
+    #   * template-snaps + based rootfs — the preseeded first-party template
+    #     artifacts seed-sync pulls so creates restore in ~150ms;
+    #   * the UFFD/NBD content-addressed chunk cache shared by every sandbox on
+    #     this host (memstream/diskstream sharedcache.go);
+    #   * per-sandbox CoW rootfs, fork trees and user snapshots.
+    # If you shrink agent_boot_disk_size_gb, shrink this to match — the loopback
+    # is sparse, so an oversized image silently ENOSPCs mid-write instead of
+    # failing at create time.
+    truncate -s 600G /opt/pandastack.img
     mkfs.xfs -m reflink=1 -m crc=1 -q /opt/pandastack.img
   fi
   # Stage any existing data into the new FS before swapping.
@@ -182,7 +224,7 @@ fi
 # "pandastack-volumes") so a MIG autoheal/recreate detaches and reattaches the
 # SAME disk instead of wiping customer data with the boot disk. Mounted ON TOP
 # of the XFS loopback above (nested mount), so volume files no longer consume
-# the 300G pandastack.img budget. Instances without the disk (pre-disk
+# the pandastack.img cache budget. Instances without the disk (pre-disk
 # template) fall through — volumes stay on the loopback as before.
 VOLDEV=/dev/disk/by-id/google-pandastack-volumes
 if [ -e "$VOLDEV" ]; then
@@ -393,6 +435,35 @@ PANDASTACK_SHARED_KEY=${SHARED_KEY_OK}
 SUPABASE_JWKS_URL=${SUPABASE_JWKS_URL}
 CLICKHOUSE_URL=${CLICKHOUSE_URL}
 PANDASTACK_CLICKHOUSE_URL=${CLICKHOUSE_URL}
+# Streamed rootfs. Demand-pages the rootfs from the seed's clone.ext4 in object
+# storage over a /dev/nbdN device (the dm-snapshot origin) instead of
+# downloading the whole multi-GB disk before boot — the disk analog of
+# PANDASTACK_STREAM_RESTORE above. Off by default: with it off the node
+# downloads full seeds and uses the local-loop origin, which is slower to first
+# boot but has no dependency on object-store availability during a create.
+# Turn it on once you have validated it against your own storage backend.
+PANDASTACK_STREAM_DISK=0
+# Squeezable class: these templates cold-boot with 4 KiB pages even on a
+# hugepage fleet (their seeds carry no hugepages marker). 4 KiB backing is what
+# makes cgroup memory.high enforcement and mem_file_path CoW sharing work, so
+# only templates listed here can be squeezed by the pressure ladder. The
+# postgres family is deliberately absent — a managed database is the guaranteed
+# class and must never be squeezed.
+PANDASTACK_NOHUGE_TEMPLATES=base,code-interpreter,agent
+# Managed-database transparent auto-suspend. An idle database (no client
+# connections or queries, sampled from pg_stat_activity) hibernates after this
+# many seconds; db-proxy and the query broker wake it on the next connection, so
+# the client sees only a slower first query. Distinct from PANDASTACK_IDLE_AFTER
+# (the generic request-based sweeper): this one is postgres-activity-based,
+# which is the right signal for long-lived-but-quiet database connections.
+# Set 0 to disable; opt a single database out with the always_on flag.
+PANDASTACK_DB_IDLE_AFTER_SECONDS=900
+# Vsock exec fast-path. Routes the non-mux guest ops (exec + fs) to the
+# always-on in-guest pandastack-daemon over AF_VSOCK instead of opening a fresh
+# SSH connection per call. SSH stays the automatic per-op fallback, so worst
+# case this is a no-op. Off by default; the daemon must be baked into your
+# snapshots first.
+PANDASTACK_VSOCK_EXEC=0
 EOF
 chmod 0600 /etc/pandastack/env.agent
 
@@ -402,6 +473,15 @@ chmod 0600 /etc/pandastack/env.agent
 # exits 0 (best-effort); a template that can't be seeded is simply cold-baked on
 # first use. Requires the shared key (above) so fingerprints match.
 if [ -n "$GCS_BUCKET" ] && [ "$SHARED_KEY_OK" = "1" ] && [ -x /usr/local/bin/pandastack-agent ]; then
+  # Source env.agent so seed-sync inherits the SAME config the systemd service
+  # will run with — critically PANDASTACK_STREAM_DISK and
+  # PANDASTACK_STREAM_RESTORE. Without this, seed-sync runs with streaming OFF
+  # and downloads FULL seeds instead of writing the thin rootfs/vm.mem sidecars,
+  # so a fresh node silently falls back to the local-loop origin and never
+  # streams.
+  set -a
+  . /etc/pandastack/env.agent
+  set +a
   PANDASTACK_GCS_BUCKET="$GCS_BUCKET" PANDASTACK_NATID=1 \
     /usr/local/bin/pandastack-agent seed-sync --data-dir /var/lib/pandastack || true
 fi
@@ -430,6 +510,13 @@ LimitNOFILE=1048576
 # orchestrate FC shutdown itself (Hibernate -> Stop). On budget
 # overrun systemd still SIGKILLs the whole cgroup as a safety net.
 KillMode=mixed
+# Delegate the service cgroup subtree to the agent so it can create per-VM child
+# cgroups (vm-<id>) with cpu.weight tiers and read cpu.stat for the active-CPU
+# meter (agent/internal/sandbox/cputiers.go), and set memory.high on them for the
+# pressure ladder. Without delegation systemd reclaims the subtree and both
+# features silently no-op. KillMode=mixed above already spares the Firecracker
+# children on stop; delegation only stops systemd fighting the subtree layout.
+Delegate=yes
 # Hibernate budget (120s default) + 60s slack for HTTP server,
 # tracer, registry teardown. Must exceed
 # PANDASTACK_HIBERNATE_BUDGET_SECONDS or systemd preempts us.

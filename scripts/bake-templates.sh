@@ -3,7 +3,7 @@
 #
 # Usage (run as root on the agent host):
 #   sudo bake-templates.sh                 # bake all
-#   sudo bake-templates.sh code-interpreter browser   # bake specific
+#   sudo bake-templates.sh code-interpreter agent     # bake specific
 #   sudo FORCE=1 bake-templates.sh         # rebake even if already present
 #
 # Each template is created by cloning the base rootfs, chroot-installing the
@@ -40,7 +40,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # The wrapper below sets up DEBIAN_FRONTEND, resolv.conf, etc.
 
 tpl::code-interpreter() {
-  # Enterprise-grade sandbox: Python 3.11 + Node.js 22 LTS + full DS/AI/Playwright stack.
+  # Enterprise-grade sandbox: Python 3.13 + Node.js 24 LTS + full DS/AI/Playwright stack.
   # Must match templates/code-interpreter/Dockerfile.
   export DEBIAN_FRONTEND=noninteractive
   export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
@@ -57,19 +57,22 @@ tpl::code-interpreter() {
     chrony socat fuse3 iptables nfs-common \
     software-properties-common
 
-  # ── Python 3.11 ──────────────────────────────────────────────────────────
+  # ── Python 3.13 (was 3.11 — EOL 2026-10-31) via deadsnakes ────────────────
+  # All pinned scientific wheels below publish cp313 manylinux wheels, so this
+  # is a drop-in bump (no source builds). The Dockerfile uses FROM python:3.13;
+  # this chroot path installs it from deadsnakes to match.
   add-apt-repository -y ppa:deadsnakes/ppa || true
   apt-get update -qq
   apt-get install -y --no-install-recommends \
-    python3.11 python3.11-dev python3.11-venv python3.11-distutils libpython3.11-dev
-  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
-  ln -sf /usr/bin/python3.11 /usr/bin/python3
-  ln -sf /usr/bin/python3.11 /usr/bin/python
+    python3.13 python3.13-dev python3.13-venv libpython3.13-dev
+  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.13
+  ln -sf /usr/bin/python3.13 /usr/bin/python3
+  ln -sf /usr/bin/python3.13 /usr/bin/python
   ln -sf /usr/local/bin/pip /usr/bin/pip3
   ln -sf /usr/local/bin/pip /usr/bin/pip
 
-  # ── Node.js 22 LTS ───────────────────────────────────────────────────────
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  # ── Node.js 24 LTS ───────────────────────────────────────────────────────
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   apt-get install -y --no-install-recommends nodejs
   npm install -g yarn typescript ts-node
 
@@ -101,11 +104,11 @@ tpl::code-interpreter() {
     playwright \
     'python-lsp-server>=1.14' pylsp-rope pyflakes pycodestyle
 
-  python3.11 -m ipykernel install --sys-prefix
-  python3.11 -m playwright install chromium --with-deps
+  python3.13 -m ipykernel install --sys-prefix
+  python3.13 -m playwright install chromium --with-deps
 
   # ── Persist PLAYWRIGHT_BROWSERS_PATH across all Python processes ──────────
-  SITEDIR=$(python3.11 -c "import site; print(site.getsitepackages()[0])")
+  SITEDIR=$(python3.13 -c "import site; print(site.getsitepackages()[0])")
   printf 'import os\nif not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):\n    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/opt/playwright"\n' \
     > "$SITEDIR/sitecustomize.py"
 
@@ -149,125 +152,53 @@ UNIT
   systemctl enable pandastack-autostart.service
 }
 
-tpl::browser() {
-  # Headless Chromium + Playwright (Node) PLUS the Python crawl4ai extraction
-  # stack (merged from the former 'crawler' template). One browser-automation
-  # box for scraping, RPA, screenshots, and LLM-friendly web extraction.
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git xvfb ffmpeg chromium-browser \
-    python3 python3-pip python3-venv \
-    libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs
-  npm i -g playwright --silent || true
-  python3 -m pip install --break-system-packages --no-cache-dir \
-    'playwright' 'crawl4ai' 'readability-lxml' 'trafilatura' 'httpx' \
-    'beautifulsoup4' 'lxml' || true
-  npx --yes playwright install chromium || true
-  python3 -m playwright install chromium || true
-}
-
 tpl::agent() {
-  # Unified coding-agent CLI box (merged from claude-code, codex, opencode,
-  # amp, devin). Ships every real terminal coding agent pre-installed; the user
+  # Unified coding-agent CLI box (merged from the former per-brand templates).
+  # Ships the terminal coding agents that have a real installable CLI; the user
   # picks which to run by providing the matching API key in the sandbox env
-  # (ANTHROPIC_API_KEY -> claude, OPENAI_API_KEY -> codex, BYO model -> opencode).
+  # (ANTHROPIC_API_KEY -> claude, OPENAI_API_KEY -> codex, XAI_API_KEY -> grok,
+  # GEMINI_API_KEY -> gemini, AMP_API_KEY -> amp, BYO model -> opencode).
+  # build-essential + pkg-config: coding agents routinely `npm install` native
+  # addons (node-gyp needs gcc/make) and `pip install` C-extension wheels.
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates curl git ripgrep fd-find bat tmux \
+    build-essential pkg-config \
     python3 python3-pip python3-venv
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs
-  npm i -g @anthropic-ai/claude-code @openai/codex opencode-ai --silent || true
-}
-
-tpl::claude-agent() {
-  # Self-hosted sandbox runtime for Claude Managed Agents
-  # (https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes).
-  #
-  # Anthropic runs the agent loop; this template is where the agent's tool
-  # calls execute. The reference orchestrator (cookbook/claude-managed-agents)
-  # creates one sandbox per session from this template and launches the
-  # pre-built in-guest runner `ant beta:worker run --workdir /workspace`, which
-  # downloads the agent's skills, executes tool calls (bash/read/write/edit/
-  # glob/grep), heartbeats its work lease, and exits when the session goes idle.
-  #
-  # Keep this in sync with templates/claude-agent/Dockerfile (the CLI/API build
-  # path used for local dev). This chroot path is the production bake.
-  local ANT_VERSION=1.12.1
-  apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git build-essential xz-utils unzip zip pkg-config \
-    jq ripgrep tar
-
-  # ── ant CLI: Anthropic's pre-built environment worker ───────────────────────
-  # Single static Go binary; only runtime dependency is /bin/bash. Release
-  # assets use amd64/arm64 directly (no x64 mapping, unlike mise).
-  local arch
-  arch="$(dpkg --print-architecture)"  # amd64 | arm64
-  curl -fsSL "https://github.com/anthropics/anthropic-cli/releases/download/v${ANT_VERSION}/ant_${ANT_VERSION}_linux_${arch}.tar.gz" \
-    | tar -xz -C /usr/local/bin ant
-  chmod 0755 /usr/local/bin/ant
-  ant --version
-
-  # ── mise: pre-warmed Node 22 + Python 3.12 for agent-authored code ──────────
-  local mise_arch
-  case "$arch" in
-    amd64) mise_arch=x64 ;;
-    arm64) mise_arch=arm64 ;;
-    *) echo "unsupported arch: $arch" && exit 1 ;;
-  esac
-  mkdir -p /opt/mise
-  curl -fsSL "https://mise.jdx.dev/mise-latest-linux-${mise_arch}" -o /usr/local/bin/mise
-  chmod 0755 /usr/local/bin/mise
-  export MISE_DATA_DIR=/opt/mise MISE_CONFIG_DIR=/opt/mise MISE_YES=1
-  mise use -g node@22
-  mise use -g python@3.12
-  mise reshim
-  PATH=/opt/mise/shims:$PATH node -v
-  PATH=/opt/mise/shims:$PATH python --version
-
-  printf 'export MISE_DATA_DIR=/opt/mise\nexport MISE_CONFIG_DIR=/opt/mise\nexport PATH=/opt/mise/shims:$PATH\n' \
-    > /etc/profile.d/mise.sh
-
-  # `ant beta:worker run` executes agent bash tool calls as non-login `sh -c`
-  # sessions, which do NOT source /etc/profile.d. mise shims are inert without
-  # MISE_DATA_DIR/MISE_CONFIG_DIR, so node/python would fail to resolve. Bake
-  # the resolution into /etc/environment (read by PAM for every session).
-  printf 'MISE_DATA_DIR=/opt/mise\nMISE_CONFIG_DIR=/opt/mise\nPATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' \
-    > /etc/environment
-
-  # ── Session filesystem contract ─────────────────────────────────────────────
-  # /workspace: tool working directory + skills download target.
-  # /mnt/session/outputs: where the agent is told to write deliverables; the
-  # orchestrator retrieves it before sandbox deletion.
-  mkdir -p /workspace /mnt/session/outputs
+  # Install each CLI on its own line + verify: the old single `... || true` line
+  # dropped all three on any single registry blip. Each is verified so a
+  # silently-missing CLI fails the bake rather than shipping a box without it.
+  # amp is @ampcode/cli — @sourcegraph/amp is the OLD name and now publishes
+  # only a deprecation stub that installs no `amp` binary.
+  npm i -g @anthropic-ai/claude-code && command -v claude
+  npm i -g @openai/codex             && command -v codex
+  npm i -g opencode-ai               && command -v opencode
+  npm i -g @ampcode/cli              && command -v amp
+  npm i -g @xai-official/grok        && command -v grok
+  npm i -g @google/gemini-cli        && command -v gemini
+  npm i -g @github/copilot           && command -v copilot
 }
 
 # ---- size + ordering -------------------------------------------------------
 
 # Rootfs image sizes (megabytes on disk).
 declare -A SIZE_MB=(
-  # 'base' is the universal app-runtime substrate for the git-driven apps
-  # feature (mise + Node 22/Python 3.12/Go/Bun + pnpm/yarn). It is NOT a
-  # user-facing sandbox template, but the CI bake-templates.yml workflow reads
-  # this array to size its rootfs. 12 GiB matches templates/base/Dockerfile.
+  # 'base' is the universal language-agnostic sandbox substrate (mise + Node
+  # 24/Python 3.12/Go/Bun + pnpm/yarn). 12 GiB matches
+  # templates/base/Dockerfile.
   [base]=12288
   [code-interpreter]=12288
-  # 'browser' merges the former 'crawler' Python stack — sized up from 3072.
-  [browser]=4096
-  # 'agent' is the unified coding-agent CLI box (replaces claude-code, codex,
-  # opencode, amp, devin): Node 22 + git + three real agent CLIs.
-  [agent]=3072
-  # 'claude-agent' is the Claude Managed Agents self-hosted sandbox runtime:
-  # ant CLI + mise (Node 22 / Python 3.12). 8 GiB fits the runtimes + the
-  # agent's downloaded skills + working files.
-  [claude-agent]=8192
+  # 'agent' is the unified coding-agent CLI box: Node 24 + git + seven real
+  # agent CLIs (claude, codex, opencode, amp, grok, gemini, copilot). Those
+  # npm globals measure ~1.56 GiB by themselves, which no longer fits the old
+  # 3072 alongside Ubuntu + build-essential + Node; 6144 leaves ~3 GiB for the
+  # user's repo and its node_modules.
+  [agent]=6144
   [postgres-16]=12288
 )
 
-# Guest vCPU count — must match marketing page (pandastack.ai/templates/).
 tpl::postgres-16() {
   # Enterprise-grade PostgreSQL 16 sandbox.
   # Installs: PostgreSQL 16 (PGDG), PgBouncer, pgvector, and pds-query-broker
@@ -309,7 +240,8 @@ tpl::postgres-16() {
 
   # ── Compile and install pds-query-broker ────────────────────────────────────
   # Go is fetched transiently; removed after compilation to keep rootfs lean.
-  GO_VERSION=1.23.4
+  # Track the repo's Go version (agent/api are on 1.25.x); build-stage only.
+  GO_VERSION=1.25.0
   GO_ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" \
     | tar -C /usr/local -xz
@@ -409,30 +341,34 @@ PGCONF
   systemctl mask postgresql.service 2>/dev/null || true
 }
 
+# Guest vCPU count. Every first-party template bakes 8 vCPUs: CPU is burst
+# capacity, not a steady-state reservation — an idle host lets any sandbox
+# burst to all physical cores, and cgroup v2 cpu.weight arbitrates only under
+# contention (see agent/internal/sandbox/cputiers.go). Keep in sync with the
+# catalog in api/cmd/api/templates.go.
 declare -A CPU_COUNT=(
-  [base]=2
-  [code-interpreter]=2
-  [browser]=4
-  [agent]=2
-  [claude-agent]=2
-  [postgres-16]=2
+  [base]=8
+  [code-interpreter]=8
+  [agent]=8
+  [postgres-16]=8
 )
 
-# Guest RAM in MB — must match marketing page.
+# Guest RAM in MB. Firecracker snapshot restore freezes RAM at bake time, so
+# this is the guest's real memory ceiling — a per-sandbox memory_mb cannot
+# raise it. Keep in sync with api/cmd/api/templates.go.
 declare -A MEMORY_MB=(
-  [base]=2048
+  # 'base' is sized for BUILDS: Next/Vite/tsc prod builds routinely spike
+  # 2.5-4 GiB and OOM at 2 GiB. NODE_OPTIONS in templates/base/Dockerfile
+  # raises Node's heap so builds actually use this RAM.
+  [base]=4096
   [code-interpreter]=2048
-  [browser]=4096
   [agent]=2048
-  [claude-agent]=2048
   [postgres-16]=1024
 )
 
 ALL_TEMPLATES=(
   code-interpreter
-  browser
   agent
-  claude-agent
   postgres-16
 )
 

@@ -6,6 +6,9 @@ node_modules/
 
 # stray go build outputs (when `go build` runs without -o in a package dir)
 /agent/agent
+/agent/migrate
+/agent/pandastack-daemon
+/agent/pandastack-init
 /cmd/pandastack/cli
 /api/api
 /db-proxy/db-proxy
@@ -46,10 +49,16 @@ venv/
 *.pyc
 
 # Terraform state + plans + vars (NEVER commit — contain real credentials/JWTs)
+# A saved plan file is a serialized copy of the resource graph: it embeds
+# attribute values and the variables that produced them, including anything
+# marked `sensitive`. Ignore every spelling a `terraform plan -out=` produces.
 *.tfstate
 *.tfstate.*
 *.tfstate.backup
 *.tfplan
+*.plan
+tfplan*
+*.out
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
@@ -84,5 +93,11 @@ plan.md
 
 # Local runtime state (tokens, session data)
 .local-state/
+# Operator scratch dirs that hold live tokens / request bodies. These are not
+# part of the open-source tree; ignoring them keeps a stray local copy from
+# ever being staged.
+.run/
+gtm/
+tools/
 templates/postgres-16/query-broker/query-broker
 db-proxy/db-proxy

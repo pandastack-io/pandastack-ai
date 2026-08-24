@@ -19,20 +19,14 @@ const TROUBLESHOOTING = [
   {
     title: "Getting 401 Unauthorized",
     keywords: ["401", "unauthorized", "auth", "token", "authentication"],
-    body: "Check your PANDASTACK_TOKEN is set and valid. Get a new token from dashboard settings.",
+    body: "Check your PANDASTACK_API_KEY is set and valid. Get a new token from dashboard settings.",
     url: "/docs/quickstart/authentication"
   },
   {
-    title: "Getting 402 Payment Required",
-    keywords: ["402", "payment", "upgrade", "paid", "tier", "plan"],
-    body: "This feature requires a paid plan. Upgrade to Pro, Team, or Enterprise.",
-    url: "https://pandastack.ai/pricing"
-  },
-  {
     title: "Getting 429 Too Many Requests",
-    keywords: ["429", "rate limit", "quota", "throttle", "too many"],
-    body: "You've hit the hourly sandbox creation limit. Wait or upgrade your plan.",
-    url: "/docs/concepts/billing#quotas"
+    keywords: ["429", "rate limit", "throttle", "too many"],
+    body: "You've hit the API rate limit. Back off and retry.",
+    url: "/docs/reference/rest-api"
   },
   {
     title: "Getting 503 Service Unavailable - no agents",
@@ -59,16 +53,10 @@ const TROUBLESHOOTING = [
     url: "/docs/concepts/databases"
   },
   {
-    title: "App deploy failing or stuck",
-    keywords: ["app", "deploy", "build", "failing", "error"],
-    body: "Check deployment logs for errors. Verify framework detection and build commands.",
-    url: "/docs/guides/apps"
-  },
-  {
-    title: "Can't create sandbox - quota exceeded",
-    keywords: ["quota", "limit", "max sandboxes", "create", "exceeded"],
-    body: "You've reached your workspace sandbox limit. Delete old sandboxes or upgrade.",
-    url: "/docs/concepts/billing#quotas"
+    title: "Can't create sandbox - no capacity",
+    keywords: ["capacity", "limit", "max sandboxes", "create", "exceeded"],
+    body: "The cluster has no free capacity. Delete unused sandboxes or add another agent host.",
+    url: "/docs/concepts/sandboxes"
   },
   {
     title: "Using sandbox for machine learning / AI",

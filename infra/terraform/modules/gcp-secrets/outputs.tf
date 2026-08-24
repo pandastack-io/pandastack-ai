@@ -47,15 +47,3 @@ output "secret_name_supabase_url" {
 output "secret_name_supabase_anon_key" {
   value = google_secret_manager_secret.supabase_anon_key.secret_id
 }
-
-output "secret_name_stripe_env" {
-  value = {
-    for name, secret in google_secret_manager_secret.stripe : name => secret.secret_id
-  }
-}
-
-output "secret_name_github_env" {
-  value = {
-    for name, secret in google_secret_manager_secret.github : name => secret.secret_id
-  }
-}

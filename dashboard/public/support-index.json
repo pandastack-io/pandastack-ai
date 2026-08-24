@@ -9,23 +9,8 @@
       "authentication"
     ],
     "heading": "",
-    "body": "Check your PANDASTACK_TOKEN is set and valid. Get a new token from dashboard settings.",
+    "body": "Check your PANDASTACK_API_KEY is set and valid. Get a new token from dashboard settings.",
     "url": "/docs/quickstart/authentication",
-    "type": "troubleshooting"
-  },
-  {
-    "title": "Getting 402 Payment Required",
-    "keywords": [
-      "402",
-      "payment",
-      "upgrade",
-      "paid",
-      "tier",
-      "plan"
-    ],
-    "heading": "",
-    "body": "This feature requires a paid plan. Upgrade to Pro, Team, or Enterprise.",
-    "url": "https://pandastack.ai/pricing",
     "type": "troubleshooting"
   },
   {
@@ -33,13 +18,12 @@
     "keywords": [
       "429",
       "rate limit",
-      "quota",
       "throttle",
       "too many"
     ],
     "heading": "",
-    "body": "You've hit the hourly sandbox creation limit. Wait or upgrade your plan.",
-    "url": "/docs/concepts/billing#quotas",
+    "body": "You've hit the API rate limit. Back off and retry.",
+    "url": "/docs/reference/rest-api",
     "type": "troubleshooting"
   },
   {
@@ -97,31 +81,17 @@
     "type": "troubleshooting"
   },
   {
-    "title": "App deploy failing or stuck",
+    "title": "Can't create sandbox - no capacity",
     "keywords": [
-      "app",
-      "deploy",
-      "build",
-      "failing",
-      "error"
-    ],
-    "heading": "",
-    "body": "Check deployment logs for errors. Verify framework detection and build commands.",
-    "url": "/docs/guides/apps",
-    "type": "troubleshooting"
-  },
-  {
-    "title": "Can't create sandbox - quota exceeded",
-    "keywords": [
-      "quota",
+      "capacity",
       "limit",
       "max sandboxes",
       "create",
       "exceeded"
     ],
     "heading": "",
-    "body": "You've reached your workspace sandbox limit. Delete old sandboxes or upgrade.",
-    "url": "/docs/concepts/billing#quotas",
+    "body": "The cluster has no free capacity. Delete unused sandboxes or add another agent host.",
+    "url": "/docs/concepts/sandboxes",
     "type": "troubleshooting"
   },
   {
@@ -144,7 +114,7 @@
     "title": "Databases",
     "keywords": [],
     "heading": "",
-    "body": "Beta. Managed Databases are in public beta. The API is stable for create / list / get / delete, but advanced features (branching, read replicas, point-in-time restore) are still in progress — see Coming soon. Don't yet rely on a single beta database as the only copy of irreplaceable production data. A database is a managed PostgreSQL 16 instance running in its own dedicated Firecracker microVM — not a shared schema on a multi-tenant cluster. Each database gets its own kernel, its own process, a ",
+    "body": "Beta. Managed Databases are in public beta. The API is stable for create / list / get / delete, every database is continuously archived to object storage, and a failed database can be failed over onto a healthy host. Read replicas and storage autoscaling are still in progress — see Coming soon. Don't yet rely on a single beta database as the only copy of irreplaceable production data. A database is a managed PostgreSQL 16 instance running in its own dedicated Firecracker microVM — not a shared s",
     "url": "/docs/concepts/databases",
     "type": "doc"
   },
@@ -189,10 +159,10 @@
     "type": "doc"
   },
   {
-    "title": "Hosted MCP Server",
+    "title": "Workspace MCP Server",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack ships a hosted, workspace-level MCP server . Where the per-sandbox MCP endpoint turns one sandbox into a tool, this endpoint turns your whole workspace into one: the model can create and destroy sandboxes, run commands, read/write files, provision Postgres databases, and trigger app deploys — all through a single URL and your existing API token. is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works",
+    "body": "PandaStack ships a workspace-level MCP server . Where the per-sandbox MCP endpoint turns one sandbox into a tool, this endpoint turns your whole workspace into one: the model can create and destroy sandboxes, run commands, read/write files, and provision Postgres databases — all through a single URL and your existing API token. is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works with every MCP client that s",
     "url": "/docs/concepts/mcp-server",
     "type": "doc"
   },
@@ -200,7 +170,7 @@
     "title": "MCP (Model Context Protocol)",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack speaks MCP natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the CLI, or your own agent at it and the model gets , , , and tools wired to a real Linux microVM. Looking for workspace-level tools (create/delete sandboxes, databases, app deploys) behind a single URL? That's the hosted MCP server at — this page covers the per-sandbox endpoint. Body is JSON-RPC 2.0. Stateless — every request stands alone, no session affinity needed. Methods Returns capabi",
+    "body": "PandaStack speaks MCP natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the CLI, or your own agent at it and the model gets , , , and tools wired to a real Linux microVM. Looking for workspace-level tools (create/delete sandboxes, databases) behind a single URL? That's the workspace MCP server at — this page covers the per-sandbox endpoint. Body is JSON-RPC 2.0. Stateless — every request stands alone, no session affinity needed. Methods Returns capabilities + t",
     "url": "/docs/concepts/mcp",
     "type": "doc"
   },
@@ -218,6 +188,14 @@
     "heading": "",
     "body": "PandaStack ships first-class observability — every sandbox emits process-level metrics and lifecycle events that flow into ClickHouse, then back out through the dashboard as charts. No Grafana, no Prometheus to operate; it's built in. What gets collected Five tables in ClickHouse, all partitioned by workspace and retained per the SLA below. | Table | Cardinality | Retention | What's in it | | -------------------------- | ----------------- | --------- | -------------------------------------------",
     "url": "/docs/concepts/observability",
+    "type": "doc"
+  },
+  {
+    "title": "Open source vs Cloud",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack is open core. The repository is the real engine — the same Firecracker orchestration, snapshot machinery, scheduler, and managed-Postgres control plane that PandaStack Cloud runs — under the Apache License 2.0. PandaStack Cloud is the hosted service operated by the PandaStack team. It runs that same core, adds a small set of hosted-only database features, and takes the fleet off your hands. This page states exactly where the line is, so you can decide without guessing. The short versi",
+    "url": "/docs/concepts/open-source-vs-cloud",
     "type": "doc"
   },
   {
@@ -264,7 +242,7 @@
     "title": "Templates",
     "keywords": [],
     "heading": "",
-    "body": "A template is a snapshot-ready root filesystem with a pinned kernel. When you , the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at 179 ms instead of \"boot a kernel from scratch\". Templates are immutable and content-addressed: once a snapshot exists for , every sandbox boots from the same bytes. Official catalog PandaStack ships 5 production templates. All names are stable and accepted by in the SDKs and in the CLI. CPU and memory are baked in",
+    "body": "A template is a snapshot-ready root filesystem with a pinned kernel. When you , the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at 179 ms instead of \"boot a kernel from scratch\". Templates are immutable and content-addressed: once a snapshot exists for , every sandbox boots from the same bytes. Official catalog PandaStack ships four first-party templates. All names are stable and accepted by in the SDKs and in the CLI. CPU and memory are bake",
     "url": "/docs/concepts/templates",
     "type": "doc"
   },
@@ -280,7 +258,7 @@
     "title": "Volumes",
     "keywords": [],
     "heading": "",
-    "body": "A volume is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies — the data stays. Lifecycle Backing layout: one file per volume at . Maximum size 65,536 MB (64 GiB) per volume on every plan. Names are workspace-scoped. Attach to a sandbox Each entry adds a device to the VM. Volumes appear in the guest in attach-order: | Attach position | Gu",
+    "body": "A volume is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies — the data stays. Lifecycle Backing layout: one file per volume at . Maximum size 65,536 MB (64 GiB) per volume. Names are workspace-scoped. Attach to a sandbox Each entry adds a device to the VM. Volumes appear in the guest in attach-order: | Attach position | Guest device | |",
     "url": "/docs/concepts/volumes",
     "type": "doc"
   },
@@ -440,7 +418,7 @@
     "title": "Architecture",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack has three main layers: 1. Control plane — API, auth, organizations, tokens, templates, billing, and orchestration. 2. Data plane — agents that run sandbox operations on hosts. 3. Workload microVMs — Firecracker sandboxes created from templates. Public surfaces - Marketing: - Dashboard: - API: - Docs: API entry points Sandbox operations are scoped under . Filesystem access uses , lifecycle uses routes such as , , , , , and , and streaming uses , , and WebSocket upgrades. Agent-proxied ",
+    "body": "PandaStack has three main layers: 1. Control plane — API, auth, organizations, tokens, templates, databases, and orchestration. 2. Data plane — agents that run sandbox operations on hosts. 3. Workload microVMs — Firecracker sandboxes created from templates. Public surfaces On a self-hosted deployment these are whatever hostnames you choose; the hosted service uses: - Dashboard: - API: - Docs: API entry points Sandbox operations are scoped under . Filesystem access uses , lifecycle uses routes su",
     "url": "/docs/reference/architecture",
     "type": "doc"
   },
@@ -448,7 +426,7 @@
     "title": "Errors",
     "keywords": [],
     "heading": "",
-    "body": "All HTTP errors follow a consistent JSON envelope: | HTTP | Code prefix | Meaning | |---|---|---| | 400 | | Invalid request shape or parameter | | 401 | | Missing or invalid credentials | | 403 | , | Authenticated but not allowed | | 404 | | Resource does not exist | | 409 | | Resource state conflict (e.g. delete while booting) | | 429 | | Too many requests | | 500 | | Bug in PandaStack — please report | | 503 | | No agent capacity for placement | Common codes | Code | Meaning | |---|---| | | JW",
+    "body": "All HTTP errors follow a consistent JSON envelope: | HTTP | Code prefix | Meaning | |---|---|---| | 400 | | Invalid request shape or parameter | | 401 | | Missing or invalid credentials | | 403 | | Authenticated but not allowed | | 404 | | Resource does not exist | | 409 | | Resource state conflict (e.g. delete while booting) | | 429 | | Too many requests in a short window (abuse guard, not a usage quota) | | 500 | | Bug in PandaStack — please report | | 503 | | No agent capacity for placement |",
     "url": "/docs/reference/errors",
     "type": "doc"
   },

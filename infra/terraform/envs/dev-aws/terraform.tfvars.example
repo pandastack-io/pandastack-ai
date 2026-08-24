@@ -1,4 +1,11 @@
 # Copy to terraform.tfvars and fill in. Never commit terraform.tfvars.
+#
+# The values below are the MINIMUM PRODUCTION FOOTPRINT — the defaults in
+# variables.tf, restated here so they are visible before you apply. Every number
+# is justified in a comment on the matching variable; the per-component cost
+# table is in infra/README.md. Shrink them for a trial by all means, but read
+# the justification first: most of them are sized against how the agent actually
+# uses the disk and the network, not against a round number.
 
 aws_region         = "us-east-1"
 availability_zones = ["us-east-1a", "us-east-1b"]
@@ -10,23 +17,38 @@ ssh_pubkey = "ssh-ed25519 AAAA... you@host"
 # CIDR allowed to SSH (your IP /32).
 ssh_allowed_cidr = "<your-ip>/32"
 
-# Edge tier (API + dashboard).
-edge_instance_type = "t3.small"
-edge_count         = 1
-edge_max_count     = 2
+# Edge tier (API + dashboard). Non-burstable and >= 2: this is the only path to
+# the control plane, and it is under continuous polling load.
+edge_instance_type     = "m6i.large"
+edge_count             = 2
+edge_max_count         = 4
+edge_boot_disk_size_gb = 100
 
-# Agent tier — MUST be a *.metal flavor for Firecracker (bare-metal KVM):
-#   c5n.metal   72 vCPU 192GB
-#   m5zn.metal  48 vCPU 192GB
-#   m5.metal    96 vCPU 384GB
-agent_instance_type = "c5n.metal"
-agent_count         = 1
-agent_max_count     = 8
+# Agent tier — MUST be a *.metal flavor. Firecracker needs bare-metal KVM;
+# nested virtualization is not available on normal EC2 instances.
+#   c5n.metal   72 vCPU / 192 GiB  (default — best network for seed pulls)
+#   m5zn.metal  48 vCPU / 192 GiB  (highest clock)
+#   m5.metal    96 vCPU / 384 GiB  (most RAM per host)
+#
+# agent_count = 2 is the production floor, not a performance tuning knob:
+# managed-database PGDATA is host-pinned to the agent's durable volume, so a
+# single agent has no failover target, and a freshly scaled-out agent is not
+# schedulable until its template seed-sync completes.
+agent_instance_type             = "c5n.metal"
+agent_count                     = 2
+agent_max_count                 = 8
+agent_boot_disk_size_gb         = 1000
+agent_boot_disk_iops            = 12000
+agent_boot_disk_throughput_mbps = 500
 
 # Cloudflare (Zone:DNS:Edit on your zone).
 cloudflare_api_token = "<create at https://dash.cloudflare.com/profile/api-tokens>"
 cloudflare_zone_id   = "<zone id>"
 cloudflare_zone_name = "example.com"
+
+# Contact address for the Let's Encrypt account the db-proxy registers for its
+# *.db.<zone> wildcard cert. Expiry warnings go here — use your own.
+acme_email = "ops@example.com"
 
 # Optional: Supabase auth (leave blank to provision empty secret containers).
 supabase_url      = ""
@@ -38,16 +60,17 @@ edge_binary_url     = ""
 agent_binary_url    = ""
 db_proxy_binary_url = ""
 
-# RDS (control-plane Postgres).
-rds_instance_class      = "db.t4g.micro"
-rds_allocated_storage_gb = 20
-rds_deletion_protection = true
+# RDS (control-plane Postgres). Multi-AZ roughly doubles the RDS line item; a
+# single-AZ control-plane database means an AZ event freezes all scheduling.
+rds_instance_class       = "db.m6g.xlarge"
+rds_allocated_storage_gb = 200
+rds_multi_az             = true
+rds_deletion_protection  = true
 
-# Optional GitHub App (apps feature) — leave blank to populate secrets later.
-github_app_id              = ""
-github_app_installation_id = ""
-github_app_slug            = ""
-github_app_client_id       = ""
-github_app_client_secret   = ""
-github_app_private_key     = ""
-github_app_webhook_secret  = ""
+# ClickHouse (boot events + per-sandbox metrics behind the dashboard charts).
+clickhouse_instance_type = "m6i.xlarge"
+clickhouse_disk_size_gb  = 1000
+
+# db-proxy (terminates TLS for every managed-database connection).
+db_proxy_instance_type = "c6i.large"
+db_proxy_disk_size_gb  = 100

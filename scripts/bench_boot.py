@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-bench_boot.py — measure cold-boot performance against prod api.pandastack.ai.
+bench_boot.py — measure cold-boot performance against a live deployment.
+
+Set PANDASTACK_API to the control-plane URL (default: http://localhost:8080)
+and PANDASTACK_TOKEN to an API token.
 
 Spawns N sandboxes serially (so the host quiesces between trials), records:
   - boot_ms: server-side measured pure microVM boot (from agent response)
@@ -19,7 +22,7 @@ import time
 import urllib.request
 import urllib.error
 
-API = os.environ.get("PANDASTACK_API", "https://api.pandastack.ai")
+API = os.environ.get("PANDASTACK_API", "http://localhost:8080")
 TOKEN = os.environ["PANDASTACK_TOKEN"]
 TEMPLATE = os.environ.get("BENCH_TEMPLATE", "ubuntu-24.04-net")
 N = int(os.environ.get("BENCH_N", "50"))

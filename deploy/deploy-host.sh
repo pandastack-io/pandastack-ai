@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # deploy/deploy-host.sh
 #
-# Cloud-agnostic deploy step: builds agent + api + dashboard + marketing locally,
-# copies them to $HOST, writes /etc/pandastack/env, restarts services.
+# Cloud-agnostic deploy step: builds agent + api + dashboard locally, copies them
+# to $HOST, writes /etc/pandastack/env, restarts services.
 #
 # Required env vars:
 #   HOST                  ssh-reachable host (IP or FQDN)
 #   SSH_USER              defaults to ubuntu
-#   APP_FQDN              dashboard FQDN (eg app.pandastack.ai)
-#   API_FQDN              api FQDN     (eg api.pandastack.ai)
-#   WWW_FQDN              marketing FQDN (eg www.pandastack.ai). Optional.
+#   APP_FQDN              dashboard FQDN (eg app.example.com)
+#   API_FQDN              api FQDN     (eg api.example.com)
 #   DATABASE_URL          Postgres DSN (Supabase pooler).
 #   SUPABASE_JWKS_URL     Supabase JWKS endpoint.
 #   SUPABASE_ISSUER       Supabase auth issuer.
@@ -18,23 +17,17 @@
 #
 # Optional flags:
 #   --skip-build          reuse existing artifacts in deploy/.build/
-#   --skip-marketing      don't deploy the marketing site
 #   --skip-dashboard      don't deploy the dashboard
-#   --coming-soon=true    set COMING_SOON for the marketing build (default true)
 set -euo pipefail
 
 SKIP_BUILD=0
-SKIP_MARKETING=0
 SKIP_DASHBOARD=0
-COMING_SOON="${COMING_SOON:-true}"
 SSH_USER="${SSH_USER:-ubuntu}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-build)      SKIP_BUILD=1; shift ;;
-    --skip-marketing)  SKIP_MARKETING=1; shift ;;
     --skip-dashboard)  SKIP_DASHBOARD=1; shift ;;
-    --coming-soon=*)   COMING_SOON="${1#*=}"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -79,11 +72,6 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
     (cd "$REPO_ROOT/dashboard" && npm ci --no-audit --no-fund && npm run build)
   fi
 
-  if [ "$SKIP_MARKETING" -eq 0 ] && [ -d "$REPO_ROOT/marketing" ]; then
-    need npm
-    step "Building marketing (COMING_SOON=$COMING_SOON)"
-    (cd "$REPO_ROOT/marketing" && npm ci --no-audit --no-fund && COMING_SOON="$COMING_SOON" npm run build)
-  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -181,14 +169,6 @@ if [ "$SKIP_DASHBOARD" -eq 0 ]; then
   ssh "$REMOTE" "cd /opt/pandastack-dashboard && npm ci --omit=dev --silent --no-audit --no-fund"
 fi
 
-if [ "$SKIP_MARKETING" -eq 0 ] && [ -d "$REPO_ROOT/marketing/.next" ]; then
-  step "Deploying marketing (COMING_SOON=$COMING_SOON)"
-  ssh "$REMOTE" "sudo mkdir -p /opt/pandastack-marketing && sudo chown $SSH_USER:$SSH_USER /opt/pandastack-marketing"
-  rsync -az --delete "$REPO_ROOT/marketing/.next/standalone/"        "$REMOTE:/opt/pandastack-marketing/"
-  rsync -az --delete "$REPO_ROOT/marketing/.next/static/"            "$REMOTE:/opt/pandastack-marketing/.next/static/"
-  rsync -az --delete "$REPO_ROOT/marketing/public/"                  "$REMOTE:/opt/pandastack-marketing/public/"
-fi
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Systemd units + caddy
 # ──────────────────────────────────────────────────────────────────────────────
@@ -241,27 +221,6 @@ WantedBy=multi-user.target
 UNIT
 fi
 
-if [ "$SKIP_MARKETING" -eq 0 ]; then
-  ssh "$REMOTE" "sudo tee /etc/systemd/system/pandastack-marketing.service >/dev/null" <<UNIT
-[Unit]
-Description=PandaStack marketing site
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=simple
-Environment=NODE_ENV=production
-Environment=PORT=3100
-Environment=HOSTNAME=127.0.0.1
-Environment=COMING_SOON=$COMING_SOON
-WorkingDirectory=/opt/pandastack-marketing
-ExecStart=/usr/bin/node server.js
-Restart=always
-RestartSec=3
-[Install]
-WantedBy=multi-user.target
-UNIT
-fi
-
 CADDY_BLOCKS=$(cat <<CADDY
 {
   auto_https off
@@ -277,13 +236,6 @@ http://{\$PANDASTACK_API_FQDN}, https://{\$PANDASTACK_API_FQDN} {
 }
 CADDY
 )
-if [ -n "${WWW_FQDN:-}" ] && [ "$SKIP_MARKETING" -eq 0 ]; then
-  CADDY_BLOCKS="$CADDY_BLOCKS
-http://$WWW_FQDN, https://$WWW_FQDN {
-  tls internal
-  reverse_proxy localhost:3100
-}"
-fi
 ssh "$REMOTE" "sudo tee /etc/caddy/Caddyfile >/dev/null" <<<"$CADDY_BLOCKS"
 ssh "$REMOTE" "sudo install -d -m 0755 /etc/systemd/system/caddy.service.d && sudo tee /etc/systemd/system/caddy.service.d/pandastack-env.conf >/dev/null" <<'UNIT'
 [Service]
@@ -293,7 +245,6 @@ UNIT
 step "Restarting services"
 RESTART_LIST="caddy pandastack-agent pandastack-api"
 [ "$SKIP_DASHBOARD" -eq 0 ] && RESTART_LIST="$RESTART_LIST pandastack-dashboard"
-[ "$SKIP_MARKETING" -eq 0 ] && RESTART_LIST="$RESTART_LIST pandastack-marketing"
 ssh "$REMOTE" "sudo systemctl daemon-reload && sudo systemctl enable $RESTART_LIST && sudo systemctl restart $RESTART_LIST"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -315,6 +266,5 @@ health() {
 }
 health "api"        "https://$API_FQDN/healthz"        || warn "api health failed (DNS may not have propagated; verify locally on host)"
 [ "$SKIP_DASHBOARD" -eq 0 ] && { health "dashboard" "https://$APP_FQDN/login" || warn "dashboard health failed (DNS may not have propagated)"; }
-[ "$SKIP_MARKETING" -eq 0 ] && [ -n "${WWW_FQDN:-}" ] && { health "marketing" "https://$WWW_FQDN/" || warn "marketing health failed (DNS may not have propagated)"; }
 
 printf "\n${GREEN}Deploy complete${NC} (host=%s)\n" "$HOST"

@@ -30,9 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — never commit any of them. The vendor's .env.production holds a
+# live Supabase project URL + anon key and a hosted API origin; a self-hosted
+# deployment supplies its own via the environment (see Dockerfile ARGs).
 .env*
-!.env.production
 
 # vercel
 .vercel

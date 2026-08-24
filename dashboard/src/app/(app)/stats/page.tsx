@@ -7,10 +7,10 @@ import { toast } from "sonner";
 import { API_BASE, api, getAuthHeaders } from "@/lib/api";
 import { Badge, Btn, Card, PageHeader, Table, Td } from "@/components/ui";
 import { compareValue, ErrorState, LoadingTable, PaginationBar, RelativeTime, RowAction, RowActions, rowNavProps, SearchInput, SortHeader, type SortDir, useDebouncedValue, usePagedRows } from "@/components/list-quality";
-import TimeSeriesChart, {
-  CHART_PALETTE,
-  type Series,
-} from "@/components/TimeSeriesChart";
+import dynamic from "next/dynamic";
+import { CHART_PALETTE, type Series } from "@/components/chart-theme";
+// recharts is heavy — split the chart into its own async chunk.
+const TimeSeriesChart = dynamic(() => import("@/components/TimeSeriesChart"), { ssr: false });
 
 type Bucket = {
   count: number;
@@ -82,7 +82,9 @@ export default function StatsPage() {
     let alive = true;
     const tick = async () => {
       try {
-        const r = await fetch(`${API_BASE}/v1/stats/boot?limit=60`, {
+        const now = new Date();
+        const monthStart = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000);
+        const r = await fetch(`${API_BASE}/v1/stats/boot?limit=500&since=${monthStart}`, {
           cache: "no-store",
           headers: await getAuthHeaders(),
         });
@@ -111,17 +113,6 @@ export default function StatsPage() {
   }, [loadCH]);
 
   const overall = data?.overall ?? EMPTY_BUCKET;
-  const recent = data?.recent ?? [];
-  const filteredRecent = useMemo(() => {
-    const q = debouncedQuery.trim().toLowerCase();
-    return recent
-      .filter((r) => !q || r.sandbox_id.toLowerCase().includes(q) || r.template.toLowerCase().includes(q) || r.boot_mode.toLowerCase().includes(q))
-      .sort((a, b) => { const cmp = compareValue(a[sort.key], b[sort.key]); return sort.dir === "asc" ? cmp : -cmp; });
-  }, [recent, debouncedQuery, sort]);
-  const { page, setPage, pageSize, pageRows } = usePagedRows(filteredRecent);
-  const toggleSort = (key: "ts" | "sandbox_id" | "template" | "boot_mode" | "boot_ms") => setSort((s) => s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: key === "ts" ? "desc" : "asc" });
-  // sparkMax retained for the legacy mini-row but the headline chart uses CH series.
-  const _sparkMax = useMemo(() => Math.max(100, ...recent.map((r) => r.boot_ms || 0)), [recent]);
 
   const chartSeries: Series[] = useMemo(
     () => [
@@ -141,7 +132,7 @@ export default function StatsPage() {
     { label: "p50 median", value: overall.p50_ms, unit: "ms", icon: <Zap size={14} />, accent: false },
     { label: "p90", value: overall.p90_ms, unit: "ms", icon: <TrendingUp size={14} />, accent: false },
     { label: "p99 tail", value: overall.p99_ms, unit: "ms", icon: <Activity size={14} />, accent: true },
-    { label: "total boots", value: overall.count, unit: "", icon: <Clock size={14} />, accent: false },
+    { label: "boots this month", value: overall.count, unit: "", icon: <Clock size={14} />, accent: false },
   ];
 
   return (
@@ -179,7 +170,7 @@ export default function StatsPage() {
                 Boot latency p50 / p95
               </div>
               <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-                Sourced from ClickHouse · last {chWindowH < 1 ? "60m" : `${chWindowH}h`}
+                Live analytics · last {chWindowH < 1 ? "60m" : `${chWindowH}h`}
               </div>
             </div>
             <div className="flex items-center gap-1">
@@ -229,19 +220,6 @@ export default function StatsPage() {
             height={120}
           />
 
-          <div className="mt-4">
-            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>Recent boot samples</div>
-              <SearchInput value={query} onChange={setQuery} placeholder="Filter boots…" />
-            </div>
-            {!data && !bootError ? <LoadingTable cols={6} rows={5} /> : (
-              <Table>
-                <thead><tr><SortHeader label="When" sortKey="ts" current={sort} onSort={toggleSort} /><SortHeader label="Template" sortKey="template" current={sort} onSort={toggleSort} /><SortHeader label="Mode" sortKey="boot_mode" current={sort} onSort={toggleSort} /><SortHeader label="Boot time" sortKey="boot_ms" current={sort} onSort={toggleSort} right /><SortHeader label="Sandbox" sortKey="sandbox_id" current={sort} onSort={toggleSort} /><th className="px-4 py-2.5 text-right text-[11px] font-medium uppercase tracking-wider" style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>Actions</th></tr></thead>
-                <tbody>{pageRows.map((r, i) => <tr key={`${r.sandbox_id}-${r.ts}`} className="focus:outline-none focus:ring-1 focus:ring-emerald-500/40" {...rowNavProps(i)}><Td muted><RelativeTime value={r.ts} /></Td><Td>{r.template || "—"}</Td><Td><ModeBadge mode={r.boot_mode} /></Td><Td right><span className="font-semibold tabular-nums" style={{ color: r.boot_ms > 500 ? "var(--status-paused)" : "var(--status-running)" }}>{r.boot_ms}ms</span></Td><Td mono muted>{r.sandbox_id.slice(0, 12)}…</Td><Td right><RowActions><RowAction onClick={() => navigator.clipboard.writeText(r.sandbox_id).then(() => toast.success("Copied"))}><Copy size={12} />Copy sandbox ID</RowAction></RowActions></Td></tr>)}</tbody>
-              </Table>
-            )}
-            {filteredRecent.length > 0 && <PaginationBar total={filteredRecent.length} page={page} pageSize={pageSize} onPage={setPage} label="boot samples" />}
-          </div>
         </Card>
 
         {/* Breakdown cards */}

@@ -51,16 +51,118 @@
     state: absent
 
 # Apply the restart now (rather than at end-of-play) so the health check below
-# validates the freshly-restarted service.
+# validates the freshly-restarted service. The handler is async (poll:0), so it
+# returns immediately and cannot tear down the SSH control-master.
 - name: Apply pending restart
   ansible.builtin.meta: flush_handlers
 
+# The async restart may have briefly dropped the SSH control-master while
+# systemd stopped the agent. Re-acquire the connection before probing, so a
+# transient blip during restart is not mistaken for an unreachable host.
+- name: Wait for SSH to come back after restart
+  ansible.builtin.wait_for_connection:
+    delay: 2
+    timeout: 60
+
+# Verify with retries: after an async restart the unit may still be
+# activating/deactivating when first probed — the agent orchestrates Firecracker
+# shutdown itself on stop, which takes time. retries x delay tolerates the
+# settle; until + failed_when still hard-fail if it never reaches "active".
 - name: Verify agent service is active
   ansible.builtin.command: "systemctl is-active {{ agent_service }}"
   register: agent_active
   changed_when: false
+  retries: 6
+  delay: 5
+  until: agent_active.stdout == "active"
   failed_when: agent_active.stdout != "active"
 
 - name: Report installed agent checksum
   ansible.builtin.debug:
     msg: "{{ inventory_hostname }}: pandastack-agent active (sha256 now {{ agent_candidate.stat.checksum }})"
+
+# ── cgroup delegation drop-in ────────────────────────────────────────────────
+# New hosts get Delegate=yes from cloud-init's unit; this converges EXISTING
+# hosts so the cpu.weight tier reconciler (agent/internal/sandbox/cputiers.go)
+# can manage its per-VM cgroup subtree and the pressure ladder can set
+# memory.high on it. Without delegation systemd reclaims the subtree and both
+# features silently no-op.
+- name: Ensure agent unit drop-in dir
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ agent_service }}.service.d"
+    state: directory
+    mode: "0755"
+
+- name: Ensure cgroup delegation drop-in
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ agent_service }}.service.d/delegate.conf"
+    content: |
+      [Service]
+      Delegate=yes
+    mode: "0644"
+  register: delegate_dropin
+
+- name: Reload systemd after drop-in change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: delegate_dropin.changed
+
+# ── Host swap + zswap (reclaim substrate for the pressure ladder) ────────────
+# memory.high squeezes on the no-hugepage class can only RECLAIM if anon pages
+# have somewhere to go; pressure.go gates the squeeze rung on SwapTotal for
+# exactly that reason. zswap compresses reclaimed pages in RAM with the disk
+# swapfile as overflow, so the common case never touches the disk. Idempotent;
+# mirrored in cloud-init/user-data-agent.sh for new hosts.
+- name: Ensure swapfile exists
+  ansible.builtin.shell: |
+    set -e
+    fallocate -l {{ agent_swapfile_size }} /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+  args:
+    creates: /swapfile
+
+- name: Ensure swapfile in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "/swapfile none swap sw 0 0"
+    state: present
+
+- name: Ensure swap is on
+  ansible.builtin.shell: swapon --show --noheadings | grep -q /swapfile || swapon /swapfile
+  register: swapon_out
+  changed_when: swapon_out.rc == 0
+
+- name: Install zswap enable unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/pandastack-zswap.service
+    content: |
+      [Unit]
+      Description=Enable zswap (reclaim substrate for the memory pressure ladder)
+      After=local-fs.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # zstd if the kernel can load it (better ratio), else the built-in lzo.
+      ExecStart=/bin/sh -c 'modprobe zstd 2>/dev/null || true; \
+        (echo zstd > /sys/module/zswap/parameters/compressor 2>/dev/null || echo lzo > /sys/module/zswap/parameters/compressor); \
+        echo {{ agent_zswap_max_pool_percent }} > /sys/module/zswap/parameters/max_pool_percent; \
+        echo Y > /sys/module/zswap/parameters/shrinker_enabled; \
+        echo Y > /sys/module/zswap/parameters/enabled'
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+  register: zswap_unit
+
+- name: Reload systemd after zswap unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: zswap_unit.changed
+
+- name: Enable + start zswap unit
+  ansible.builtin.systemd:
+    name: pandastack-zswap.service
+    enabled: true
+    state: started

@@ -7,7 +7,9 @@ import { Copy, HardDrive, Plus, Trash2 } from "lucide-react";
 import { api, type Volume } from "@/lib/api";
 import { Btn, Card, Input, PageHeader, Table, Td, Th, useConfirm } from "@/components/ui";
 import { compareValue, CopyButton, ErrorState, LoadingTable, PaginationBar, RowAction, RowActions, rowNavProps, SearchInput, SortHeader, type SortDir, useDebouncedValue, usePagedRows } from "@/components/list-quality";
-import { Quickstart } from "@/components/Quickstart";
+import dynamic from "next/dynamic";
+// Only rendered in the first-run empty state — keep it out of the main chunk.
+const Quickstart = dynamic(() => import("@/components/Quickstart").then(m => m.Quickstart), { ssr: false });
 
 type SortKey = "name" | "size_mb" | "size_bytes";
 

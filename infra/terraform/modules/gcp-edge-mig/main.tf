@@ -4,7 +4,7 @@
 //
 // LB layout:
 //   - Static IPv4 (passed in via global_address_name)
-//   - HTTPS proxy + managed cert for {dev,api-dev,green}.pandastack.ai
+//   - HTTPS proxy + managed cert for the SANs in var.lb_domains
 //   - URL map: default → edge backend (api+dashboard both served from :8080
 //     since the existing caddy already path-splits internally)
 //   - Cloud Armor: rate-limit 600 req/min per IP (basic DoS guard)
@@ -34,7 +34,7 @@ resource "google_compute_instance_template" "edge" {
     source_image = data.google_compute_image.ubuntu.self_link
     auto_delete  = true
     boot         = true
-    disk_size_gb = 30
+    disk_size_gb = var.boot_disk_size_gb
     disk_type    = "pd-balanced"
   }
 
@@ -66,11 +66,10 @@ resource "google_compute_instance_template" "edge" {
     secret-database-url         = var.secret_database_url
     secret-clickhouse-url       = var.secret_clickhouse_url
     secret-jwks-url             = var.secret_supabase_jwks_url
-    secret-stripe-env           = jsonencode(var.secret_stripe_env)
-    secret-github-env           = jsonencode(var.secret_github_env)
     pandastack-region           = var.region
     pandastack-binary-url       = var.edge_binary_url
     pandastack-dashboard-bucket = var.dashboard_bucket
+    pandastack-zone-name        = var.zone_name
     secret-supabase-anon        = var.secret_supabase_anon_key
     secret-supabase-url         = var.secret_supabase_url
   }

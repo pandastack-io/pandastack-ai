@@ -1,6 +1,13 @@
-// dev-gcp-multi: enterprise multi-node stack served at api.pandastack.ai
-// (Cloudflare-proxied). The old "green" intermediate was retired once the
-// multi-node cluster was promoted to the live api.pandastack.ai DNS record.
+// dev-gcp-multi: multi-node PandaStack stack on GCP, served at
+// api.<cloudflare_zone_name> behind the Cloudflare proxy.
+//
+// Topology:
+//   Cloudflare (proxied) ──▶ global HTTPS LB ──▶ edge MIG (API + dashboard)
+//                                                   │
+//   agent MIG (private subnet, Firecracker) ◀───────┘ internal
+//   Cloud SQL (private IP) · ClickHouse VM (private) · db-proxy VM (+static IP)
+//
+// The AWS mirror of this stack is envs/dev-aws.
 
 provider "google" {
   project = var.gcp_project
@@ -15,8 +22,10 @@ provider "cloudflare" {
 locals {
   env         = "dev"
   project_tag = "pandastack"
+  # SANs on the LB's managed certificate. api.<zone> is the customer-facing
+  # record created below; the rest are staging aliases pointing at the same LB.
   lb_domains = [
-    "green.${var.cloudflare_zone_name}",
+    "api.${var.cloudflare_zone_name}",
     "dev.${var.cloudflare_zone_name}",
     "api-dev.${var.cloudflare_zone_name}",
   ]
@@ -49,14 +58,6 @@ module "secrets" {
   supabase_url      = var.supabase_url
   supabase_anon_key = var.supabase_anon_key
   gcs_bucket_name   = module.storage.bucket_name
-
-  github_app_id              = var.github_app_id
-  github_app_installation_id = var.github_app_installation_id
-  github_app_slug            = var.github_app_slug
-  github_app_client_id       = var.github_app_client_id
-  github_app_client_secret   = var.github_app_client_secret
-  github_app_private_key     = var.github_app_private_key
-  github_app_webhook_secret  = var.github_app_webhook_secret
 }
 
 module "agents" {
@@ -69,6 +70,8 @@ module "agents" {
   min_cpu_platform         = var.agent_min_cpu_platform
   boot_disk_size_gb        = var.agent_boot_disk_size_gb
   boot_disk_type           = "pd-ssd"
+  volumes_disk_size_gb     = var.agent_volumes_disk_size_gb
+  volumes_disk_type        = var.agent_volumes_disk_type
   use_preemptible          = var.use_preemptible
   agent_count              = var.agent_count
   agent_max_count          = var.agent_max_count
@@ -91,6 +94,7 @@ module "edge" {
   region                   = var.gcp_region
   zones                    = var.edge_zones
   machine_type             = var.edge_machine_type
+  boot_disk_size_gb        = var.edge_boot_disk_size_gb
   use_preemptible          = var.use_preemptible
   edge_count               = var.edge_count
   edge_max_count           = var.edge_max_count
@@ -102,17 +106,16 @@ module "edge" {
   secret_database_url      = module.secrets.secret_name_database_url
   secret_clickhouse_url    = module.secrets.secret_name_clickhouse_url
   secret_supabase_jwks_url = module.secrets.secret_name_supabase_jwks_url
-  secret_stripe_env        = module.secrets.secret_name_stripe_env
-  secret_github_env        = module.secrets.secret_name_github_env
   lb_ip_address            = module.network.lb_ip_address
   lb_domains               = local.lb_domains
   dashboard_bucket         = var.dashboard_bucket
+  zone_name                = var.cloudflare_zone_name
   edge_binary_url          = var.edge_binary_url
   secret_supabase_anon_key = module.secrets.secret_name_supabase_anon_key
   secret_supabase_url      = module.secrets.secret_name_supabase_url
 }
 
-# DNS for api.pandastack.ai → multi-node LB. Cloudflare-proxied (orange-cloud)
+# DNS for api.<zone> → multi-node LB. Cloudflare-proxied (orange-cloud)
 # so CF terminates TLS and talks Full(strict) to the GCP-managed cert on the
 # global HTTPS load balancer. This is the live customer-facing record.
 resource "cloudflare_record" "api" {
@@ -124,23 +127,9 @@ resource "cloudflare_record" "api" {
   ttl     = 1
 }
 
-# Wildcard for preview URLs: {port}-{sandbox_id}.pandastack.ai →
-# routed by pandastack-api's preview-host middleware to the matching sandbox's
-# /proxy/{port}/... path. Cloudflare Universal SSL covers single-level
-# wildcards for free; multi-level (*.*) would need Advanced Cert Manager,
-# which is why the middleware rejects multi-label preview hosts.
-resource "cloudflare_record" "preview_wildcard" {
-  zone_id = var.cloudflare_zone_id
-  name    = "*"
-  type    = "A"
-  value   = module.network.lb_ip_address
-  proxied = true
-  ttl     = 1
-}
-
 # =============================================================================
 # DB Proxy — native postgres:// TLS proxy with SNI routing
-# Routes *.db.pandastack.ai:5432 to the correct sandbox's Postgres port.
+# Routes *.db.<zone>:5432 to the correct sandbox's Postgres port.
 # Must NOT be Cloudflare-proxied (CF doesn't proxy raw TCP on port 5432).
 # =============================================================================
 
@@ -156,7 +145,7 @@ resource "google_service_account" "db_proxy" {
   display_name = "PandaStack DB Proxy"
 }
 
-# Secret for Cloudflare API token (used by certbot DNS-01 for *.db.pandastack.ai).
+# Secret for Cloudflare API token (used by certbot DNS-01 for *.db.<zone>).
 resource "google_secret_manager_secret" "cloudflare_token" {
   secret_id = "${local.project_tag}-cloudflare-api-token"
   replication {
@@ -262,14 +251,14 @@ data "google_compute_image" "db_proxy_ubuntu" {
 # Single e2-small VM — the proxy is lightweight (io.Copy only, no compute).
 resource "google_compute_instance" "db_proxy" {
   name         = "${local.project_tag}-db-proxy"
-  machine_type = "e2-small"
+  machine_type = var.db_proxy_machine_type
   zone         = var.gcp_zone
   tags         = ["${local.project_tag}-db-proxy"]
 
   boot_disk {
     initialize_params {
       image = data.google_compute_image.db_proxy_ubuntu.self_link
-      size  = 20
+      size  = var.db_proxy_boot_disk_size_gb
       type  = "pd-balanced"
     }
   }
@@ -291,7 +280,8 @@ resource "google_compute_instance" "db_proxy" {
     enable-oslogin          = "FALSE"
     google-logging-enabled  = "true"
     pandastack-binary-url   = var.db_proxy_binary_url
-    pandastack-sni-suffix   = ".db.pandastack.ai"
+    pandastack-sni-suffix   = ".db.${var.cloudflare_zone_name}"
+    pandastack-acme-email   = var.acme_email
     secret-node-token       = module.secrets.secret_name_node_token
     secret-database-url     = module.secrets.secret_name_database_url
     secret-cloudflare-token = google_secret_manager_secret.cloudflare_token.secret_id
@@ -327,7 +317,7 @@ resource "google_compute_instance" "db_proxy" {
   }
 }
 
-# DNS: *.db.pandastack.ai → db-proxy static IP.
+# DNS: *.db.<zone> → db-proxy static IP.
 # NOT proxied — Cloudflare cannot proxy raw TCP port 5432.
 # Cloudflare "gray-cloud" (proxied=false) with short TTL.
 resource "cloudflare_record" "db_proxy_wildcard" {
@@ -339,7 +329,7 @@ resource "cloudflare_record" "db_proxy_wildcard" {
   ttl     = 60
 }
 
-# Also add the apex db.pandastack.ai record so the cert SAN validates.
+# Also add the apex db.<zone> record so the cert SAN validates.
 resource "cloudflare_record" "db_proxy_apex" {
   zone_id = var.cloudflare_zone_id
   name    = "db"

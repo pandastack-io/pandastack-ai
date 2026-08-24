@@ -358,6 +358,19 @@ resource "aws_launch_template" "edge" {
     arn = aws_iam_instance_profile.node.arn
   }
 
+  # Without this the edge inherits the AMI's 8G root, which the edge bundle
+  # (API binary + prebuilt dashboard) plus journald fills. A disk-full edge
+  # fails closed for the whole control plane.
+  block_device_mappings {
+    device_name = "/dev/sda1"
+    ebs {
+      volume_size           = var.edge_boot_disk_size_gb
+      volume_type           = "gp3"
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
   network_interfaces {
     associate_public_ip_address = true
     security_groups             = [aws_security_group.edge.id]
@@ -371,12 +384,11 @@ resource "aws_launch_template" "edge" {
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-edge.sh.tftpl", {
-    region               = var.aws_region
-    project_tag          = var.project_tag
-    secret_prefix        = local.name
-    edge_binary_url      = var.edge_binary_url
-    dashboard_bucket     = var.dashboard_bucket
-    cloudflare_zone_name = var.cloudflare_zone_name
+    region           = var.aws_region
+    project_tag      = var.project_tag
+    secret_prefix    = local.name
+    edge_binary_url  = var.edge_binary_url
+    dashboard_bucket = var.dashboard_bucket
   }))
 
   tag_specifications {
@@ -426,11 +438,18 @@ resource "aws_launch_template" "agent" {
     arn = aws_iam_instance_profile.node.arn
   }
 
+  # This volume is the template preseed cache, the UFFD/NBD chunk cache and the
+  # host-pinned PGDATA for every managed database on this host. gp3's baseline
+  # 3000 IOPS / 125 MB/s is the bottleneck on all three at once, so provision
+  # both explicitly rather than taking the default.
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
       volume_size           = var.agent_boot_disk_size_gb
       volume_type           = "gp3"
+      iops                  = var.agent_boot_disk_iops
+      throughput            = var.agent_boot_disk_throughput_mbps
+      encrypted             = true
       delete_on_termination = true
     }
   }
@@ -488,23 +507,14 @@ resource "aws_autoscaling_group" "agent" {
 }
 
 # =============================================================================
-# DNS — api.<zone> + preview wildcard *.<zone> → ALB. Cloudflare-proxied.
+# DNS — api.<zone> → ALB. Cloudflare-proxied.
+# The db-proxy's *.db.<zone> records live in dbproxy.tf and are deliberately NOT
+# proxied (Cloudflare cannot proxy raw TCP on 5432).
 # =============================================================================
 
 resource "cloudflare_record" "api" {
   zone_id = var.cloudflare_zone_id
   name    = "api"
-  type    = "CNAME"
-  content = aws_lb.edge.dns_name
-  proxied = true
-  ttl     = 1
-}
-
-# Wildcard for preview URLs: {port}-{sandbox_id}.<zone> → edge preview-host
-# middleware. Cloudflare Universal SSL covers single-level wildcards.
-resource "cloudflare_record" "preview_wildcard" {
-  zone_id = var.cloudflare_zone_id
-  name    = "*"
   type    = "CNAME"
   content = aws_lb.edge.dns_name
   proxied = true

@@ -18,7 +18,7 @@ from api_client import PandaStackClient
 from lsp_client import LSPClient
 from tasks import select_tasks
 
-DEFAULT_API = os.environ.get("PANDASTACK_API", "https://api.pandastack.ai")
+DEFAULT_API = os.environ.get("PANDASTACK_API", "http://localhost:8080")
 DEFAULT_TOKEN = os.environ.get("PANDASTACK_TOKEN", "")
 ROOT = Path(__file__).resolve().parent
 RESULTS = ROOT / "results"

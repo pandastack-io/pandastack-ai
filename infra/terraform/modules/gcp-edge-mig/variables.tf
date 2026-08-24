@@ -13,19 +13,32 @@ variable "zones" {
 }
 
 variable "machine_type" {
-  type    = string
-  default = "e2-small"
+  type = string
+  # Dedicated-core: the edge is under continuous polling load, so a shared-core
+  # e2 family runs out of the burst it depends on. See the env's
+  # var.edge_machine_type for the full reasoning.
+  default = "n2-standard-2"
+}
+
+variable "boot_disk_size_gb" {
+  type = number
+  # The edge bundle (API binary + prebuilt dashboard) plus journald's request
+  # logs outgrow a 30G disk, and a disk-full edge fails closed for the whole
+  # control plane.
+  default = 100
 }
 
 variable "use_preemptible" {
-  type    = bool
-  default = true
+  type = bool
+  # false. Preemptible/Spot edge VMs mean the control-plane API can be reclaimed
+  # with 30s notice. Opt in deliberately for a throwaway trial.
+  default = false
 }
 
 variable "edge_count" {
   type        = number
-  default     = 1
-  description = "Minimum number of edge VMs (autoscaler floor)."
+  default     = 2
+  description = "Minimum number of edge VMs (autoscaler floor). 2 = no single-VM outage during rolling updates."
 }
 
 variable "edge_max_count" {
@@ -72,18 +85,6 @@ variable "secret_supabase_jwks_url" {
   type = string
 }
 
-variable "secret_stripe_env" {
-  type        = map(string)
-  default     = {}
-  description = "Map of STRIPE_* environment variable names to Secret Manager secret IDs."
-}
-
-variable "secret_github_env" {
-  type        = map(string)
-  default     = {}
-  description = "Map of GITHUB_APP_* environment variable names to Secret Manager secret IDs."
-}
-
 variable "lb_ip_address" {
   type = string
 }
@@ -110,4 +111,9 @@ variable "secret_supabase_anon_key" {
 variable "secret_supabase_url" {
   type        = string
   description = "Secret Manager secret ID holding the public Supabase URL."
+}
+
+variable "zone_name" {
+  type        = string
+  description = "Public DNS zone this deployment serves (e.g. example.com). cloud-init/user-data-edge.sh derives the dashboard + API URLs from it."
 }

@@ -4,6 +4,7 @@ export const runtime = 'edge';
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { Resend } from 'resend';
+import { requireDashboardUser } from '@/lib/email-auth';
 
 const FROM = 'PandaStack <hello@pandastack.ai>';
 
@@ -75,6 +76,13 @@ function inviteHtml(orgName: string, inviteUrl: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  // This route is called from the browser (team page) by a signed-in user, so
+  // the gate is the user's own Supabase session — NOT the server-to-server
+  // shared secret. Previously it had NO auth: anyone could send invite mail with
+  // an attacker-controlled org_name + invite_url (open relay / phishing vector).
+  const denied = await requireDashboardUser();
+  if (denied) return denied;
+
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     return NextResponse.json({ error: 'email not configured' }, { status: 503 });

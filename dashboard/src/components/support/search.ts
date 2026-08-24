@@ -26,17 +26,6 @@ const SYNONYMS: Record<string, string> = {
   'postgresql': 'database',
   'postgres': 'database',
   'db': 'database',
-  'repo': 'app',
-  'git': 'app',
-  'deploy': 'deployment',
-  'lambda': 'function',
-  'serverless': 'function',
-  'cron': 'schedule',
-  'job': 'schedule',
-  'tier': 'plan',
-  'subscription': 'plan',
-  'billing': 'pricing',
-  'cost': 'pricing',
   'auth': 'authentication',
   'token': 'authentication',
   'api key': 'authentication',
@@ -50,8 +39,8 @@ const SYNONYMS: Record<string, string> = {
 
 // Error code fast path: query contains HTTP status or keyword → pin those entries
 const ERROR_CODES = [
-  '401', '402', '403', '404', '409', '422', '429', '500', '503', '507',
-  'unauthorized', 'payment required', 'forbidden', 'not found', 'conflict',
+  '401', '403', '404', '409', '422', '429', '500', '503', '507',
+  'unauthorized', 'forbidden', 'not found', 'conflict',
   'rate limit', 'unavailable', 'insufficient storage'
 ];
 

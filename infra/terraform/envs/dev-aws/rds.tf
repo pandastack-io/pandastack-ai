@@ -65,7 +65,11 @@ resource "aws_db_instance" "main" {
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [aws_security_group.rds.id]
   publicly_accessible    = false
-  multi_az               = false
+
+  # If this database is unreachable nothing schedules — no creates, no wakes, no
+  # node registration. Multi-AZ turns an AZ event from a control-plane outage
+  # into an automatic failover. See var.rds_multi_az for the cost trade.
+  multi_az = var.rds_multi_az
 
   backup_retention_period = 7
   backup_window           = "03:00-04:00"

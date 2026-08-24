@@ -1,12 +1,17 @@
 # PandaStack template · code-interpreter
 #
-# Enterprise-grade sandbox: Python 3.11 + Node.js 22 LTS + full data-science /
-# AI / Playwright stack. Used for both interactive code execution and Functions.
+# Enterprise-grade sandbox: Python 3.13 + Node.js 24 LTS + full data-science /
+# AI / Playwright stack.
+#
+# Python 3.13 (was 3.11 — EOL 2026-10-31). Every pinned scientific wheel below
+# (numpy 2.3.5, scipy 1.17.1, numba 0.63.1, spacy, gensim, …) publishes cp313
+# manylinux wheels, so this is a drop-in bump with no source builds. Do NOT jump
+# to 3.14 without re-verifying the full stack resolves.
 #
 # Bake:
 #   pandastack template build -f Dockerfile -n code-interpreter --size-mb 12288
 
-FROM python:3.11
+FROM python:3.13
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
@@ -23,8 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chrony socat fuse3 iptables nfs-common \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Node.js 22 LTS via NodeSource ────────────────────────────────────────────
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# ── Node.js 24 LTS via NodeSource ────────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g yarn typescript ts-node \
     && node --version && npm --version \

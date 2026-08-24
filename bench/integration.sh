@@ -29,7 +29,6 @@ RID=$(curl -sS -D - -o /dev/null "$API/v1/sandboxes" -H "X-Request-Id: it-cor-te
 
 section "Observability"
 get /v1/metrics | grep -q 'pandastack_http_requests_total' && pass "/metrics emits Prometheus text" || fail "/metrics"
-get /v1/quotas | grep -q '"workspace"' && pass "/quotas returns policy + usage" || fail "/quotas"
 get /v1/stats/boot | grep -q 'total_samples' && pass "/stats/boot returns aggregates" || fail "/stats/boot"
 
 section "Sandbox lifecycle"

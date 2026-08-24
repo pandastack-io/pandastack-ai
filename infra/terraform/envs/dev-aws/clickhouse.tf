@@ -61,15 +61,16 @@ resource "aws_s3_object" "clickhouse_schema" {
 
 resource "aws_instance" "clickhouse" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.medium"
+  instance_type          = var.clickhouse_instance_type
   subnet_id              = aws_subnet.private[var.availability_zones[0]].id
   vpc_security_group_ids = [aws_security_group.clickhouse.id]
   key_name               = aws_key_pair.this.key_name
   iam_instance_profile   = aws_iam_instance_profile.node.name
 
   root_block_device {
-    volume_size = 70
+    volume_size = var.clickhouse_disk_size_gb
     volume_type = "gp3"
+    encrypted   = true
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-clickhouse.sh.tftpl", {

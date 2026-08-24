@@ -4,6 +4,7 @@ export const runtime = 'edge';
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { Resend } from 'resend';
+import { requireEmailSecret } from '@/lib/email-auth';
 
 const FROM = 'PandaStack <hello@pandastack.ai>';
 
@@ -100,12 +101,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email not configured' }, { status: 503 });
   }
 
-  // Validate request came from our own auth callback (shared secret)
-  const secret = req.headers.get('x-welcome-secret');
-  const expected = process.env.WELCOME_EMAIL_SECRET;
-  if (expected && secret !== expected) {
-    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
-  }
+  // Fail-closed shared-secret gate (never an open relay).
+  const denied = requireEmailSecret(req);
+  if (denied) return denied;
 
   let body: { email?: string; name?: string };
   try {

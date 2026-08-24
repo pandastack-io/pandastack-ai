@@ -3,10 +3,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Btn, Card, PageHeader } from "@/components/ui";
-import TimeSeriesChart, {
-  CHART_PALETTE,
-  type Series,
-} from "@/components/TimeSeriesChart";
+import dynamic from "next/dynamic";
+import { CHART_PALETTE, type Series } from "@/components/chart-theme";
+// recharts is heavy — split the chart into its own async chunk.
+const TimeSeriesChart = dynamic(() => import("@/components/TimeSeriesChart"), { ssr: false });
 import { api } from "@/lib/api";
 
 type Step = "15s" | "1m" | "5m" | "1h";
@@ -75,7 +75,7 @@ export default function ObservabilityPage() {
       if (msg.includes("clickhouse not configured")) {
         setData({});
         setError(
-          "Analytics database is not yet configured. Charts will populate once ClickHouse is online.",
+          "Analytics is not yet configured for this workspace. Charts will populate once it comes online.",
         );
       } else {
         setError(msg);
@@ -100,7 +100,7 @@ export default function ObservabilityPage() {
     <div className="space-y-6">
       <PageHeader
         title="Observability"
-        description="Real-time analytics from the ClickHouse warehouse. Aggregations are workspace-scoped and never leave the server."
+        description="Real-time workspace analytics. Aggregations are computed server-side and never leave the platform."
         actions={
           <div className="flex items-center gap-2">
             {lastFetched && (

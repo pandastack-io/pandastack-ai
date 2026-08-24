@@ -10,10 +10,32 @@ import { isStubAuth } from "@/lib/auth-mode";
 import { createClient } from "@/lib/supabase/client";
 import { OAuthButtons } from "@/components/oauth-buttons";
 
+// Resolve ?next= against our own origin and keep only the path. A prefix check
+// ("/" but not "//") is NOT enough: the URL parser treats a backslash like a
+// slash, so "/\evil.com" passes it and then resolves off-site — an open redirect
+// that also rides along in the magic-link emailRedirectTo. Compare origins instead.
 function nextPath() {
   if (typeof window === "undefined") return "/sandboxes";
-  const next = new URLSearchParams(window.location.search).get("next");
-  return next?.startsWith("/") && !next.startsWith("//") ? next : "/sandboxes";
+  const raw = new URLSearchParams(window.location.search).get("next");
+  if (!raw) return "/sandboxes";
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.origin !== window.location.origin) return "/sandboxes";
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "/sandboxes";
+  }
+}
+
+// The auth callback redirects here with ?error=... on a failed code exchange.
+// Surface it instead of dropping the user on a blank form with no explanation.
+function initialError() {
+  if (typeof window === "undefined") return null;
+  const err = new URLSearchParams(window.location.search).get("error");
+  if (!err) return null;
+  if (err === "missing_code") return "Sign-in link was incomplete or already used. Please try again.";
+  if (err === "auth_not_configured") return "Sign-in is temporarily unavailable. Please try again shortly.";
+  return err;
 }
 
 function callbackUrl() {
@@ -34,6 +56,17 @@ export default function LoginPage() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Surface a callback error once on mount, then strip it from the URL so a
+  // refresh (or a later successful attempt) doesn't resurrect a stale message.
+  useEffect(() => {
+    const initial = initialError();
+    if (!initial) return;
+    setError(initial);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("error");
+    window.history.replaceState({}, "", url.toString());
+  }, []);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -67,7 +100,7 @@ export default function LoginPage() {
     <Card padding className="space-y-5">
       <div className="text-center">
         <img
-          src="https://pandastack.io/logo.png"
+          src="/logo.svg"
           alt="PandaStack"
           className="mx-auto mb-3 size-10 rounded-xl object-contain"
         />

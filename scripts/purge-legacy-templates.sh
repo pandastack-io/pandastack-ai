@@ -11,7 +11,7 @@
 # one-off templates were baked onto hosts (amp, claude-code, codex, crawler,
 # devin, nextjs, openai-agents, opencode, vite-react). Those rootfs dirs still
 # linger on hosts and in GCS even though the curated catalog is now only the
-# five first-party globals (base, code-interpreter, agent, browser, postgres-16).
+# four first-party globals (base, code-interpreter, agent, postgres-16).
 #
 # This script physically removes the legacy artifacts so they can never back a
 # sandbox again. The control-plane catalog (Cloud SQL `templates` table) is the
@@ -44,11 +44,12 @@ VM_FILTERS="${VM_FILTERS:-pandastack-agent pandastack-edge}"
 
 # KEEP — the curated catalog. These are NEVER deleted. ubuntu-24.04-net is the
 # internal bake base image and is also preserved.
-KEEP=(base code-interpreter agent browser postgres-16 ubuntu-24.04-net)
+KEEP=(base code-interpreter agent postgres-16 ubuntu-24.04-net)
 
 # LEGACY — templates to purge. Explicit allowlist-of-removal so we can never
 # accidentally delete a current template by enumeration drift.
-LEGACY=(amp claude-code codex crawler devin nextjs openai-agents opencode vite-react)
+LEGACY=(amp browser claude-agent claude-code codex crawler devin nextjs \
+        openai-agents opencode postgres-16-4g postgres-16-16g vite-react)
 
 APPLY=0
 DO_GCS=1

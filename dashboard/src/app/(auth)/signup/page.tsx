@@ -57,7 +57,7 @@ export default function SignupPage() {
     <Card padding className="space-y-5">
       <div className="text-center">
         <img
-          src="https://pandastack.io/logo.png"
+          src="/logo.svg"
           alt="PandaStack"
           className="mx-auto mb-3 size-10 rounded-xl object-contain"
         />
@@ -69,7 +69,7 @@ export default function SignupPage() {
         <Alert type="success">Check your email to confirm your account, then sign in.</Alert>
       ) : (
         <>
-          <OAuthButtons disabled={!accepted} />
+          <OAuthButtons consented={accepted} />
           <div className="flex items-center gap-3">
             <div className="h-px flex-1" style={{ background: "var(--border-subtle)" }} />
             <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>or</span>

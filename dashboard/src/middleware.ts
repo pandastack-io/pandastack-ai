@@ -5,10 +5,12 @@ import { updateSession } from "@/lib/supabase/middleware";
 
 const PROTECTED_PREFIXES = [
   "/sandboxes",
+  "/databases",
   "/volumes",
   "/templates",
   "/stats",
   "/observability",
+  "/audit",
   "/settings",
   "/invite",
 ];

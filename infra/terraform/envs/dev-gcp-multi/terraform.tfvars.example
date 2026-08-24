@@ -1,0 +1,86 @@
+# Copy to terraform.tfvars and fill in. Never commit terraform.tfvars.
+#
+# The values below are the MINIMUM PRODUCTION FOOTPRINT — the defaults in
+# variables.tf, restated here so they are visible before you apply. Every number
+# is justified in a comment on the matching variable; the per-component cost
+# table is in infra/README.md.
+
+gcp_project = "<your-gcp-project-id>"
+gcp_region  = "us-central1"
+gcp_zone    = "us-central1-a"
+
+# Public SSH key contents, e.g. output from: cat ~/.ssh/id_ed25519.pub
+ssh_pubkey = "ssh-ed25519 AAAA... you@host"
+
+# CIDR allowed to reach SSH via IAP (your IP /32).
+ssh_allowed_cidr = "<your-ip>/32"
+
+# Edge tier (API + dashboard). Dedicated-core and >= 2: this is the only path
+# to the control plane and it is under continuous polling load.
+edge_machine_type      = "n2-standard-2"
+edge_count             = 2
+edge_max_count         = 4
+edge_boot_disk_size_gb = 100
+edge_zones             = ["us-central1-a", "us-central1-b"]
+
+# Agent tier (Firecracker hosts). min_cpu_platform must stay pinned — Firecracker
+# needs the VT-x features GCP only guarantees on the named platform.
+#
+# agent_count = 2 is the production floor, not a tuning knob: managed-database
+# PGDATA is host-pinned to the stateful volumes disk, so one agent has no
+# failover target, and a freshly scaled-out agent is not schedulable until its
+# template seed-sync finishes.
+agent_machine_type         = "n2-standard-64"
+agent_min_cpu_platform     = "Intel Cascade Lake"
+agent_count                = 2
+agent_max_count            = 8
+agent_boot_disk_size_gb    = 800
+agent_volumes_disk_size_gb = 500
+agent_volumes_disk_type    = "pd-ssd"
+agent_zones                = ["us-central1-a", "us-central1-b"]
+
+# On-demand, not preemptible. An agent holds running sandboxes and customer
+# database data; preemption is a data-plane event.
+use_preemptible = false
+
+# Cloudflare (Zone:DNS:Edit on your zone). cloudflare_zone_name is REQUIRED:
+# the edge derives its dashboard/API URLs from it and the db-proxy derives its
+# *.db.<zone> SNI suffix from it.
+cloudflare_api_token = "<create at https://dash.cloudflare.com/profile/api-tokens>"
+cloudflare_zone_id   = "<zone id>"
+cloudflare_zone_name = "example.com"
+
+# Contact address for the Let's Encrypt account the db-proxy registers for its
+# *.db.<zone> wildcard cert. Expiry warnings go here — use your own.
+acme_email = "ops@example.com"
+
+# Control-plane Postgres DSN. Point this at your existing control-plane database
+# until you cut over to the Cloud SQL instance provisioned by cloudsql.tf (see
+# the migration steps at the top of that file).
+database_url = "postgresql://user:password@host:5432/pandastack?sslmode=require"
+
+# Cloud SQL (control-plane Postgres). REGIONAL roughly doubles the Cloud SQL
+# line item; ZONAL means a single-zone event freezes all scheduling.
+cloudsql_tier              = "db-custom-4-16384"
+cloudsql_disk_size_gb      = 200
+cloudsql_availability_type = "REGIONAL"
+
+# ClickHouse (boot events + per-sandbox metrics behind the dashboard charts).
+clickhouse_machine_type      = "n2-standard-4"
+clickhouse_data_disk_size_gb = 1000
+clickhouse_url               = "" # empty = auto-filled from the provisioned VM
+
+# db-proxy (terminates TLS for every managed-database connection).
+db_proxy_machine_type      = "n2-standard-2"
+db_proxy_boot_disk_size_gb = 100
+
+# Optional: Supabase auth (leave blank to provision empty secret containers).
+supabase_url      = ""
+supabase_jwks_url = ""
+supabase_anon_key = ""
+
+# Optional: release-bundle URLs (empty = bake into the image).
+edge_binary_url     = ""
+agent_binary_url    = ""
+db_proxy_binary_url = ""
+dashboard_bucket    = ""
