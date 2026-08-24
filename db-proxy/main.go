@@ -52,24 +52,22 @@ import (
 // ---------------------------------------------------------------------------
 
 type config struct {
-	DSN              string
-	NodeToken        string
-	CertDir          string
-	ListenAddr       string
-	PooledListenAddr string
-	SNISuffix        string
-	MetricsAddr      string
+	DSN         string
+	NodeToken   string
+	CertDir     string
+	ListenAddr  string
+	SNISuffix   string
+	MetricsAddr string
 }
 
 func configFromEnv() config {
 	return config{
-		DSN:              mustEnv("PANDASTACK_DB_DSN"),
-		NodeToken:        mustEnv("PANDASTACK_NODE_TOKEN"),
-		CertDir:          envOr("PANDASTACK_CERT_DIR", "/etc/letsencrypt/live/db.pandastack.ai"),
-		ListenAddr:       envOr("PANDASTACK_LISTEN_ADDR", ":5432"),
-		PooledListenAddr: envOr("PANDASTACK_POOLED_LISTEN_ADDR", ":6432"),
-		SNISuffix:        envOr("PANDASTACK_SNI_SUFFIX", ".db.pandastack.ai"),
-		MetricsAddr:      envOr("PANDASTACK_METRICS_ADDR", ":5433"),
+		DSN:         mustEnv("PANDASTACK_DB_DSN"),
+		NodeToken:   mustEnv("PANDASTACK_NODE_TOKEN"),
+		CertDir:     envOr("PANDASTACK_CERT_DIR", "/etc/letsencrypt/live/db.pandastack.ai"),
+		ListenAddr:  envOr("PANDASTACK_LISTEN_ADDR", ":5432"),
+		SNISuffix:   envOr("PANDASTACK_SNI_SUFFIX", ".db.pandastack.ai"),
+		MetricsAddr: envOr("PANDASTACK_METRICS_ADDR", ":5433"),
 	}
 }
 
@@ -277,19 +275,12 @@ func readSSLRequest(conn net.Conn) error {
 // Tunnel: HTTP Upgrade to agent
 // ---------------------------------------------------------------------------
 
-func openAgentTunnel(ctx context.Context, agentEndpoint, sandboxID, nodeToken string, pooled bool, log *slog.Logger) (net.Conn, error) {
+func openAgentTunnel(ctx context.Context, agentEndpoint, sandboxID, nodeToken string, log *slog.Logger) (net.Conn, error) {
 	base, err := url.Parse(agentEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("parse agent endpoint: %w", err)
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/sandboxes/" + sandboxID + "/pg-tunnel"
-	// TUSK T2.1: the pooled listener targets the guest's pgbouncer (6432); the
-	// direct listener targets Postgres (5432, the agent default). The agent
-	// validates ?port against its own allowlist.
-	if pooled {
-		base.RawQuery = "port=6432"
-	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build tunnel request: %w", err)
@@ -397,7 +388,7 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 		drainStartup(tlsConn)
 		return
 	}
-	log = log.With("sandbox", sandboxID, "sni", sni, "pooled", p.pooled)
+	log = log.With("sandbox", sandboxID, "sni", sni)
 	log.Info("connection accepted")
 
 	// Step 4: catalog lookup
@@ -450,7 +441,7 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 			budget = tunnelUpgradeTimeout + 5*time.Second
 		}
 		actx, acancel := context.WithTimeout(overall, budget)
-		agentConn, err = openAgentTunnel(actx, agentEndpoint, sandboxID, p.nodeToken, p.pooled, log)
+		agentConn, err = openAgentTunnel(actx, agentEndpoint, sandboxID, p.nodeToken, log)
 		acancel()
 		if err == nil {
 			break
@@ -496,12 +487,7 @@ type proxy struct {
 	wakes     *wakeGate
 	nodeToken string
 	sniSuffix string
-	// pooled routes to the guest's pgbouncer (6432) instead of Postgres
-	// (5432) — the same code serves both the direct and pooled listeners
-	// (TUSK T2.1). All resolution and wake logic is identical; only the
-	// tunnel's target port differs.
-	pooled bool
-	log    *slog.Logger
+	log       *slog.Logger
 }
 
 // clientAddr extracts the client's IP from a net.Conn's RemoteAddr. ok=false
@@ -587,14 +573,7 @@ func main() {
 
 	p := &proxy{
 		tlsBase: tlsCfg, catalog: cat, wakes: wakes,
-		nodeToken: cfg.NodeToken, sniSuffix: cfg.SNISuffix, pooled: false, log: log,
-	}
-	// Pooled proxy → pgbouncer 6432. Same everything, different target port
-	// and its own log tag. (TUSK T2.1)
-	pooledProxy := &proxy{
-		tlsBase: tlsCfg, catalog: cat, wakes: wakes,
-		nodeToken: cfg.NodeToken, sniSuffix: cfg.SNISuffix, pooled: true,
-		log: log.With("listener", "pooled"),
+		nodeToken: cfg.NodeToken, sniSuffix: cfg.SNISuffix, log: log,
 	}
 
 	// Metrics server (non-TLS)
@@ -611,24 +590,8 @@ func main() {
 	}
 	go p.serve(ctx, ln)
 
-	// Pooled listener (:6432) — best-effort: if the port is unavailable, the
-	// direct proxy still serves. Override with PANDASTACK_POOLED_LISTEN_ADDR;
-	// empty disables pooling.
-	var pooledLn net.Listener
-	if cfg.PooledListenAddr != "" {
-		pooledLn, err = net.Listen("tcp", cfg.PooledListenAddr)
-		if err != nil {
-			log.Error("pooled listen failed (pooling disabled)", "err", err, "addr", cfg.PooledListenAddr)
-		} else {
-			go pooledProxy.serve(ctx, pooledLn)
-		}
-	}
-
 	<-ctx.Done()
 	log.Info("shutting down")
 	ln.Close()
-	if pooledLn != nil {
-		pooledLn.Close()
-	}
 	db.Close()
 }

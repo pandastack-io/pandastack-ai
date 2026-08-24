@@ -366,6 +366,10 @@ declare -A MEMORY_MB=(
   [postgres-16]=1024
 )
 
+# NOTE: "base" is deliberately absent. It is not baked from a tpl:: recipe —
+# it IS $BASE_ROOTFS, the universal rootfs every other template is cloned from,
+# and it is installed as a template by seed_base_template in the local-e2e
+# scripts. Adding a tpl::base here would bake the base onto itself.
 ALL_TEMPLATES=(
   code-interpreter
   agent

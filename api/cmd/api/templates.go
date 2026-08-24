@@ -136,8 +136,8 @@ type globalSeed struct {
 
 var globalTemplates = []globalSeed{
 	{
-		name: "base", label: "Base (apps runtime)", category: "base",
-		description: "Universal language-agnostic apps runtime (mise + pre-warmed runtimes). Backs git-driven app hosting.",
+		name: "base", label: "Base", category: "base",
+		description: "Universal language-agnostic runtime (mise + pre-warmed toolchains). The general-purpose starting point.",
 		base:        "ubuntu:24.04 + mise",
 		tools:       []string{"node 24", "python 3.12", "go", "bun", "pnpm", "yarn"},
 		cpu:         8, memoryMB: 4096, sizeMB: 12288,

@@ -1177,7 +1177,7 @@
     "contact": {
       "url": "https://pandastack.ai"
     },
-    "description": "REST API for PandaStack — Firecracker microVM sandboxes, managed Postgres, git-driven apps, serverless functions, and outbound webhooks. Authenticate with a pds_ bearer token from the dashboard's API Tokens page.",
+    "description": "REST API for PandaStack — Firecracker microVM sandboxes and managed Postgres. Authenticate with a pds_ bearer token from the dashboard's API Tokens page.",
     "title": "PandaStack API",
     "version": "1.0.0"
   },

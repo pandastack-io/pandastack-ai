@@ -148,7 +148,7 @@ func (m *Manager) RestoreDatabase(ctx context.Context, id, template string, meta
 		// up front, so an empty or unreachable archive aborts here instead of
 		// after the volume is already gone (destroy-then-fail). Mirrors
 		// failover's preflight-then-act.
-		if _, verr := m.resolveBaseForTarget(ctx, id, ""); verr != nil {
+		if _, verr := m.resolveBaseForTarget(ctx, id); verr != nil {
 			return nil, verr
 		}
 		// Take a fresh base backup of the CURRENT state FIRST, so this restore is
@@ -162,7 +162,7 @@ func (m *Manager) RestoreDatabase(ctx context.Context, id, template string, meta
 		// Stop the running VM and drop its volume so we rebuild from archive.
 		m.teardownResourcesOpts(ctx, id, false /*keepDurableVolume*/)
 		_ = os.RemoveAll(vol)
-		if err := m.buildDBVolumeFromSource(ctx, id, vol, "", ""); err != nil {
+		if err := m.buildDBVolumeFromSource(ctx, id, vol, ""); err != nil {
 			// The volume is already gone. Mark the still-present row FAILED so the
 			// database stays visible + retryable (via a force failover) rather
 			// than stuck at a stale "running" status with no VM. Its GCS archive
@@ -175,7 +175,7 @@ func (m *Manager) RestoreDatabase(ctx context.Context, id, template string, meta
 	} else if _, err := os.Stat(vol); err == nil {
 		m.log.Info("db restore: reusing existing local volume", "id", id, "path", vol)
 	} else {
-		if err := m.buildDBVolumeFromSource(ctx, id, vol, "", ""); err != nil {
+		if err := m.buildDBVolumeFromSource(ctx, id, vol, ""); err != nil {
 			return nil, err
 		}
 	}
@@ -246,7 +246,7 @@ func (m *Manager) RestoreDatabase(ctx context.Context, id, template string, meta
 
 // dbBaseNameTimeLayout is the UTC timestamp embedded in base backup object
 // names (base-<ts>.tar.gz) by baseBackupOne. Lexicographic order == time
-// order, and PITR base selection parses it back out.
+// order, and base selection parses it back out.
 const dbBaseNameTimeLayout = "20060102T150405Z"
 
 // stripPandaStackRecoveryConf removes every previously-appended PandaStack
@@ -280,26 +280,20 @@ func stripPandaStackRecoveryConf(conf []byte) []byte {
 // renamed into place when complete, so a crashed restore never leaves a
 // half-staged volume that the corruption guard in autostart.sh would trust.
 //
-// Two callers, one shape:
-//   - failover restore: srcID == the database's own id, targetTime == "",
-//     cloneSrcToken == "" — newest base + replay ALL archived WAL via the
-//     baked pandastack-wal-restore script (wal.env carries the DB's own id).
-//   - clone/PITR: srcID == the SOURCE database, vol belongs to a NEW id,
-//     cloneSrcToken == this host's relay token for srcID. The staged conf
-//     gets an INLINE restore_command that fetches the SOURCE's WAL with that
-//     token — self-contained on the volume, so recovery works regardless of
-//     which rootfs vintage the guest boots (no baked-script dependency) and
-//     regardless of phase-2 timing (no env-injection race). With targetTime
-//     (RFC3339), the newest base taken BEFORE the target is selected
-//     (recovery can only roll forward) and postgres stops replay at
-//     recovery_target_time, then promotes.
+// Restore always rolls forward to the newest archived WAL: srcID is the
+// database's own id and cloneSrcToken is "", so the guest replays ALL archived
+// WAL via the baked pandastack-wal-restore script (wal.env carries the DB's own
+// id). The cloneSrcToken parameter stays in the signature for the alternate
+// shape where the WAL of a DIFFERENT source is replayed through an inline
+// restore_command; nothing in this build passes it.
+//
 // resolveBaseForTarget returns the single BEST base object to restore from —
 // the head of resolveBaseCandidates. Kept as the read-only preflight the
-// destructive in-place path runs to VALIDATE a target before tearing anything
-// down (it only needs to know a satisfiable base EXISTS). The actual build uses
+// destructive in-place path runs to VALIDATE the archive before tearing
+// anything down (it only needs to know a usable base EXISTS). The actual build uses
 // resolveBaseCandidates so it can fall past a corrupt/truncated head base (H2).
-func (m *Manager) resolveBaseForTarget(ctx context.Context, srcID, targetTime string) (string, error) {
-	cands, err := m.resolveBaseCandidates(ctx, srcID, targetTime)
+func (m *Manager) resolveBaseForTarget(ctx context.Context, srcID string) (string, error) {
+	cands, err := m.resolveBaseCandidates(ctx, srcID)
 	if err != nil {
 		return "", err
 	}
@@ -307,28 +301,18 @@ func (m *Manager) resolveBaseForTarget(ctx context.Context, srcID, targetTime st
 }
 
 // resolveBaseCandidates lists the base backups under db/{srcID}/base/ and returns
-// the GCS objects to restore from IN PRIORITY ORDER: for a plain restore, every
-// base sorted (generation DESC, timestamp DESC); for PITR, every base taken at or
-// before targetTime in that same order (recovery only rolls forward). The caller
-// tries them head-first and falls to the next when one is unreadable/truncated,
-// so a single corrupt base object cannot permanently shadow the good older ones.
-// Strictly READ-ONLY. A non-nil error means NOTHING can satisfy the target: no
-// bucket configured, no base backups, or the target predates the oldest base.
-func (m *Manager) resolveBaseCandidates(ctx context.Context, srcID, targetTime string) ([]string, error) {
+// the GCS objects to restore from IN PRIORITY ORDER: every base sorted
+// (generation DESC, timestamp DESC), so recovery always rolls forward from the
+// newest base of the current epoch. The caller tries them head-first and falls
+// to the next when one is unreadable/truncated, so a single corrupt base object
+// cannot permanently shadow the good older ones. Strictly READ-ONLY. A non-nil
+// error means nothing can be restored: no bucket configured, or no base backups.
+func (m *Manager) resolveBaseCandidates(ctx context.Context, srcID string) ([]string, error) {
 	bucket := strings.TrimSpace(os.Getenv("PANDASTACK_SNAPSHOT_BUCKET"))
 	if bucket == "" {
 		return nil, errors.New("db restore: PANDASTACK_SNAPSHOT_BUCKET not set — no archive to restore from")
 	}
 	prefix := "gs://" + bucket + "/db/" + srcID
-
-	var target time.Time
-	if targetTime != "" {
-		t, err := time.Parse(time.RFC3339, targetTime)
-		if err != nil {
-			return nil, fmt.Errorf("db restore: invalid target_time %q (want RFC3339): %w", targetTime, err)
-		}
-		target = t
-	}
 
 	// Base backups: names embed a UTC timestamp and (since TUSK T1.1) an
 	// archive generation: base-<ts>[-g<gen>].tar.gz. Selection is by
@@ -374,27 +358,9 @@ func (m *Manager) resolveBaseCandidates(ctx context.Context, srcID, targetTime s
 		}
 		return bases[i].ts.After(bases[j].ts) // then newest
 	})
-	if targetTime == "" {
-		urls := make([]string, len(bases))
-		for i, b := range bases {
-			urls[i] = b.url
-		}
-		return urls, nil
-	}
-	// PITR: walk the (gen DESC, ts DESC) order and collect every base at or
-	// before the target — naturally prefers the current epoch's chain, and
-	// falls back to older epochs when the target predates the last bump (and,
-	// via the caller's retry loop, past a corrupt head base).
-	var urls []string
-	for _, b := range bases {
-		if !b.ts.After(target) {
-			urls = append(urls, b.url)
-		}
-	}
-	if len(urls) == 0 {
-		oldestName := bases[len(bases)-1].url
-		oldestName = oldestName[strings.LastIndex(oldestName, "/")+1:]
-		return nil, fmt.Errorf("db restore: target_time %s predates the oldest base backup (%s) — nothing to roll forward from", targetTime, oldestName)
+	urls := make([]string, len(bases))
+	for i, b := range bases {
+		urls[i] = b.url
 	}
 	return urls, nil
 }
@@ -403,7 +369,7 @@ func (m *Manager) resolveBaseCandidates(ctx context.Context, srcID, targetTime s
 // base-<stamp>-g<gen>.tar.gz (mirrors the API's baseNameRe).
 var agentBaseNameRe = regexp.MustCompile(`^base-(\d{8}T\d{6}Z)(?:-g(\d+))?\.tar\.gz$`)
 
-func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, targetTime, cloneSrcToken string) (err error) {
+func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, cloneSrcToken string) (err error) {
 	// Resolve (read-only) the base backups to restore from, best first. Callers
 	// on the destructive in-place path run the single-best preflight up front to
 	// fail clean before touching the live volume, so an unsatisfiable target
@@ -412,7 +378,7 @@ func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, targe
 	// — otherwise one bad object (e.g. a base whose pg_basebackup died mid-stream
 	// and shipped a truncated tarball to an immutable, uniquely-named object)
 	// would permanently shadow every good older base and block recovery.
-	candidates, err := m.resolveBaseCandidates(ctx, srcID, targetTime)
+	candidates, err := m.resolveBaseCandidates(ctx, srcID)
 	if err != nil {
 		return err
 	}
@@ -559,13 +525,6 @@ func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, targe
 				" -H \"Authorization: Bearer %s\" -o \"%%p\" \"$PANDASTACK_WAL_URL/wal/%s/%%f\"'\n", cloneSrcToken, srcID) +
 			"recovery_target_timeline = 'latest'\n"
 	}
-	if targetTime != "" {
-		// Already validated as RFC3339 by resolveBaseForTarget above; re-parsed
-		// and re-serialized here so no user-controlled bytes reach the conf.
-		target, _ := time.Parse(time.RFC3339, targetTime)
-		recoveryConf += fmt.Sprintf("recovery_target_time = '%s'\nrecovery_target_action = 'promote'\n",
-			target.UTC().Format("2006-01-02 15:04:05+00"))
-	}
 	if err := os.WriteFile(confPath, append(conf, []byte(recoveryConf)...), 0o600); err != nil {
 		return fmt.Errorf("db restore: append restore_command: %w", err)
 	}
@@ -582,6 +541,6 @@ func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, targe
 		return fmt.Errorf("db restore: move volume into place: %w", err)
 	}
 	m.log.Info("db restore: volume staged from archive",
-		"src", srcID, "base", baseObj, "target_time", targetTime, "size_bytes", sizeBytes, "path", vol)
+		"src", srcID, "base", baseObj, "size_bytes", sizeBytes, "path", vol)
 	return nil
 }

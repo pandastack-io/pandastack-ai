@@ -13,8 +13,7 @@ import (
 
 // Host-level headroom gate for volume creation.
 //
-// Tier quotas (tier.go) bound what one WORKSPACE may provision; nothing bounds
-// what the HOST has promised in aggregate. Volumes are sparse ext4 images, so
+// Nothing bounds what the HOST has promised in aggregate. Volumes are sparse ext4 images, so
 // provisioned size >> bytes actually used is normal and healthy — but sparse
 // files grow on write, and when the backing filesystem runs out of real space
 // every volume on the host EIO/ENOSPCs at once, taking down running sandboxes.

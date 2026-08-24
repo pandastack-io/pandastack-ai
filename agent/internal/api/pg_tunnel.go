@@ -30,26 +30,14 @@ import (
 // pgTunnelPort is the default Postgres port inside every postgres-16 sandbox.
 const pgTunnelPort = 5432
 
-// pgBouncerPort is the guest's pgbouncer (transaction pooler) port. The db-proxy's
-// pooled listener requests it via ?port=6432 (TUSK T2.1).
-const pgBouncerPort = 6432
-
-// resolveTunnelPort picks the guest port from an optional ?port query param,
-// allow-listed to the two ports we actually expose inside a managed-DB guest:
-// Postgres (5432) and pgbouncer (6432). Anything else (or absent) → 5432. This
-// prevents the tunnel from being used as a generic guest-port SSRF primitive.
+// resolveTunnelPort picks the guest port from an optional ?port query param.
+// The allowlist is exactly one port — Postgres (5432) — so the tunnel can
+// never be used as a generic guest-port SSRF primitive. Absent → 5432.
 func resolveTunnelPort(raw string) (int, bool) {
-	if raw == "" {
+	if raw == "" || raw == "5432" {
 		return pgTunnelPort, true
 	}
-	switch raw {
-	case "5432":
-		return pgTunnelPort, true
-	case "6432":
-		return pgBouncerPort, true
-	default:
-		return 0, false
-	}
+	return 0, false
 }
 
 // Only managed-database templates (postgres-16 + its RAM tiers) are allowed
@@ -84,11 +72,11 @@ func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 			return
 		}
 
-		// TUSK T2.1: optional ?port selects the pooler (6432) vs Postgres (5432),
-		// allow-listed so the tunnel can't reach arbitrary guest ports.
+		// Optional ?port, allow-listed so the tunnel can't reach arbitrary
+		// guest ports.
 		port, ok := resolveTunnelPort(r.URL.Query().Get("port"))
 		if !ok {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("unsupported tunnel port %q (allowed: 5432, 6432)", r.URL.Query().Get("port")))
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unsupported tunnel port %q (allowed: 5432)", r.URL.Query().Get("port")))
 			return
 		}
 

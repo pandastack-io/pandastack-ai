@@ -612,9 +612,8 @@ func (d *databasesAPI) cleanupArchive(ctx context.Context, id string) error {
 
 // StartArchiveJanitor launches the archive sweeper. Per pass it walks
 // gs://$BUCKET/db/ and, per archive: purges orphans (row gone — guarded by
-// grace + row re-check, VAULT V2), prunes live archives to the owner's tier
-// retention window (VAULT V1), and upserts the backup catalog tables that the
-// /backups endpoint renders from (so the request path never touches GCS).
+// grace + a row re-check), and prunes live archives to the configured
+// retention window (PANDASTACK_BACKUP_RETENTION_DAYS).
 //
 // Coordination: a full sweep is gsutil listings over EVERY archive — seconds of
 // CPU each on the small edge VMs. Every edge runs this janitor, so two guards
@@ -672,23 +671,6 @@ func (d *databasesAPI) sweepOrphanArchives(ctx context.Context, bucket string) {
 	d.sweepBreaker.Success()
 	// TUSK T1.4 housekeeping: GC long-expired archive leases.
 	d.expireArchiveLeases(ctx)
-	// Reconcile orphaned catalog rows: a catalog whose database row is gone is
-	// backup METADATA outliving the resource (the archive itself was already —
-	// or is about to be — purged; and a drop that raced a client disconnect or
-	// an in-flight listing may have left rows behind). The archive walk below
-	// can't see these — a fully-purged prefix no longer appears in the listing —
-	// so an anti-join here is the only path that ever revisits them.
-	if _, err := d.db.ExecContext(ctx, `
-		DELETE FROM db_backup_catalog c WHERE NOT EXISTS
-			(SELECT 1 FROM sandboxes s WHERE s.id = c.db_id)`); err != nil {
-		d.log.Warn("archive janitor: catalog orphan reconcile failed", "err", err)
-	}
-	if _, err := d.db.ExecContext(ctx, `
-		DELETE FROM db_backup_summary m WHERE NOT EXISTS
-			(SELECT 1 FROM sandboxes s WHERE s.id = m.db_id)`); err != nil {
-		d.log.Warn("archive janitor: summary orphan reconcile failed", "err", err)
-	}
-
 	first := true
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
