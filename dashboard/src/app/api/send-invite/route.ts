@@ -6,7 +6,11 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { Resend } from 'resend';
 import { requireDashboardUser } from '@/lib/email-auth';
 
-const FROM = 'PandaStack <hello@pandastack.ai>';
+// Sender and links are deployment-specific: a self-hosted install must not
+// send mail as the vendor, nor link users at the vendor's hosted dashboard.
+const FROM = process.env.PANDASTACK_EMAIL_FROM || 'PandaStack <onboarding@example.com>';
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || APP_URL;
 
 function inviteHtml(orgName: string, inviteUrl: string): string {
   return `<!DOCTYPE html>
@@ -63,7 +67,7 @@ function inviteHtml(orgName: string, inviteUrl: string): string {
           <tr>
             <td style="padding:20px 40px;border-top:1px solid #1e1e1e;font-size:12px;color:#525252;line-height:1.6;">
               PandaStack · Built for developers ·
-              <a href="https://pandastack.ai" style="color:#525252;">pandastack.ai</a>
+              <a href="${SITE_URL}" style="color:#525252;">${SITE_URL.replace(/^https?:\/\//, "")}</a>
             </td>
           </tr>
 
