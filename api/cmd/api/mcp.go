@@ -466,7 +466,7 @@ func mcpWorkspaceTools() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "create_sandbox",
-			"description": "Create a new Firecracker microVM sandbox. Returns the sandbox JSON including its id. Templates: base, code-interpreter, agent, browser.",
+			"description": "Create a new Firecracker microVM sandbox. Returns the sandbox JSON including its id. Templates: base, code-interpreter, agent, postgres-16.",
 			"inputSchema": obj(map[string]any{
 				"template":    str("Template name (default: code-interpreter)."),
 				"ttl_seconds": num("Optional auto-delete TTL in seconds."),

@@ -129,11 +129,6 @@ type DatabaseInfo struct {
 	Username      string `json:"username,omitempty"`
 	Password      string `json:"password,omitempty"`
 	ConnectionURL string `json:"connection_url,omitempty"`
-	// PooledConnectionURL routes through the guest's pgbouncer (transaction
-	// pooling) via the db-proxy's :6432 listener — same host/creds, different
-	// port. Recommended for serverless/agent workloads that open many short
-	// connections. (TUSK T2.1)
-	PooledConnectionURL string `json:"pooled_connection_url,omitempty"`
 	// REST broker (Pattern A)
 	BrokerToken string `json:"broker_token,omitempty"`
 	BrokerURL   string `json:"broker_url,omitempty"`
@@ -152,10 +147,6 @@ type DatabaseInfo struct {
 	SandboxID string `json:"sandbox_id,omitempty"`
 	// Size is derived from the template.
 	Size string `json:"size,omitempty"`
-	// ClonedFrom is the source database id for clones/PITR restores.
-	ClonedFrom string `json:"cloned_from,omitempty"`
-	// BranchedFrom is the parent database id for reflink branches (TUSK T4.1).
-	BranchedFrom string `json:"branched_from,omitempty"`
 	// AlwaysOn opts the database out of idle auto-suspend when true.
 	AlwaysOn bool `json:"always_on,omitempty"`
 }
@@ -419,8 +410,6 @@ func (d *databasesAPI) list(w http.ResponseWriter, r *http.Request) {
 		}
 		if sb.Metadata != nil {
 			info.Label = sb.Metadata["db.label"]
-			info.ClonedFrom = sb.Metadata["db.cloned_from"]
-			info.BranchedFrom = sb.Metadata["db.branched_from"]
 			info.AlwaysOn = dbMetaTrue(sb.Metadata["db.always_on"])
 		}
 		out = append(out, info)
@@ -473,8 +462,6 @@ func (d *databasesAPI) get(w http.ResponseWriter, r *http.Request) {
 	}
 	if sb.Metadata != nil {
 		result.Label = sb.Metadata["db.label"]
-		result.ClonedFrom = sb.Metadata["db.cloned_from"]
-		result.BranchedFrom = sb.Metadata["db.branched_from"]
 		result.AlwaysOn = dbMetaTrue(sb.Metadata["db.always_on"])
 	}
 	if sb.Status == "running" {
@@ -541,16 +528,14 @@ func (d *databasesAPI) getFromSharedTable(ctx context.Context, workspace, id str
 		return DatabaseInfo{}, false
 	}
 	return DatabaseInfo{
-		ID:           id,
-		Status:       dbPublicStatus(status),
-		Template:     template,
-		Size:         dbSizeOfTemplate(template),
-		Label:        meta["db.label"],
-		ClonedFrom:   meta["db.cloned_from"],
-		BranchedFrom: meta["db.branched_from"],
-		AlwaysOn:     dbMetaTrue(meta["db.always_on"]),
-		CreatedAt:    createdAt.Int64,
-		SandboxID:    id,
+		ID:        id,
+		Status:    dbPublicStatus(status),
+		Template:  template,
+		Size:      dbSizeOfTemplate(template),
+		Label:     meta["db.label"],
+		AlwaysOn:  dbMetaTrue(meta["db.always_on"]),
+		CreatedAt: createdAt.Int64,
+		SandboxID: id,
 	}, true
 }
 
@@ -1458,8 +1443,6 @@ func mergeInfo(base DatabaseInfo, pg *pgInfoResponse, sandboxID string) Database
 	// Callers authenticate with Authorization: Bearer <broker_token>.
 	base.BrokerURL = dbAPIBase + "/v1/databases/" + sandboxID + "/proxy"
 	base.ConnectionURL = fmt.Sprintf("postgres://%s:%s@%s:5432/%s",
-		pg.Username, pg.Password, base.Host, pg.Database)
-	base.PooledConnectionURL = fmt.Sprintf("postgres://%s:%s@%s:6432/%s",
 		pg.Username, pg.Password, base.Host, pg.Database)
 	return base
 }

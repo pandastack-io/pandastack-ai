@@ -101,20 +101,8 @@
             "description": "Public REST query-broker base URL (/v1/databases/{id}/proxy).",
             "type": "string"
           },
-          "cloned_from": {
-            "description": "Source database id for clones/PITR restores.",
-            "type": "string"
-          },
-          "branched_from": {
-            "description": "Parent database id for reflink branches (TUSK T4.1).",
-            "type": "string"
-          },
           "connection_url": {
             "description": "Ready-to-use postgres:// URL (TLS required).",
-            "type": "string"
-          },
-          "pooled_connection_url": {
-            "description": "postgres:// URL routed through the guest's pgbouncer (transaction pooling) on port 6432. Recommended for serverless/agent workloads that open many short connections.",
             "type": "string"
           },
           "created_at": {
