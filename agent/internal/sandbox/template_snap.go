@@ -1479,9 +1479,7 @@ return drv, phases, nil
 // For these templates the snapshot is taken at the Phase 1/2 boundary so
 // every sandbox restore starts with Phase 1 already done (sub-2s launch).
 var phasedBootTemplates = map[string]bool{
-	"postgres-16":     true,
-	"postgres-16-4g":  true, // RAM tier — same rootfs, 4 GiB baked guest
-	"postgres-16-16g": true, // RAM tier — same rootfs, 16 GiB baked guest
+	"postgres-16": true,
 }
 
 const (

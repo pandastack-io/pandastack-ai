@@ -109,11 +109,11 @@ func (s *Store) SetSandboxAgentID(ctx context.Context, id, agentID string) error
 
 // UpdateSandbox rewrites the mutable columns of an existing row from a full
 // struct. created_at is deliberately NOT in the SET list: it is immutable, and
-// writing it here was a live billing bug — callers that rebuild a *Sandbox from
+// writing it here was a live data bug — callers that rebuild a *Sandbox from
 // a row (GetTyped) left CreatedAt at the Go zero value, so a metadata patch or
-// a status flip stamped created_at = -62135596800. The meter treats a
-// zero-time row as having no billing anchor, so the sandbox stopped billing
-// permanently and could not self-heal. Nothing may resurrect this column here.
+// a status flip stamped created_at = -62135596800 — an age of ~2000 years,
+// which every age-based sweep and every dashboard read then believed. Nothing
+// may resurrect this column here.
 func (s *Store) UpdateSandbox(ctx context.Context, sb any) error {
 	r, err := toRow(sb)
 	if err != nil {

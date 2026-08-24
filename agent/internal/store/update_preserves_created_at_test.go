@@ -7,12 +7,11 @@ import (
 	"time"
 )
 
-// TestUpdateSandbox_PreservesCreatedAt pins the fix for a production billing
-// bug: UpdateSandbox used to rewrite created_at from the caller's struct, so a
+// TestUpdateSandbox_PreservesCreatedAt pins the fix for a production data bug:
+// UpdateSandbox used to rewrite created_at from the caller's struct, so a
 // caller that rebuilt a *Sandbox without populating CreatedAt (GetTyped did
-// exactly that) stamped the Go zero time onto a live row. The meter treats a
-// zero-time row as having no billing anchor, so the sandbox stopped billing
-// permanently. created_at is immutable — no update path may write it.
+// exactly that) stamped the Go zero time onto a live row, giving it an age of
+// ~2000 years. created_at is immutable — no update path may write it.
 func TestUpdateSandbox_PreservesCreatedAt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -20,7 +19,7 @@ func TestUpdateSandbox_PreservesCreatedAt(t *testing.T) {
 	created := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Second)
 	if err := s.InsertSandbox(ctx, map[string]any{
 		"id":         "sb-immutable",
-		"template":   "postgres-16-4g",
+		"template":   "postgres-16",
 		"cpu":        8,
 		"memory_mb":  4096,
 		"status":     "running",
@@ -34,7 +33,7 @@ func TestUpdateSandbox_PreservesCreatedAt(t *testing.T) {
 	// as produced by rebuilding a row and patching one field.
 	if err := s.UpdateSandbox(ctx, map[string]any{
 		"id":        "sb-immutable",
-		"template":  "postgres-16-4g",
+		"template":  "postgres-16",
 		"cpu":       8,
 		"memory_mb": 4096,
 		"status":    "paused",
@@ -51,7 +50,7 @@ func TestUpdateSandbox_PreservesCreatedAt(t *testing.T) {
 
 	got, _ := m["created_at"].(time.Time)
 	if got.IsZero() {
-		t.Fatal("created_at was zeroed by UpdateSandbox — the billing anchor is destroyed")
+		t.Fatal("created_at was zeroed by UpdateSandbox — the row's age is destroyed")
 	}
 	if !got.Equal(created) {
 		t.Fatalf("created_at changed: got %v, want %v", got, created)

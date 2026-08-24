@@ -1,6 +1,6 @@
 # LSP Benchmark Report
 
-CSV: `/Users/ajaykumar/Documents/firecracker-on-m3-mac/bench/lsp/results/run-20260531-125655.csv`
+CSV: `bench/lsp/results/run-20260531-125655.csv`
 
 ## Aggregate stats
 

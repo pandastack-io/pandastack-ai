@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestStampWorkspaceMeta_StripsReservedKeys pins the fix for a live billing
-// escape: the workload billing class is read from sandbox metadata, and only
+// TestStampWorkspaceMeta_StripsReservedKeys pins the fix for a live tenancy
+// escape: the workload class is read from sandbox metadata, and only
 // "workspace" used to be sanitised. A tenant could pass kind=app on an ordinary
 // create and bill at app rates (~8x cheaper), stretch their free credit ~8x
 // before quota suspended them, dodge the suspend sweep, and end up with a
@@ -29,7 +29,7 @@ func TestStampWorkspaceMeta_StripsReservedKeys(t *testing.T) {
 	}
 	for _, k := range []string{"kind", "app.id"} {
 		if v, ok := md[k]; ok {
-			t.Fatalf("reserved key %q survived as %v — a tenant can still pick their own billing class", k, v)
+			t.Fatalf("reserved key %q survived as %v — a tenant can still pick their own workload class", k, v)
 		}
 	}
 	if md["workspace"] != "acme" {

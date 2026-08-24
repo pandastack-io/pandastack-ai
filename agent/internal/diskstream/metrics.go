@@ -9,7 +9,7 @@ package diskstream
 // Increments happen at the MOMENT each event occurs — not sampled from Stats()
 // at teardown — so a closed/recovered device's counts are never lost. This is
 // the lost-counts fix the Phase-3 critique called for, achieved without a pull
-// collector: fetch_bytes (billing-critical) is recorded as bytes actually leave
+// collector: fetch_bytes is recorded as bytes actually leave
 // for GCS, regardless of device lifecycle.
 var (
 	// OnFetch is called once per chunk successfully fetched from the upstream
@@ -19,7 +19,7 @@ var (
 	OnZeroFill func()
 	// OnFetchBytes is called with the byte count + (template, generation) each
 	// time bytes are pulled from GCS through the egress governor — the
-	// billing/abuse signal. template/generation may be "" when unlabeled.
+	// egress signal. template/generation may be "" when unlabeled.
 	OnFetchBytes func(template, generation string, n int64)
 	// OnVerifyError is called when a fetched chunk fails its SHA-256 check.
 	OnVerifyError func()

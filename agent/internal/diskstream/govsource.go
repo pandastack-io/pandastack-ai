@@ -62,7 +62,7 @@ type GovConfig struct {
 	// SoftCapBytes, when in (0, HardCapBytes), is where we start logging a
 	// throttle warning so operators see abuse before the hard stop. 0 = none.
 	SoftCapBytes int64
-	// Template/Generation label the fetch_bytes metric for per-tenant billing.
+	// Template/Generation label the fetch_bytes metric for per-tenant accounting.
 	Template   string
 	Generation string
 	Logf       func(level, msg string, kv ...any)
@@ -146,7 +146,7 @@ func (g *govSource) ReadAt(ctx context.Context, p []byte, off int64) (int, error
 		g.lifetime += int64(read)
 		g.fetched += int64(read)
 		g.mu.Unlock()
-		fireFetchBytes(g.label, int64(read)) // billing/abuse signal (real GCS bytes)
+		fireFetchBytes(g.label, int64(read)) // egress signal (real GCS bytes)
 		fireFetch()                          // one real GCS chunk fetch
 	}
 	return read, err

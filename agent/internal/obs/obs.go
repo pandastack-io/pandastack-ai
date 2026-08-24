@@ -64,10 +64,10 @@ var (
 		Help:      "Total sandbox create attempts, partitioned by result and boot mode.",
 	}, []string{"result", "boot_mode"})
 
-	// SandboxCPUSeconds is the TIDAL T1.2 active-CPU meter: cumulative CPU
+	// SandboxCPUSeconds is the TIDAL T1.2 active-CPU counter: cumulative CPU
 	// seconds actually consumed by each sandbox's Firecracker process (from its
-	// cgroup's cpu.stat usage_usec). The billing basis for "pay for the seconds
-	// you touch" and the util signal for apps scale-out.
+	// cgroup's cpu.stat usage_usec). This is the utilization signal behind
+	// GET /sandboxes/{id}/util and the scale-out trigger.
 	SandboxCPUSeconds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "pandastack",
 		Name:      "sandbox_cpu_usage_seconds_total",
@@ -163,7 +163,7 @@ var (
 
 	// ---- streaming disk (NBD) metrics, design §6.3 ----
 	// Incremented at the moment each event occurs (push), so a closed/recovered
-	// device's counts are never lost — important for fetch_bytes (billing/abuse).
+	// device's counts are never lost — important for fetch_bytes (egress).
 
 	// DiskFetchesTotal: 1-MiB chunks actually pulled from GCS into the cache.
 	DiskFetchesTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -176,7 +176,7 @@ var (
 		Help: "Total streaming-disk reads served as zeros (absent chunks, no I/O).",
 	})
 	// DiskFetchBytesTotal: bytes that actually left for GCS, labeled by
-	// (template, generation) for per-tenant billing/abuse accounting. Cache hits,
+	// (template, generation) for per-tenant egress accounting. Cache hits,
 	// zero-fill, and overlay reads contribute ZERO by construction (charged at
 	// the governor, which sits below the shared cache).
 	DiskFetchBytesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

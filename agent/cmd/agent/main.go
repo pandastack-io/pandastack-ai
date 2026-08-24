@@ -88,7 +88,7 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 	// Wire streaming-disk metric hooks to obs counters (§6.3). The diskstream /
 	// nbdstream packages are dependency-free (no obs import) and expose no-op
 	// hook vars; we bind them here so events are counted as they happen — so a
-	// closed/recovered device's counts (esp. fetch_bytes for billing) are never
+	// closed/recovered device's counts (esp. fetch_bytes) are never
 	// lost. No-ops until bound, so unit tests of those packages stay isolated.
 	diskstream.OnFetch = obs.DiskFetchesTotal.Inc
 	diskstream.OnZeroFill = obs.DiskZeroFillTotal.Inc

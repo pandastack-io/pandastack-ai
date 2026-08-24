@@ -1,8 +1,11 @@
 -- +goose Up
--- Billing watermark for periodic usage metering. Unix epoch seconds of the
--- last emitted usage slice for this sandbox (0 = never metered; the delete
--- path then bills from created_at). Lets long-running / persistent sandboxes
--- (databases, apps) accrue usage while alive instead of only at delete time.
+-- Reserved bookkeeping watermark, unix epoch seconds, default 0.
+--
+-- This build writes nothing to it: it ships so that the schema matches what
+-- the sandbox store SELECTs (see agent/internal/store/store.go sandboxCols),
+-- and so a database provisioned here stays compatible with deployments that
+-- do keep their own per-sandbox accounting. Removing the column would mean
+-- forking the store's column list.
 ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS metered_at BIGINT NOT NULL DEFAULT 0;
 
 -- +goose Down

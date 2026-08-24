@@ -396,14 +396,12 @@ func checkCreateOwnership(dataDir string, body []byte, ws string) (int, string) 
 // Unlike a best-effort inject, this OVERWRITES any client-supplied value so a
 // non-admin caller cannot spoof ownership of another tenant's namespace.
 // reservedMeta are metadata keys the PLATFORM owns. They must never survive
-// from a client body, because the billing and lifecycle code trusts them:
+// from a client body, because platform code trusts them:
 //
-//   - "kind" / "app.id" select the workload billing class (workloadClass), so a
-//     tenant that set kind=app billed an ordinary sandbox at app rates — roughly
-//     an 8x discount, and correspondingly ~8x more free credit before quota
-//     suspended them. The same tag also made the sandbox invisible to the quota
-//     suspend sweep (which skips app-tagged rows, expecting the apps table to
-//     own them) and undeletable through the normal API.
+//   - "kind" / "app.id" select the workload class (workloadClass), which the
+//     memory-pressure ladder uses as a scope guard — a tenant that set these
+//     could exempt an ordinary sandbox from being frozen under pressure, and
+//     make it invisible to sweeps that skip those rows.
 //   - "workspace" is the tenancy boundary itself.
 //
 // Stripping beats validating: a key the platform sets later is unaffected,
@@ -436,10 +434,8 @@ func stampWorkspaceMeta(body []byte, ws string, platform bool) []byte {
 	if md == nil {
 		md = map[string]any{}
 	}
-	// Reserved keys are stripped from TENANT bodies only. The apps pipeline is
-	// a legitimate setter of kind/app.id — stripping them there would have
-	// un-classified every app sandbox, billing apps at ~8x sandbox rates and
-	// breaking the suspend sweep's app detection. workspace is forced for
+	// Reserved keys are stripped from TENANT bodies only; platform-origin
+	// callers are legitimate setters of kind/app.id. workspace is forced for
 	// everyone, platform included: it is the tenancy boundary, not a hint.
 	if !platform {
 		for _, k := range reservedMeta {
