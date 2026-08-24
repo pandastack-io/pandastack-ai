@@ -295,7 +295,7 @@ func (a *snapshotsAPI) sandboxTemplate(ctx context.Context, workspace, sandboxID
 }
 
 // purgeSnapshotGCS removes gs://<snapshot-bucket>/snapshots/<id>/ best-effort,
-// reusing the same gsutil mechanism + benign-error handling as apps_gcs.go.
+// reusing the shared gsutil helpers in gcs_util.go.
 func (a *snapshotsAPI) purgeSnapshotGCS(ctx context.Context, snapID string) {
 	snapID = strings.TrimSpace(snapID)
 	bucket := strings.TrimSpace(os.Getenv("PANDASTACK_SNAPSHOT_BUCKET"))

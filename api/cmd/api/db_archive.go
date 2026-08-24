@@ -301,7 +301,7 @@ func gsutilRm(ctx context.Context, urls []string) error {
 
 // --- the per-archive engine (called from the janitor loop) ---
 func (d *databasesAPI) pruneArchiveToRetention(ctx context.Context, bucket, id string) {
-	// TUSK T1.4: an in-flight clone/PITR/failover holds a lease on this
+	// TUSK T1.4: an in-flight failover or restore holds a lease on this
 	// archive chain — do not prune under it (a pruned anchor mid-replay
 	// truncates the recovery). The lease is minutes-long; next sweep prunes.
 	if d.archiveLeaseActive(ctx, id) {

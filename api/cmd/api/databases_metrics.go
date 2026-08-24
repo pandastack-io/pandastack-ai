@@ -191,7 +191,7 @@ func (d *databasesAPI) metrics(w http.ResponseWriter, r *http.Request) {
 
 	// If the ClickHouse read path isn't wired (dev / stripped deploy),
 	// return an empty envelope instead of erroring. The dashboard will
-	// render "collecting…" — same shape as apps_metrics.
+	// render "collecting…".
 	if d.ch == nil || d.ch.reader == nil {
 		writeMetricsJSON(w, out)
 		return

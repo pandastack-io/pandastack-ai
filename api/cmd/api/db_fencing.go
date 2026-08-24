@@ -18,7 +18,7 @@
 //   - Uploads are create-only (x-goog-if-generation-match:0 on the agent
 //     side), so identical object names are first-writer-wins — a stale host
 //     can never overwrite an object the new owner already archived.
-//   - db_archive_leases: an in-flight clone/PITR/failover takes a lease on
+//   - db_archive_leases: an in-flight failover or restore takes a lease on
 //     the SOURCE archive; the retention pruner and orphan purge skip leased
 //     archives. Closes the "janitor GCs the chain mid-clone" race.
 //   - Deletions re-validate: purgeOrphanArchive re-reads the generation right
@@ -137,7 +137,7 @@ func (d *databasesAPI) currentArchiveGeneration(ctx context.Context, id string) 
 // ---------------------------------------------------------------------------
 
 // acquireArchiveLease records that holder is reading id's archive chain for
-// purpose (clone/pitr/failover/restore) for ttl. Multiple concurrent leases
+// purpose (failover/restore) for ttl. Multiple concurrent leases
 // are fine — the pruner skips while ANY unexpired lease exists. Errors are
 // returned but callers may treat them as non-fatal (a missing lease degrades
 // to the pre-T1.4 behavior, it does not block the user's operation).
