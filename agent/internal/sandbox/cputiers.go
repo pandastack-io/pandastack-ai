@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// TIDAL T1.1 + T1.2 — CPU burst-to-physical via cgroup v2 cpu.weight tiers,
+// CPU burst-to-physical via cgroup v2 cpu.weight tiers,
 // plus the per-sandbox active-CPU accounting that feeds utilization signals.
 //
 // Design: a 15s reconciler loop (not per-boot-path wiring — Create, warm-fork,
@@ -80,7 +80,7 @@ type cpuTiers struct {
 	totalSec map[string]float64 // sandbox id -> accumulated active CPU seconds
 	// residGiBSec accumulates resident-memory GiB-seconds per sandbox
 	// (resident bytes x seconds-since-last-scrape, integrated at each 15s
-	// reconcile) — the working-set RAM utilization signal (TIDAL T4.1).
+	// reconcile) — the working-set RAM utilization signal.
 	residGiBSec map[string]float64
 	lastResidAt map[string]time.Time
 }
@@ -214,7 +214,7 @@ func (ct *cpuTiers) init() error {
 	if err := os.WriteFile(filepath.Join(svc, "cgroup.subtree_control"), []byte("+cpu"), 0o644); err != nil {
 		return fmt.Errorf("enable +cpu in %s: %w", svc, err)
 	}
-	// Memory controller too (TIDAL T2.2): gives every vm-<id> cgroup
+	// Memory controller too: gives every vm-<id> cgroup
 	// memory.current/high/max so the squeezable (no-hugepage) class can be
 	// accounted and squeezed. Enabled separately and best-effort — a kernel
 	// without the memory controller on this subtree must not take down CPU
@@ -270,7 +270,7 @@ func (m *Manager) cpuTiersReconcile(ct *cpuTiers) {
 		if sec, ok := ct.scrapeCPU(v.id); ok {
 			obs.SandboxCPUSeconds.WithLabelValues(v.id).Add(sec)
 		}
-		// TIDAL T2.1 (shadow): measured residency = Rss + hugetlb from
+		// Measured residency = Rss + hugetlb from
 		// smaps_rollup — the working-set truth admission will one day use.
 		// Hugetlb terms are load-bearing: guest RAM is hugetlb on this fleet
 		// and invisible to plain Rss (T0.1/T0.3 findings).

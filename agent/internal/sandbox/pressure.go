@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// pressure.go — TIDAL T2.3: the PSI pressure ladder.
+// pressure.go — the PSI pressure ladder.
 //
 // Host RAM is a cache, not an allocation (tidal-plan.md §2). This controller
 // watches host memory pressure and walks the coldest VMs down the ladder

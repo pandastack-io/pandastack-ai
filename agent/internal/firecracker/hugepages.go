@@ -54,7 +54,7 @@ func hugePagesEnabled() bool {
 // (PANDASTACK_NOHUGE_TEMPLATES, comma-separated). Members cold-boot with
 // ordinary 4 KiB pages even on a hugepage fleet, so their baked seeds carry
 // no hugepages marker — making them (a) governable by cgroup memory.max
-// (TIDAL T2.2: hugetlb guest RAM is invisible to it, proven T0.3), and
+// (hugetlb guest RAM is invisible to cgroup memory accounting), and
 // (b) CoW-shareable via mem_file_path MAP_PRIVATE (memory-cow BET1/BET2).
 func noHugeTemplate(template string) bool {
 	if template == "" {

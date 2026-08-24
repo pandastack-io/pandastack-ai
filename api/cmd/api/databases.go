@@ -140,7 +140,7 @@ type DatabaseInfo struct {
 	FailoverAvailable bool   `json:"failover_available,omitempty"`
 	FailoverReason    string `json:"failover_reason,omitempty"`
 	FailoverETA       int    `json:"failover_eta_seconds,omitempty"`
-	// SandboxID makes the DB↔sandbox identity explicit (B7). Today the
+	// SandboxID makes the DB↔sandbox identity explicit. Today the
 	// database id doubles as the sandbox id; surfacing it lets clients
 	// correlate with agent/sandbox state instead of relying on that implicit
 	// mapping — and keeps the field stable if the ids ever diverge.
@@ -169,7 +169,7 @@ type databasesAPI struct {
 	// not wired; the endpoint responds with an empty series in that case.
 	ch *chState
 	// sweepBreaker parks the archive-janitor sweep after repeated failures
-	// (TUSK T1.6) so a wedged loop can't hammer GCS/Postgres on every tick.
+	// so a wedged loop can't hammer GCS/Postgres on every tick.
 	sweepBreaker *loopBreaker
 }
 
@@ -316,7 +316,7 @@ func (d *databasesAPI) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TUSK T1.1: seed the archive generation at 1. The WAL relay defaults to
+	// Seed the archive generation at 1. The WAL relay defaults to
 	// gen 1 when the row metadata carries no db.archive_gen (the fresh-create
 	// case), so the seeded row and the relay's default agree. Every later
 	// ownership change (failover / in-place restore) BUMPS this and stamps the
@@ -539,12 +539,12 @@ func (d *databasesAPI) getFromSharedTable(ctx context.Context, workspace, id str
 	}, true
 }
 
-// cloneInFlightFrom reports whether any clone of srcID is still inside its
-// provisioning window: status "creating" (staging), or "running" but created
-// within the clone stage timeout (WAL replay continues in-guest after the
-// row flips running). Conservative by design — a false positive only delays
-// a delete by minutes; a false negative destroys a clone's data source.
-func (d *databasesAPI) cloneInFlightFrom(ctx context.Context, srcID string) (bool, string) {
+// recoveringFrom reports whether any database is still replaying out of
+// srcID's archive: status "creating" (staging), or "running" but created
+// within the stage timeout (WAL replay continues in-guest after the row flips
+// running). Conservative by design — a false positive only delays a delete by
+// minutes; a false negative destroys the reader's data source mid-replay.
+func (d *databasesAPI) recoveringFrom(ctx context.Context, srcID string) (bool, string) {
 	if d.db == nil {
 		return false, ""
 	}
@@ -558,23 +558,23 @@ func (d *databasesAPI) cloneInFlightFrom(ctx context.Context, srcID string) (boo
 	// block EVERY delete. Substring-match the exact JSON pair instead:
 	// srcID is a validated UUID (LIKE-safe) and Go's json.Marshal emits
 	// `"db.recover_from":"<uuid>"` with no whitespace.
-	var cloneID string
+	var readerID string
 	err := d.db.QueryRowContext(ctx, `
 		SELECT id FROM sandboxes
 		WHERE metadata LIKE '%"db.recover_from":"' || $1 || '"%'
 		  AND (status = 'creating'
 		       OR (status = 'running' AND created_at > EXTRACT(EPOCH FROM now())::bigint - 2700))
-		LIMIT 1`, srcID).Scan(&cloneID)
+		LIMIT 1`, srcID).Scan(&readerID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ""
 	}
 	if err != nil {
 		// Fail CLOSED: the downstream archive purge is irreversible, and a
 		// delete blocked by a transient query error is retryable in seconds.
-		d.log.Warn("databases: clone-in-flight check errored; refusing delete", "id", srcID, "err", err)
+		d.log.Warn("databases: recovery-in-flight check errored; refusing delete", "id", srcID, "err", err)
 		return true, "unknown (lookup failed — retry)"
 	}
-	return true, cloneID
+	return true, readerID
 }
 
 func (d *databasesAPI) cleanupArchive(ctx context.Context, id string) error {
@@ -652,7 +652,7 @@ func (d *databasesAPI) StartArchiveJanitor(ctx context.Context) {
 }
 
 func (d *databasesAPI) sweepOrphanArchives(ctx context.Context, bucket string) {
-	// TUSK T1.6: a consecutively-failing sweep parks itself instead of
+	// A consecutively-failing sweep parks itself instead of
 	// hammering GCS/Postgres every interval (the 2026-08-20 stampede class).
 	if !d.sweepBreaker.Allow() {
 		d.log.Warn("archive janitor: circuit breaker open — sweep parked")
@@ -669,7 +669,7 @@ func (d *databasesAPI) sweepOrphanArchives(ctx context.Context, bucket string) {
 		return
 	}
 	d.sweepBreaker.Success()
-	// TUSK T1.4 housekeeping: GC long-expired archive leases.
+	// Housekeeping: GC long-expired archive leases.
 	d.expireArchiveLeases(ctx)
 	first := true
 	for _, line := range strings.Split(string(out), "\n") {
@@ -806,7 +806,7 @@ func (d *databasesAPI) delete(w http.ResponseWriter, r *http.Request) {
 	workspace := dbWorkspace(r)
 	id := r.PathValue("id")
 
-	// Verify it's a postgres database before deletion. B6: an unreachable
+	// Verify it's a postgres database before deletion. An unreachable
 	// agent is NOT "not found" — the database exists, the host is transiently
 	// down. NOTE: agentCall serves in-process (httptest recorder), so
 	// unreachable agents arrive as a RECORDED 502/503 response from the
@@ -838,11 +838,11 @@ func (d *databasesAPI) delete(w http.ResponseWriter, r *http.Request) {
 
 	// Clone-in-flight guard: a clone of this database replays the source's
 	// GCS archive segment-by-segment for its whole recovery — deleting the
-	// source now would purge that archive mid-replay and silently truncate
-	// the clone. Refuse while any clone is still in its provisioning window.
-	if inFlight, cloneID := d.cloneInFlightFrom(r.Context(), id); inFlight {
+	// source now would purge that archive mid-replay and silently truncate the
+	// reader. Refuse while anything is still in its provisioning window.
+	if inFlight, readerID := d.recoveringFrom(r.Context(), id); inFlight {
 		writeErrOrg(w, http.StatusConflict,
-			"a clone of this database ("+cloneID+") is still provisioning from its backups — retry the delete once the clone is running")
+			"another database ("+readerID+") is still recovering from this one's backups — retry the delete once it is running")
 		return
 	}
 
@@ -878,7 +878,7 @@ func (d *databasesAPI) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// wake handles POST /v1/databases/{id}/wake (B4): the documented, DB-level
+// wake handles POST /v1/databases/{id}/wake: the documented, DB-level
 // escape hatch for a hibernated database. Connecting through the proxy wakes
 // a DB implicitly; this makes recovery explicit and discoverable instead of
 // requiring knowledge of the sandbox-internal wake route.
@@ -1002,7 +1002,7 @@ func (d *databasesAPI) connection(w http.ResponseWriter, r *http.Request) {
 func (d *databasesAPI) proxy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	// B5: the single most-hit auth trap — callers send their ACCOUNT API key
+	// The single most-hit auth trap — callers send their ACCOUNT API key
 	// (pds_…), but the broker only accepts the per-database broker_token
 	// (pds_pg_…). The broker's own reply is a bare "unauthorized"; catch the
 	// unambiguous wrong-credential-type case here with an actionable message.

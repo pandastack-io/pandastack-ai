@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// wake.go — TUSK T2.3: wake choreography. When a connection lands on a
+// wake.go — wake choreography. When a connection lands on a
 // hibernated database, HOLD the client, fire ONE wake per DB (single-flight),
 // and retry the tunnel with backoff — so the first connect "just works" in a
 // couple of seconds instead of failing with a cryptic error.

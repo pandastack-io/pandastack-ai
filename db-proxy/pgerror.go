@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// pgerror.go — TUSK T2.2: proper Postgres v3 ErrorResponse messages.
+// pgerror.go — proper Postgres v3 ErrorResponse messages.
 //
 // Before this, db-proxy either closed the socket silently (bad SNI) or sent a
 // bare 'M'-only error. psql then printed nothing useful ("server closed the

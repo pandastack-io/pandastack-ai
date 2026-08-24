@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Managed-database credential rotation (roadmap P2: password reset).
+// Managed-database credential rotation (password reset).
 //
 // Rotates BOTH secrets of a RUNNING database — the postgres password and the
 // query-broker bearer token — by replaying exactly what autostart.sh phase 2

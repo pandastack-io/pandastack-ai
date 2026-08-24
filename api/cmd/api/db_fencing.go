@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// db_fencing.go — TUSK T1: archive generations, GC leases, backup-health
+// db_fencing.go — archive generations, GC leases, backup-health
 // scrubbing, and circuit breakers for the managed-DB archive plane.
 //
 // The problem class (two real incidents: cross-agent sandbox murder 2026-07,

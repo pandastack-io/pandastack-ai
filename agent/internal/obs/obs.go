@@ -64,7 +64,7 @@ var (
 		Help:      "Total sandbox create attempts, partitioned by result and boot mode.",
 	}, []string{"result", "boot_mode"})
 
-	// SandboxCPUSeconds is the TIDAL T1.2 active-CPU counter: cumulative CPU
+	// SandboxCPUSeconds is the active-CPU counter: cumulative CPU
 	// seconds actually consumed by each sandbox's Firecracker process (from its
 	// cgroup's cpu.stat usage_usec). This is the utilization signal behind
 	// GET /sandboxes/{id}/util and the scale-out trigger.
@@ -74,7 +74,7 @@ var (
 		Help:      "Cumulative active CPU seconds consumed per sandbox (cgroup cpu.stat).",
 	}, []string{"sandbox"})
 
-	// SandboxResidentBytes is the TIDAL T2.1 working-set gauge: measured
+	// SandboxResidentBytes is the working-set gauge: measured
 	// resident memory per sandbox (Rss + hugetlb from smaps_rollup). The
 	// shadow-admission signal; becomes the admission input when T2.1 enforces.
 	SandboxResidentBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -92,7 +92,7 @@ var (
 
 	// HibernationTotal counts lifecycle transitions for persistent sandboxes.
 	// result=hibernated/woken/wake_failed/hibernate_failed.
-	// TIDAL T2.3: pressure-ladder actions + current host pressure level.
+	// Pressure-ladder actions + current host pressure level.
 	PressureActionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "pandastack_pressure_actions_total",
 		Help: "Pressure-ladder actions taken (squeeze, unsqueeze, freeze).",

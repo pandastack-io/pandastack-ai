@@ -119,7 +119,7 @@ type Manager struct {
 	drivers map[string]*firecracker.Driver
 	guests  map[string]*guest.Client
 
-	// cpuTiers is the TIDAL T1.1/T1.2 cgroup reconciler state (nil when the
+	// cpuTiers is the cgroup reconciler state (nil when the
 	// loop is disabled or cgroup delegation is unavailable). See cputiers.go.
 	cpuTiers *cpuTiers
 
@@ -199,21 +199,21 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 	failedRowGrace := envDurationSeconds("PANDASTACK_FAILED_JANITOR_GRACE_SECONDS", time.Hour)
 	lc := newLifecycleStore(defaultTTL)
 	m := &Manager{
-		cfg:           cfg,
-		store:         st,
-		netPool:       np,
-		keys:          ks,
-		bus:           bus,
-		log:           log,
-		drivers:       make(map[string]*firecracker.Driver),
-		guests:        make(map[string]*guest.Client),
-		lastActivity:  make(map[string]time.Time),
-		activeTunnels: make(map[string]int),
-		hibFails:      make(map[string]int),
+		cfg:            cfg,
+		store:          st,
+		netPool:        np,
+		keys:           ks,
+		bus:            bus,
+		log:            log,
+		drivers:        make(map[string]*firecracker.Driver),
+		guests:         make(map[string]*guest.Client),
+		lastActivity:   make(map[string]time.Time),
+		activeTunnels:  make(map[string]int),
+		hibFails:       make(map[string]int),
 		pendingPGCreds: make(map[string]*DBCreds),
-		lifecycle:     lc,
-		snapStore:     snapstore.NewFromEnv(),
-		seedStore:     seed.NewFromEnv(),
+		lifecycle:      lc,
+		snapStore:      snapstore.NewFromEnv(),
+		seedStore:      seed.NewFromEnv(),
 	}
 	// Resolve this agent's identity ONCE (PANDASTACK_AGENT_ID, hostname
 	// fallback — same convention as the lease sink and CH sink) and stamp the
@@ -291,7 +291,7 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 	// Background pre-seed: make every public template fast "from second zero"
 	// (seed-first, cold-bake only what the fleet hasn't published yet).
 	go m.preseedPublicTemplates()
-	// CPU tiers (TIDAL T1.1/T1.2): weight each VM's cgroup by its vCPU
+	// CPU tiers: weight each VM's cgroup by its vCPU
 	// entitlement so shares hold under contention while any VM can burst to all
 	// physical cores on an idle host; scrape per-VM cpu.stat into the :9100
 	// metrics endpoint. Best-effort; kill switch PANDASTACK_CPU_TIERS=0.
@@ -394,7 +394,7 @@ func (m *Manager) RegistrySnapshot() (cpuUsed, memUsedMB, sandboxes int) {
 // exists to prevent; 1 GiB would 4×-undercount the dominant 4 GiB app/base mix).
 // Pure (no I/O) so the scheduling-critical arithmetic + fallbacks are testable.
 const (
-	fallbackSandboxCPU   = 8    // vCPU — every first-party template bakes 8 burstable vCPUs (TIDAL T1.3)
+	fallbackSandboxCPU   = 8    // vCPU — every first-party template bakes 8 burstable vCPUs
 	fallbackSandboxMemMB = 4096 // MiB — dominant baked app/base size (4 GiB)
 )
 
@@ -1713,7 +1713,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 				}
 			}
 			if guestIP != "" {
-				newSb, err := m.restoreFromSnapshotNATID(ctx, sb, req, meta, snapDir, vmDir, rootfsPath, alloc, tapHostIP, guestIP, mac, bootStart, mark, phases, "" /*dataDrivePath: rootfs-only restore*/)
+				newSb, err := m.restoreFromSnapshotNATID(ctx, sb, req, meta, snapDir, vmDir, rootfsPath, alloc, tapHostIP, guestIP, mac, bootStart, mark, phases)
 				if err != nil {
 					m.log.Warn("NATID snapshot restore failed", "snapshot", req.FromSnapshot, "err", err)
 					// ReleaseNATID (not Release): restoreFromSnapshotNATID
@@ -3463,11 +3463,6 @@ func (m *Manager) restoreFromSnapshotNATID(
 	bootStart time.Time,
 	mark func(string, time.Time),
 	phases map[string]int64,
-	// dataDrivePath, when non-empty, is patched onto the snapshot's baked "vol1"
-	// data drive before Resume — used by the warm memory-fork branch (TUSK T4.2)
-	// to attach the child's reflinked durable volume. "" for every other restore
-	// (rootfs-only), which leaves the baked topology untouched.
-	dataDrivePath string,
 ) (*Sandbox, error) {
 	id := sb.ID
 
@@ -3544,16 +3539,6 @@ func (m *Manager) restoreFromSnapshotNATID(
 		_ = m.netPool.ReleaseNATID(ctx, id)
 		return nil, fmt.Errorf("patch rootfs: %w", err)
 	}
-	// Warm memory-fork (T4.2): attach the child's reflinked durable volume onto
-	// the baked "vol1" data drive before Resume, so the restored (hot) postgres
-	// resumes against the exact on-disk bytes captured in the same pause window.
-	if dataDrivePath != "" {
-		if err := drv.PatchDrive(ctx, pgDataDriveID, dataDrivePath); err != nil {
-			_ = drv.Stop(ctx)
-			_ = m.netPool.ReleaseNATID(ctx, id)
-			return nil, fmt.Errorf("patch data drive: %w", err)
-		}
-	}
 	mark("drive_patch_ms", tPatch)
 
 	// Start the SSH probe concurrently with Resume so the first SYN is
@@ -3626,7 +3611,6 @@ func (m *Manager) restoreFromSnapshotNATID(
 
 	return sb, nil
 }
-
 
 // WorkspaceForRequest resolves the tenant a request acts on: the header value
 // when the caller supplied one, otherwise the workspace recorded on the

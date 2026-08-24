@@ -77,7 +77,7 @@ const (
 	// walSegmentBytes: the padded size served for partial segments. Matches
 	// Postgres' default wal_segment_size; our templates never change it.
 	walSegmentBytes = 16 << 20
-	// walPartialDefaultSecs: cadence of the partial-WAL uploader (TUSK T1.2).
+	// walPartialDefaultSecs: cadence of the partial-WAL uploader.
 	// Bounds object-storage RPO to roughly this value plus one upload sweep —
 	// versus a full 16 MiB segment (or archive_timeout) before it. Override
 	// with PANDASTACK_WAL_PARTIAL_SECS; "0" disables.
@@ -85,7 +85,7 @@ const (
 )
 
 // walBaseRatio returns the WAL-since-base ÷ base-size ratio that triggers an
-// early base backup (TUSK T1.3). Default 1.0; tune with PANDASTACK_BASE_RATIO.
+// early base backup. Default 1.0; tune with PANDASTACK_BASE_RATIO.
 func walBaseRatio() float64 {
 	if v := strings.TrimSpace(os.Getenv("PANDASTACK_BASE_RATIO")); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
@@ -130,7 +130,7 @@ type WALRelay struct {
 	recMu           sync.Mutex
 	recoverySources map[string]time.Time // id -> grant expiry
 
-	// TUSK T1 state (all under archMu):
+	// Archive-fencing state (all under archMu):
 	//   genCache    — cached db.archive_gen from the sandbox row (5-min TTL);
 	//                 stamps base backups + partial-WAL uploads so a stale
 	//                 host's writes are distinguishable from the current
@@ -161,7 +161,7 @@ type relayGenEntry struct {
 // uploads for id: the sandbox row's db.archive_gen metadata, defaulting to
 // "1" for rows that predate fencing (the control plane's seed value).
 //
-// PINNED-AT-EPOCH (TUSK T1, adversarial-review C1/M1 fix). The value is read
+// PINNED-AT-EPOCH. The value is read
 // ONCE, on first sight of id by this relay, and then held for the life of this
 // serving epoch — it is NOT re-read on a timer. This is the property that makes
 // the fence actually fence: a split-brain zombie old host that keeps running
@@ -457,7 +457,7 @@ func (w *WALRelay) serveWAL() http.HandlerFunc {
 		if err != nil {
 			s := string(out)
 			if strings.Contains(s, "No URLs matched") || strings.Contains(s, "NotFoundException") || strings.Contains(s, "matched no objects") {
-				// Full segment not archived. TUSK T1.2: before declaring end
+				// Full segment not archived. Before declaring end
 				// of recovery, look for a PARTIAL upload of this segment —
 				// the flushed prefix of the WAL the primary was writing when
 				// it died. Serving it (zero-padded to a full segment) lets
@@ -660,7 +660,7 @@ func (w *WALRelay) runUploader(ctx context.Context) {
 				size = st.Size()
 			}
 			obj := "gs://" + w.bucket + "/db/" + filepath.ToSlash(rel)
-			// TUSK T1.1: CREATE-ONLY upload (x-goog-if-generation-match:0).
+			// CREATE-ONLY upload (x-goog-if-generation-match:0).
 			// Archive objects are immutable by name; first-writer-wins means a
 			// stale host re-archiving the same segment after a failover CANNOT
 			// clobber what the new owner already uploaded. A 412 Precondition
@@ -682,7 +682,7 @@ func (w *WALRelay) runUploader(ctx context.Context) {
 				continue
 			}
 			_ = os.Remove(path)
-			// TUSK T1.3: feed the ratio trigger. Full WAL segments count toward
+			// Feed the ratio trigger. Full WAL segments count toward
 			// walBytes; base uploads record the new base size. Partials are
 			// duplicative prefixes and do not count.
 			parts := strings.SplitN(filepath.ToSlash(rel), "/", 3)
@@ -733,7 +733,7 @@ func (w *WALRelay) runBaseBackups(ctx context.Context) {
 			if _, err := os.Stat(w.m.dbVolumePath(id)); err != nil {
 				continue // not a managed database
 			}
-			// TUSK T1.6: per-DB circuit breaker. 5 consecutive failures park
+			// Per-DB circuit breaker. 5 consecutive failures park
 			// this DB's backups for 24 h — a wedged guest must not be
 			// pg_basebackup-hammered every 5 minutes forever.
 			w.archMu.Lock()
@@ -742,7 +742,7 @@ func (w *WALRelay) runBaseBackups(ctx context.Context) {
 			if !parkedTo.IsZero() && time.Now().Before(parkedTo) {
 				continue
 			}
-			// TUSK T1.3: ratio trigger. Due when the daily timer says so OR
+			// Ratio trigger. Due when the daily timer says so OR
 			// when the WAL uploaded since the last base exceeds ratio × the
 			// base's own size — bounding how much WAL any restore must replay
 			// regardless of write rate. baseSize==0 (agent restart, no upload
@@ -813,7 +813,7 @@ func (w *WALRelay) runBaseBackups(ctx context.Context) {
 	}
 }
 
-// runPartialWAL (TUSK T1.2) periodically uploads the FLUSHED PREFIX of each
+// runPartialWAL periodically uploads the FLUSHED PREFIX of each
 // database's current WAL segment, so the object-storage RPO is bounded by
 // this cadence instead of a full 16 MiB segment / archive_timeout. Mirrors
 // Neon's wal_backup_partial (whose own timeout is 15 MINUTES — this beats
@@ -962,7 +962,7 @@ func (w *WALRelay) baseBackupOne(ctx context.Context, id string) error {
 	if err != nil || alloc.HostIP == "" {
 		return fmt.Errorf("network allocation lookup: %w", err)
 	}
-	// TUSK T1.1: generation-stamped name. Restore prefers the highest
+	// Generation-stamped name. Restore prefers the highest
 	// generation, so a stale host's late uploads (lower gen) can never win.
 	name := "base-" + time.Now().UTC().Format("20060102T150405Z") + "-g" + w.archiveGenFor(cctx, id) + ".tar.gz"
 	url := fmt.Sprintf("http://%s:%d/base/%s/%s", alloc.HostIP, w.port, id, name)

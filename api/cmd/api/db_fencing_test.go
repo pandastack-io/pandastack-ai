@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Pure-logic tests for TUSK T1: WAL continuity math, superseded-partial
+// Pure-logic tests for the fencing helpers: WAL continuity math, superseded-partial
 // selection, base-name generation parsing, and the loop circuit breaker.
 // The Postgres-backed pieces (generations, leases, health rows) are covered
 // by db_fencing_pg_test.go against the real dev database.

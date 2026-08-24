@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Tests for the TUSK T1 relay helpers: partial-segment name parsing +
+// Tests for the WAL relay helpers: partial-segment name parsing +
 // selection, and generation-stamped base-name parsing (agentBaseNameRe).
 package sandbox
 

@@ -48,7 +48,7 @@ const streamBoost = 5.0
 // further create returned "no available compute node".
 //
 // Memory remains the hard admission gate (RAM is never oversold at admission;
-// the working-set flip is TIDAL T2.1), the agent keeps its own 507 backstop,
+// the working-set flip is still pending), the agent keeps its own 507 backstop,
 // and the PSI pressure ladder protects the host. Set the env var to a finite
 // factor to re-enable CPU admission control.
 var cpuOvercommit, cpuAdmissionEnabled = cpuOvercommitFromEnv()
@@ -397,12 +397,12 @@ func (s *Scheduler) Pick(ctx context.Context, req Request) (*Agent, error) {
 		resCPU, resMem, resDisk := s.reservedLocked(a.ID)
 		freeCPU := a.Capacity.CPUTotal - a.Capacity.CPUUsed - resCPU
 		freeMem := a.Capacity.MemoryMB - a.Capacity.MemoryUsed - resMem
-		// CPU is burstable, not reserved (TIDAL): vCPUs schedule onto the host
+		// CPU is burstable, not reserved: vCPUs schedule onto the host
 		// at up to cpuOvercommit× physical cores — cgroup cpu.weight arbitrates
 		// under contention, so packing 8-vCPU guests onto an 8-core host is the
 		// intended model. Memory
 		// below stays a hard gate: RAM is never oversold at admission (the
-		// working-set admission flip is TIDAL T2.1).
+		// working-set admission flip is still pending).
 		if cpuAdmissionEnabled {
 			schedulableCPU := int(float64(a.Capacity.CPUTotal)*cpuOvercommit) - a.Capacity.CPUUsed - resCPU
 			if req.CPU > 0 && schedulableCPU < req.CPU {

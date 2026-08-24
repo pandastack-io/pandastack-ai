@@ -86,7 +86,7 @@ func (d *databasesAPI) failover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// GUARD 1 (B1): without force, failover is ONLY for databases whose row
+	// GUARD 1: without force, failover is ONLY for databases whose row
 	// says "failed". This gate deliberately depends on nothing that can be
 	// stale or error transiently (lease rows, heartbeat caches) — the July
 	// E2E proved a healthy running primary could be drained; fail CLOSED on
@@ -124,7 +124,7 @@ func (d *databasesAPI) failover(w http.ResponseWriter, r *http.Request) {
 		d.log.Warn("databases: failover lease lookup failed (continuing)", "id", id, "err", err)
 	}
 
-	// GUARD 2 (B2): a valid restore target must exist BEFORE anything touches
+	// GUARD 2: a valid restore target must exist BEFORE anything touches
 	// the primary. No target → clean no-op, primary untouched.
 	target := d.pickFailoverTarget(r.Context(), current)
 	if target == nil {
@@ -133,7 +133,7 @@ func (d *databasesAPI) failover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// GUARD 3 (B2): a restorable archive must exist. Draining the primary
+	// GUARD 3: a restorable archive must exist. Draining the primary
 	// when the restore cannot possibly succeed would destroy the only
 	// running copy for nothing.
 	if ok, reason := dbArchiveExists(r.Context(), id); !ok {
@@ -179,7 +179,7 @@ func (d *databasesAPI) runFailover(workspace, id, template string, meta map[stri
 		delete(d.failoverInFlight, id)
 		d.failoverMu.Unlock()
 	}()
-	// TUSK T1.1 + T1.4: this is an ownership change — bump the archive
+	// This is an ownership change — bump the archive
 	// generation (fences the old host's future uploads behind a lower gen) and
 	// stamp the new value into the metadata the restored row will carry, so
 	// the new owner's WAL relay stamps its base backups with it. Also lease

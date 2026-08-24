@@ -291,7 +291,7 @@ func stripPandaStackRecoveryConf(conf []byte) []byte {
 // the head of resolveBaseCandidates. Kept as the read-only preflight the
 // destructive in-place path runs to VALIDATE the archive before tearing
 // anything down (it only needs to know a usable base EXISTS). The actual build uses
-// resolveBaseCandidates so it can fall past a corrupt/truncated head base (H2).
+// resolveBaseCandidates so it can fall past a corrupt/truncated head base.
 func (m *Manager) resolveBaseForTarget(ctx context.Context, srcID string) (string, error) {
 	cands, err := m.resolveBaseCandidates(ctx, srcID)
 	if err != nil {
@@ -314,7 +314,7 @@ func (m *Manager) resolveBaseCandidates(ctx context.Context, srcID string) ([]st
 	}
 	prefix := "gs://" + bucket + "/db/" + srcID
 
-	// Base backups: names embed a UTC timestamp and (since TUSK T1.1) an
+	// Base backups: names embed a UTC timestamp and an
 	// archive generation: base-<ts>[-g<gen>].tar.gz. Selection is by
 	// (generation DESC, timestamp DESC): the highest generation is the chain
 	// written by the CURRENT owner epoch — a stale host's base with a newer
@@ -374,7 +374,7 @@ func (m *Manager) buildDBVolumeFromSource(ctx context.Context, srcID, vol, clone
 	// on the destructive in-place path run the single-best preflight up front to
 	// fail clean before touching the live volume, so an unsatisfiable target
 	// never reaches here after a teardown. Here we keep the FULL candidate list
-	// so a corrupt/truncated head base can be skipped for the next good one (H2)
+	// so a corrupt/truncated head base can be skipped for the next good one
 	// — otherwise one bad object (e.g. a base whose pg_basebackup died mid-stream
 	// and shipped a truncated tarball to an immutable, uniquely-named object)
 	// would permanently shadow every good older base and block recovery.

@@ -67,7 +67,7 @@ type Spec struct {
 	CPUs        int
 	MemoryMB    int
 	// Template is the template name this VM boots from (cold boot only; used
-	// by the per-template no-hugepage gate — TIDAL squeezable class).
+	// by the per-template no-hugepage gate — the cgroup-squeezable class).
 	Template    string
 	Network     network.Allocation
 	Vsock       VsockSpec // optional: if UDSPath set, vsock device attached on cold boot
@@ -582,79 +582,6 @@ func (d *Driver) PauseForFork(ctx context.Context, dir, rootfsDst, rootfsSrc str
 	}
 	return nil
 }
-
-// PauseForForkWithVolume is PauseForFork plus an EXTRA reflink of a durable
-// data volume, all inside the SAME pause window (TUSK T4.2 warm memory-fork).
-//
-// Why the extra copy must be in the same pause as the memory snapshot: a warm
-// branch restores the child from this vm.mem — Postgres resumes as a LIVE
-// continuation with its shared_buffers already hot. Those in-memory buffers
-// (and the WAL/pg_control state) must correspond to the EXACT on-disk bytes the
-// child will attach as its data volume. If the volume were reflinked at a
-// different instant than the memory dump, the restored postgres would see a
-// disk that disagrees with its own buffers/pg_control → corruption on resume.
-// Capturing rootfs, the data volume, and memory while the guest is frozen (no
-// in-flight virtio writes) makes all three a single point-in-time image.
-//
-// Order inside the pause: reflink rootfs → reflink data volume → Full memory
-// snapshot. Resume is unconditional (defer), same as PauseForFork.
-func (d *Driver) PauseForForkWithVolume(ctx context.Context, dir, rootfsDst, rootfsSrc, volDst, volSrc string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	mem := filepath.Join(dir, "vm.mem")
-	state := filepath.Join(dir, "vm.state")
-
-	if d.proc != nil {
-		hcLong0 := d.hcLongClient()
-		if err := patchJSON(hcLong0, "/vm", map[string]string{"state": "Paused"}); err != nil {
-			return fmt.Errorf("pause: %w", err)
-		}
-		defer func() { _ = patchJSON(hcLong0, "/vm", map[string]string{"state": "Resumed"}) }()
-		if err := copyFileLocal(rootfsSrc, rootfsDst); err != nil {
-			return fmt.Errorf("copy rootfs: %w", err)
-		}
-		if err := copyFileLocal(volSrc, volDst); err != nil {
-			return fmt.Errorf("copy data volume: %w", err)
-		}
-		hcLong := d.hcLongClient()
-		if err := putJSON(hcLong, "/snapshot/create", map[string]any{
-			"snapshot_type": "Full",
-			"snapshot_path": state,
-			"mem_file_path": mem,
-		}); err != nil {
-			return fmt.Errorf("create snapshot: %w", err)
-		}
-		if d.hugepages {
-			d.markSnapshotHugepages(dir)
-		}
-		return nil
-	}
-
-	if d.machine == nil {
-		return fmt.Errorf("machine not started")
-	}
-	if err := d.machine.PauseVM(ctx); err != nil {
-		return fmt.Errorf("pause: %w", err)
-	}
-	defer func() { _ = d.machine.ResumeVM(ctx) }()
-	if err := copyFileLocal(rootfsSrc, rootfsDst); err != nil {
-		return fmt.Errorf("copy rootfs: %w", err)
-	}
-	if err := copyFileLocal(volSrc, volDst); err != nil {
-		return fmt.Errorf("copy data volume: %w", err)
-	}
-	if err := d.machine.CreateSnapshot(ctx, mem, state); err != nil {
-		return fmt.Errorf("create snapshot: %w", err)
-	}
-	if d.hugepages {
-		d.markSnapshotHugepages(dir)
-	}
-	return nil
-}
-
-// PauseAndSnapshot pauses the VM, snapshots into dir, and leaves it paused.
-// Caller is expected to call Stop() next (used for hibernation).
 func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

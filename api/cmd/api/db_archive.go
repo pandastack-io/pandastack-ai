@@ -86,7 +86,7 @@ type walObj struct {
 }
 
 // baseNameRe matches both name generations: base-<stamp>.tar.gz (pre-fencing)
-// and base-<stamp>-g<gen>.tar.gz (TUSK T1.1 generation-stamped uploads).
+// and base-<stamp>-g<gen>.tar.gz (generation-stamped uploads).
 var baseNameRe = regexp.MustCompile(`base-(\d{8}T\d{6}Z)(?:-g(\d+))?\.tar\.gz$`)
 
 // parseBaseTimestamp extracts the time from a base backup object name/URL.
@@ -301,22 +301,21 @@ func gsutilRm(ctx context.Context, urls []string) error {
 
 // --- the per-archive engine (called from the janitor loop) ---
 func (d *databasesAPI) pruneArchiveToRetention(ctx context.Context, bucket, id string) {
-	// TUSK T1.4: an in-flight failover or restore holds a lease on this
+	// An in-flight failover or restore holds a lease on this
 	// archive chain — do not prune under it (a pruned anchor mid-replay
 	// truncates the recovery). The lease is minutes-long; next sweep prunes.
 	if d.archiveLeaseActive(ctx, id) {
-		d.log.Info("retention: archive leased (clone/restore in flight) — skipping prune", "id", id)
+		d.log.Info("retention: archive leased (restore in flight) — skipping prune", "id", id)
 		return
 	}
-	// Belt-and-suspenders for the clone case (H3): the clone lease is a fixed
-	// 45-min grant with no renewal, so a large-DB / old-target replay that runs
-	// longer than the lease would otherwise become prunable while the clone is
-	// still reading this SOURCE chain. cloneInFlightFrom tracks the clone's
-	// actual provisioning window (creating, or running within the stage timeout)
-	// and fails CLOSED, so it covers the tail the lease can't. Purge already
-	// consults it; prune must too.
-	if inflight, cloneID := d.cloneInFlightFrom(ctx, id); inflight {
-		d.log.Info("retention: clone in flight from this source — skipping prune", "id", id, "clone", cloneID)
+	// Belt-and-suspenders: a lease is a fixed grant with no renewal, so a
+	// large-database or long replay that outruns its lease would otherwise
+	// become prunable while it is still reading this chain. recoveringFrom
+	// tracks the reader's actual provisioning window (creating, or running
+	// within the stage timeout) and fails CLOSED, so it covers the tail the
+	// lease cannot. Purge already consults it; prune must too.
+	if inflight, readerID := d.recoveringFrom(ctx, id); inflight {
+		d.log.Info("retention: a database is recovering from this archive — skipping prune", "id", id, "reader", readerID)
 		return
 	}
 	window := time.Duration(envDaysOr("PANDASTACK_BACKUP_RETENTION_DAYS", defaultRetentionDays)) * 24 * time.Hour
@@ -346,7 +345,7 @@ func (d *databasesAPI) pruneArchiveToRetention(ctx context.Context, bucket, id s
 		urls = append(urls, w.URL)
 		walDelSet[w.URL] = true
 	}
-	// TUSK T1.2 housekeeping: superseded partial-WAL uploads (full segment
+	// Housekeeping: superseded partial-WAL uploads (full segment
 	// archived, or a bigger/newer partial exists). The agent never deletes
 	// from GCS — reclaim is the janitor's job, matching the fencing rule that
 	// only generation-validated control-plane paths destroy.
@@ -364,7 +363,7 @@ func (d *databasesAPI) pruneArchiveToRetention(ctx context.Context, bucket, id s
 		}
 	}
 
-	// TUSK T1.5: the listings this pass already paid for double as a scrub —
+	// The listings this pass already paid for double as a scrub —
 	// WAL-continuity + base sanity — persisted for the dashboard. Run it on
 	// the KEPT view (post-prune plan) so a planned deletion isn't a "gap".
 	scrub := func() {
@@ -411,18 +410,18 @@ func (d *databasesAPI) purgeOrphanArchive(ctx context.Context, bucket, id string
 			"gsutil -m rm -r gs://"+bucket+"/db/"+id, "id", id)
 		return
 	}
-	if inflight, cloneID := d.cloneInFlightFrom(ctx, id); inflight {
-		d.log.Info("archive janitor: skip orphan purge — a clone is still provisioning from it",
-			"id", id, "clone", cloneID)
+	if inflight, readerID := d.recoveringFrom(ctx, id); inflight {
+		d.log.Info("archive janitor: skip orphan purge — a database is still recovering from it",
+			"id", id, "reader", readerID)
 		return
 	}
-	// TUSK T1.4: any unexpired archive lease means someone is reading this
+	// Any unexpired archive lease means someone is reading this
 	// chain right now — never purge under it.
 	if d.archiveLeaseActive(ctx, id) {
 		d.log.Info("archive janitor: skip orphan purge — archive leased", "id", id)
 		return
 	}
-	// TUSK T1.1: snapshot the generation before the slow guards below.
+	// Snapshot the archive generation before the slow guards below.
 	genBefore, _ := d.currentArchiveGeneration(ctx, id)
 	if newest := d.newestArchiveMtime(ctx, bucket, id); newest.IsZero() || time.Since(newest) < orphanPurgeGrace {
 		// Too fresh (or unreadable) — a recently-active archive with no row is
@@ -441,7 +440,7 @@ func (d *databasesAPI) purgeOrphanArchive(ctx context.Context, bucket, id string
 		d.log.Info("archive janitor: skip orphan purge — sandbox row reappeared mid-check", "id", id)
 		return
 	}
-	// TUSK T1.1 generation fence: if the archive generation moved while we ran
+	// Generation fence: if the archive generation moved while we ran
 	// the guards above, a failover/restore claimed this database mid-decision —
 	// abort. A stale purge decision must never outrun a live ownership change.
 	if genAfter, ok := d.currentArchiveGeneration(ctx, id); ok && genAfter != genBefore {

@@ -214,7 +214,7 @@ func (c *catalog) agentEndpoint(ctx context.Context, sandboxID string) (string, 
 }
 
 // dbStatus reads the sandbox's status + template so the proxy can distinguish
-// "unknown id" from "asleep, needs waking" from "failed" (TUSK T2.3). ok=false
+// "unknown id" from "asleep, needs waking" from "failed". ok=false
 // when the row doesn't exist. A hibernated DB keeps its lease renewed, so
 // agentEndpoint usually still resolves for it; this is the authoritative
 // state signal.
@@ -418,7 +418,7 @@ func (p *proxy) handleConn(rawConn net.Conn) {
 		return
 	}
 
-	// TUSK T2.3: if the row says hibernated, fire an explicit wake (single-
+	// Wake-on-connect: if the row says hibernated, fire an explicit wake (single-
 	// flight per DB) before dialing, so the retry loop below lands on a waking
 	// VM rather than racing the agent's own auto-wake.
 	if status, _, exists := p.catalog.dbStatus(context.Background(), sandboxID); exists &&

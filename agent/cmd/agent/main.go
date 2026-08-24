@@ -338,7 +338,7 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 		}
 	}
 
-	// DB health reconcile loop (P1): probes running managed databases with
+	// DB health reconcile loop: probes running managed databases with
 	// pg_isready, restarts postgres in place on failure, and marks the row
 	// failed when restarts don't stick — the signal the failover preflight
 	// accepts. Deliberately NOT gated on WAL archiving: a crashed postgres
