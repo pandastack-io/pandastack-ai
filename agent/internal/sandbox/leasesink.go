@@ -94,7 +94,7 @@ func (m *Manager) releaseLease(ctx context.Context, sandboxID string) {
 // liveSandboxIDs returns the set of sandbox IDs that the local store currently
 // considers non-terminal. Used to feed SweepAgentZombies on startup.
 func (m *Manager) liveSandboxIDs(ctx context.Context) ([]string, error) {
-	all, err := m.store.ListSandboxes(ctx)
+	all, err := m.store.ListSandboxesForAgent(ctx, m.agentID)
 	if err != nil {
 		return nil, err
 	}

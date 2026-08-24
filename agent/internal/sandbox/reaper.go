@@ -63,7 +63,9 @@ func (r *reaper) scan(ctx context.Context) {
 			"ttl_ms", st.ttl.Milliseconds(),
 			"reason", "idle_ttl",
 		)
-		if err := r.mgr.Delete(ctx, id); err != nil {
+		// DeleteReap (not Delete): an idle auto-reap must NOT cascade-delete the
+		// sandbox's snapshots — they're durable and outlive the sandbox.
+		if err := r.mgr.DeleteReap(ctx, id); err != nil {
 			r.log.Warn("sandbox reaper delete failed", "id", id, "err", err)
 		}
 	}

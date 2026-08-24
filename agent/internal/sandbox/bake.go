@@ -79,10 +79,14 @@ func BakeStartupFromEnv(mgr *Manager, log *slog.Logger) {
 			// Init dm-snapshot base loop for the newly baked template so the
 			// next sandbox create uses Option B (CoW) instead of cloneFile.
 			if mgr.dmsnap.Enabled() {
+				// Route through EnsureBase: a fresh bake has a real local
+				// clone.ext4 (no sidecar) so it takes the local-loop path here,
+				// but a thin streaming install would correctly stream instead.
+				sd := templateSnapDir(mgr.cfg.DataDir, tpl)
 				rootfsPath := dmsnapBaseRootfs(mgr.cfg.DataDir, tpl)
-				if rootfsPath != "" {
-					if err := mgr.dmsnap.InitBase(tpl, rootfsPath); err != nil {
-						log.Warn("bake-startup: dmsnap InitBase failed (non-fatal)",
+				if rootfsPath != "" || diskStreamEnabled() {
+					if err := mgr.dmsnap.EnsureBase(tpl, sd, rootfsPath, readSeedGen(sd)); err != nil {
+						log.Warn("bake-startup: dmsnap EnsureBase failed (non-fatal)",
 							"template", tpl, "err", err)
 					}
 				}

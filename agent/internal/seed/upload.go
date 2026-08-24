@@ -58,6 +58,13 @@ func (s *Store) Upload(ctx context.Context, p UploadParams) error {
 	if err != nil {
 		return fmt.Errorf("seed upload: missing %s: %w", memObjectName, err)
 	}
+	// clone.ext4 likewise leaves the tarball (schema v4) and is published as a
+	// standalone uncompressed object so a disk-streaming agent can range-GET it.
+	clonePath := filepath.Join(p.SnapDir, cloneObjectName)
+	cloneInfo, err := os.Stat(clonePath)
+	if err != nil {
+		return fmt.Errorf("seed upload: missing %s: %w", cloneObjectName, err)
+	}
 
 	rootfsGCS := fmt.Sprintf("gs://%s/templates/%s/rootfs.ext4", s.Bucket, p.Template)
 	rootfsGen := objectGeneration(ctx, rootfsGCS)
@@ -98,6 +105,7 @@ func (s *Store) Upload(ctx context.Context, p UploadParams) error {
 	// generation publishes. The restore side range-GETs it directly or
 	// downloads it whole, depending on whether the agent streams.
 	memObject := fmt.Sprintf("seeds/%s/%s/%s", p.Template, gen, memObjectName)
+	cloneObject := fmt.Sprintf("seeds/%s/%s/%s", p.Template, gen, cloneObjectName)
 
 	man := Manifest{
 		Schema:           SchemaVersion,
@@ -111,6 +119,8 @@ func (s *Store) Upload(ctx context.Context, p UploadParams) error {
 		DataPlaceholderGB: p.DataPlaceholderGB,
 		MemObject:         memObject,
 		MemBytes:          memInfo.Size(),
+		CloneObject:       cloneObject,
+		CloneBytes:        cloneInfo.Size(),
 		SSHKeyFP:          p.SSHKeyFP,
 		Flavor:           p.Flavor,
 		RootfsGeneration: rootfsGen,
@@ -134,6 +144,12 @@ func (s *Store) Upload(ctx context.Context, p UploadParams) error {
 	// HTTP Range GETs against it. gcloud preserves sparseness on upload.
 	if err := run(ctx, "gcloud", "storage", "cp", memPath, genPrefix+"/"+memObjectName); err != nil {
 		return fmt.Errorf("seed upload: cp vm.mem: %w", err)
+	}
+	// Standalone, uncompressed clone.ext4 (schema v4) for the disk-streaming
+	// range-GET path. gcloud preserves sparseness on upload, so the multi-GB
+	// apparent / sub-GB real rootfs uploads at its real size.
+	if err := run(ctx, "gcloud", "storage", "cp", clonePath, genPrefix+"/"+cloneObjectName); err != nil {
+		return fmt.Errorf("seed upload: cp clone.ext4: %w", err)
 	}
 	if err := run(ctx, "gcloud", "storage", "cp", manPath, genPrefix+"/manifest.json"); err != nil {
 		return fmt.Errorf("seed upload: cp manifest: %w", err)

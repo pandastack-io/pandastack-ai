@@ -4,6 +4,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -30,15 +31,25 @@ func (s *Store) InsertBootEvent(ctx context.Context, e BootEvent) error {
 	return err
 }
 
-func (s *Store) ListBootEvents(ctx context.Context, workspace string, limit int) ([]BootEvent, error) {
+// ListBootEvents returns recent boot events, newest first. since > 0 filters
+// to events at/after that unix-seconds timestamp (month-scoped dashboards).
+func (s *Store) ListBootEvents(ctx context.Context, workspace string, limit int, since int64) ([]BootEvent, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	q := `SELECT id, sandbox_id, COALESCE(workspace,''), template, boot_mode, boot_ms, ts FROM boot_events`
+	var conds []string
 	var args []any
 	if workspace != "" && workspace != "admin" && workspace != "default" {
-		q += ` WHERE workspace = ?`
+		conds = append(conds, `workspace = ?`)
 		args = append(args, workspace)
+	}
+	if since > 0 {
+		conds = append(conds, `ts >= ?`)
+		args = append(args, since)
+	}
+	if len(conds) > 0 {
+		q += ` WHERE ` + strings.Join(conds, ` AND `)
 	}
 	q += ` ORDER BY ts DESC, id DESC LIMIT ?`
 	args = append(args, limit)

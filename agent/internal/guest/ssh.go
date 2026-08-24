@@ -214,7 +214,20 @@ func (c *Client) readFileSSH(ctx context.Context, p string) ([]byte, error) {
 func (c *Client) writeFileSSH(ctx context.Context, p string, data []byte) error {
 	conn, err := c.dial(ctx)
 	if err != nil {
-		return err
+		// The fs write is a SEPARATE request from sandbox-create (which already
+		// blocked on WaitReady). In the gap the guest's :22 can briefly be
+		// unreachable — a transient tap/network hiccup or a just-restored
+		// snapshot whose conn dropped — and a single dial with a 3s timeout has
+		// no retry, so one `i/o timeout` fails the whole build. Re-establish
+		// readiness with a bounded backoff (WaitReady) and retry once, so a
+		// transient blip self-heals instead of failing the deploy.
+		if wErr := c.WaitReady(ctx, 10*time.Second); wErr != nil {
+			return err // return the original dial error; readiness never recovered
+		}
+		conn, err = c.dial(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	sess, err := conn.NewSession()
 	if err != nil {

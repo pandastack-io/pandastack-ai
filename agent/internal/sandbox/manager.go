@@ -23,9 +23,11 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/pandastack/agent/internal/config"
+	"github.com/pandastack/agent/internal/diskstream"
 	"github.com/pandastack/agent/internal/events"
 	"github.com/pandastack/agent/internal/firecracker"
 	"github.com/pandastack/agent/internal/guest"
+	"github.com/pandastack/agent/internal/netns"
 	"github.com/pandastack/agent/internal/network"
 	"github.com/pandastack/agent/internal/obs"
 	"github.com/pandastack/agent/internal/seed"
@@ -45,10 +47,26 @@ const (
 	StatusHibernated Status = "hibernated"
 )
 
-// pgManagedTemplate is the template name for managed PostgreSQL sandboxes.
-// These use phased boot: Phase 1 bootstraps PG (snapshotted), Phase 2
-// injects per-sandbox credentials (delivered by the agent on every start).
+// pgManagedTemplate is the default template name for managed PostgreSQL
+// sandboxes. These use phased boot: Phase 1 bootstraps PG (snapshotted),
+// Phase 2 injects per-sandbox credentials (delivered by the agent on every
+// start).
 const pgManagedTemplate = "postgres-16"
+
+// pgManagedTemplates is the managed-database template allowlist. It is a
+// strict allowlist — NOT a name-prefix match — so a user-built template that
+// happens to be named "postgres-16-something" can never acquire managed-DB
+// semantics (phased boot, durable volume, WAL archiving, delete protection).
+var pgManagedTemplates = map[string]bool{
+	pgManagedTemplate: true,
+}
+
+// isPGManagedTemplate reports whether t is a managed-database template.
+func isPGManagedTemplate(t string) bool { return pgManagedTemplates[t] }
+
+// IsManagedDBTemplate is the exported form for other packages (e.g. the
+// pg-tunnel route).
+func IsManagedDBTemplate(t string) bool { return isPGManagedTemplate(t) }
 
 type Sandbox struct {
 	ID        string            `json:"id"`
@@ -101,6 +119,34 @@ type Manager struct {
 	drivers map[string]*firecracker.Driver
 	guests  map[string]*guest.Client
 
+	// cpuTiers is the TIDAL T1.1/T1.2 cgroup reconciler state (nil when the
+	// loop is disabled or cgroup delegation is unavailable). See cputiers.go.
+	cpuTiers *cpuTiers
+
+	// metricsPoll holds per-VM state (last cpu.stat usage_usec + wallclock)
+	// for the sandbox_metrics historical-chart sampler in ch_sink.go. Kept
+	// separate from cpuTiers's own lastUsec — the two loops need independent
+	// baselines because they run on different cadences. Initialized lazily
+	// by StartMetricsPoller on the first tick.
+	metricsPoll *metricsPollState
+
+	// pendingPGCreds carries credentials that an in-place database restore wants
+	// kickPGPhase2 to RE-INJECT (rather than rotate to fresh ones), so the
+	// connection string survives the restore unchanged. Set by RestoreDatabase
+	// just before Create; consumed once by kickPGPhase2.
+	pgCredsMu      sync.Mutex
+	pendingPGCreds map[string]*DBCreds
+
+	// lifecycleMu serializes Hibernate/Wake per sandbox id. Two concurrent
+	// wake-on-connect requests (db-proxy fires one per client), or a wake
+	// racing an in-flight idle-suspend hibernate, must never both restore /
+	// snapshot the same VM — that would mount one rootfs + durable volume
+	// under two firecracker processes (corruption). Each id gets its own
+	// mutex; Hibernate, Wake, and EnsureRunning all take it, so a connection
+	// arriving mid-hibernate waits for the snapshot to finish and then wakes
+	// cleanly rather than dialing a half-paused guest.
+	lifecycleMuMap sync.Map // id -> *sync.Mutex
+
 	actMu        sync.Mutex
 	lastActivity map[string]time.Time
 	// activeTunnels counts live pg-tunnel connections per sandbox. While
@@ -109,14 +155,34 @@ type Manager struct {
 	// it mid-session would surface as a random "connection reset" to the
 	// application. Guarded by actMu alongside lastActivity.
 	activeTunnels map[string]int
+	// hibFails counts consecutive idle-hibernate failures per sandbox. The idle
+	// sweeper runs every 30s; without a cap a sandbox whose hibernate keeps
+	// failing is re-selected every tick forever (the retry-storm that wedged
+	// prod). After idleHibernateFailCap consecutive failures the sweeper gives
+	// up, bumps lastActivity (so the idle countdown restarts and it stops being
+	// re-selected), and leaves the VM running — which is safe because Hibernate
+	// now resumes the VM on failure. Reset to 0 on a successful hibernate.
+	// Guarded by actMu alongside lastActivity.
+	hibFails map[string]int
+
+	// seedBakeMu guards seedBakeLocks, a per-seed-name mutex registry that
+	// serializes BakeAppSeed for the SAME seed name. Two concurrent bakes of one
+	// seed (a deploy retry, a second API replica, a manual double-POST) would
+	// otherwise race: the loser's error-path os.RemoveAll(seedDir) could delete
+	// the winner's half-written-but-good seed (the "seed silently vanishes, every
+	// wake cold-boots" incident class). With the lock the second caller waits,
+	// then hits the completed-seed idempotency guard and reuses it.
+	seedBakeMu    sync.Mutex
+	seedBakeLocks map[string]*sync.Mutex
 
 	kernelCache cachedKernel
 
 	prefetcher *templatePrefetcher
 	cpuPinner  *cpuPinner
 
-	lifecycle *lifecycleStore
-	reaper    *reaper
+	lifecycle     *lifecycleStore
+	reaper        *reaper
+	failedJanitor *failedRowJanitor
 
 	leases       LeaseSink
 	leaseAgentID string
@@ -137,6 +203,10 @@ type Manager struct {
 func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.KeyStore, bus *events.Bus, log *slog.Logger) *Manager {
 	defaultTTL := envDurationSeconds("PANDASTACK_DEFAULT_TTL_SECONDS", 5*time.Minute)
 	reaperInterval := envDurationSeconds("PANDASTACK_REAPER_INTERVAL_SECONDS", 30*time.Second)
+	// Failed-row janitor cadence: scan every 10m, reclaim failed rows older than
+	// 1h (the grace window the parent task specified). Both env-overridable.
+	failedRowJanitorInterval := envDurationSeconds("PANDASTACK_FAILED_JANITOR_INTERVAL_SECONDS", 10*time.Minute)
+	failedRowGrace := envDurationSeconds("PANDASTACK_FAILED_JANITOR_GRACE_SECONDS", time.Hour)
 	lc := newLifecycleStore(defaultTTL)
 	m := &Manager{
 		cfg:           cfg,
@@ -149,9 +219,25 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 		guests:        make(map[string]*guest.Client),
 		lastActivity:  make(map[string]time.Time),
 		activeTunnels: make(map[string]int),
+		hibFails:      make(map[string]int),
+		seedBakeLocks: make(map[string]*sync.Mutex),
+		pendingPGCreds: make(map[string]*DBCreds),
 		lifecycle:     lc,
 		snapStore:     snapstore.NewFromEnv(),
 		seedStore:     seed.NewFromEnv(),
+	}
+	// Resolve this agent's identity ONCE (PANDASTACK_AGENT_ID, hostname
+	// fallback — same convention as the lease sink and CH sink) and stamp the
+	// store with it so every InsertSandbox records row ownership. On the shared
+	// multi-node Postgres this is the boundary that stops one agent's
+	// Recover()/janitor from judging a peer's live sandboxes (the 2026-07-12
+	// managed-DB deletion incident).
+	m.agentID = strings.TrimSpace(os.Getenv("PANDASTACK_AGENT_ID"))
+	if m.agentID == "" {
+		m.agentID, _ = os.Hostname()
+	}
+	if st != nil {
+		st.SetAgentID(m.agentID)
 	}
 	m.prefetcher = newTemplatePrefetcher(cfg.DataDir, m.keys.Fingerprint(), log)
 	m.cpuPinner = newCPUPinner(log)
@@ -166,7 +252,12 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 			m.prefetcher.Start()
 		}()
 	}
-	m.startNATIDPrewarmer()
+	// NOTE: the NATID prewarmer is intentionally NOT started here. It commits
+	// "prebuilt:<idx>" slot sentinels, which a concurrent startup slot-Reconcile
+	// would wrongly reclaim (freeing a slot whose netns is mid-build) → a
+	// transient root-netns /30 collision. main.go starts it via
+	// StartNATIDPrewarmer() AFTER Recover()+Reconcile complete, so no sentinel
+	// can race the one-shot reconcile.
 	BakeStartupFromEnv(m, log)
 
 	// dm-snapshot CoW rootfs (Option B). Eliminates per-sandbox rootfs copy:
@@ -183,12 +274,17 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 			go func() {
 				tmpls, _ := listReadyTemplates(cfg.DataDir)
 				for _, t := range tmpls {
+					snapDir := templateSnapDir(cfg.DataDir, t)
 					rootfsPath := dmsnapBaseRootfs(cfg.DataDir, t)
-					if rootfsPath == "" {
+					// EnsureBase streams over NBD when a rootfs.gcs sidecar is
+					// present (thin schema-v4 seed) + PANDASTACK_STREAM_DISK=1,
+					// else falls back to the local loop. A streaming base needs
+					// no local rootfsPath; skip only when NEITHER is available.
+					if rootfsPath == "" && !diskStreamEnabled() {
 						continue
 					}
-					if err := m.dmsnap.InitBase(t, rootfsPath); err != nil {
-						log.Warn("dmsnap InitBase failed (non-fatal)", "template", t, "err", err)
+					if err := m.dmsnap.EnsureBase(t, snapDir, rootfsPath, readSeedGen(snapDir)); err != nil {
+						log.Warn("dmsnap EnsureBase failed (non-fatal)", "template", t, "err", err)
 					}
 				}
 			}()
@@ -197,17 +293,44 @@ func NewManager(cfg config.Config, st *store.Store, np *network.Pool, ks *guest.
 
 	m.reaper = newReaper(m, lc, reaperInterval, log)
 	m.reaper.Start(context.Background())
+	// Failed-row janitor: durable backstop that reclaims sandbox rows stuck in
+	// status=failed (no live FC proc) older than the grace period — running the
+	// idempotent teardown + freeing the slot + deleting the row. Catches the
+	// pre-fix fleet-wide backlog and any future failed row a crash strands.
+	m.failedJanitor = newFailedRowJanitor(m, failedRowJanitorInterval, failedRowGrace)
+	m.failedJanitor.Start(context.Background())
 	// Background pre-seed: make every public template fast "from second zero"
 	// (seed-first, cold-bake only what the fleet hasn't published yet).
 	go m.preseedPublicTemplates()
+	// CPU tiers (TIDAL T1.1/T1.2): weight each VM's cgroup by its vCPU
+	// entitlement so shares hold under contention while any VM can burst to all
+	// physical cores on an idle host; scrape per-VM cpu.stat into the :9100
+	// metrics endpoint. Best-effort; kill switch PANDASTACK_CPU_TIERS=0.
+	if cpuTiersEnabled() {
+		// Publish synchronously: the goroutine-creation edge makes the pointer
+		// safely visible to the tiers loop, the pressure ladder, and metrics.
+		m.cpuTiers = newCPUTiers("/sys/fs/cgroup")
+	}
+	go m.runCPUTiers()
+	go m.runPressureLadder()
 	return m
 }
 
 // dmsnapBaseRootfs returns the path to the read-only clone rootfs for a template.
 // This is the file we attach as the dm-snapshot base loop.
 // Returns "" if neither clone.ext4 nor the build-vm rootfs exists.
+//
+// Critically, it returns "" for a THIN streaming seed (one with a rootfs.gcs
+// sidecar): such a seed's local clone.ext4 is a ZERO sparse placeholder, and
+// attaching a loop over it would yield an all-zero rootfs. Returning "" steers
+// every caller to the NBD streaming origin (EnsureBase) and makes any path that
+// still calls InitBase("") a safe no-op rather than a silent corruption. This is
+// the defense-in-depth backstop behind the EnsureBase routing.
 func dmsnapBaseRootfs(dataDir, template string) string {
 	snapDir := templateSnapDir(dataDir, template)
+	if _, err := os.Stat(filepath.Join(snapDir, diskstream.DiskRefFile)); err == nil {
+		return "" // thin streaming seed: the real rootfs is served over NBD
+	}
 	clone := filepath.Join(snapDir, "clone.ext4")
 	if _, err := os.Stat(clone); err == nil {
 		return clone
@@ -219,28 +342,109 @@ func dmsnapBaseRootfs(dataDir, template string) string {
 	return ""
 }
 
+// readSeedGen returns the installed seed generation recorded in
+// <snapDir>/.seedgen, or "" if absent. Used to key streaming-base reuse so a
+// re-baked template (new generation) re-establishes its NBD origin.
+func readSeedGen(snapDir string) string {
+	b, err := os.ReadFile(filepath.Join(snapDir, ".seedgen"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // Bus exposes the event bus for API handlers.
 func (m *Manager) Bus() *events.Bus { return m.bus }
 
-// RegistrySnapshot returns aggregated process-level stats used by the agent's
-// registry heartbeat. Numbers are best-effort and only used by the api
-// scheduler to compare agents against each other, so absolute accuracy is not
-// required.
+// RegistrySnapshot returns aggregated used cpu/mem across the sandboxes
+// actually running on THIS host, for the agent's registry heartbeat (the
+// scheduler's free-capacity score + the admission view).
+//
+// It sums each running sandbox's REAL baked cpu/memory_mb — not a flat
+// estimate. The mix is heterogeneous (postgres 1GiB/2vCPU, base/app 2GiB/2vCPU,
+// browser 4GiB/4vCPU, plus custom templates), so a constant per-sandbox cost
+// (the old "1 vCPU + 512 MB") under-reported usage by 2-8× depending on the
+// mix and let the scheduler over-pack a node into OOM. The agent already forces
+// every sandbox to its template's baked size at create (ReadTemplateSize) and
+// persists cpu/memory_mb on the row, so summing the rows is the true figure.
+//
+// We count only sandboxes that have a live driver here (m.drivers) — the DB may
+// hold rows mid-create/delete or owned by other hosts. A row with a missing or
+// zero size falls back to the common baked app/base size (see
+// sumLiveSandboxUsage) so a sandbox is never counted as free OR under-counted.
 func (m *Manager) RegistrySnapshot() (cpuUsed, memUsedMB, sandboxes int) {
 	m.mu.RLock()
-	sandboxes = len(m.drivers)
+	live := make(map[string]struct{}, len(m.drivers))
+	for id := range m.drivers {
+		live[id] = struct{}{}
+	}
 	m.mu.RUnlock()
-	// Approximate: each sandbox costs 1 vCPU and 512 MB on average. Real
-	// values come from per-sandbox CPU/Mem fields when available; until we
-	// thread those through this struct is intentionally cheap.
-	cpuUsed = sandboxes
-	memUsedMB = sandboxes * 512
+	sandboxes = len(live)
+	if sandboxes == 0 {
+		return 0, 0, 0
+	}
+
+	// Pull real per-sandbox sizes from the store. Periodic call (5s capacity
+	// pump), so a short timeout is fine; on any error fall back to the common
+	// baked size for every live sandbox rather than report zero usage.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := m.store.ListSandboxesForAgent(ctx, m.agentID)
+	if err != nil {
+		return sandboxes * fallbackSandboxCPU, sandboxes * fallbackSandboxMemMB, sandboxes
+	}
+	cpuUsed, memUsedMB = sumLiveSandboxUsage(rows, live)
+	return
+}
+
+// sumLiveSandboxUsage sums real cpu + memory_mb across the store rows whose id
+// is in `live` (running on this host). A row with a missing/zero size — or a
+// live id with no matching row yet (race mid-create) — falls back to the common
+// baked app/base size so a running sandbox is never counted as free, and never
+// UNDER-counted (under-counting is the OOM-causing direction this whole function
+// exists to prevent; 1 GiB would 4×-undercount the dominant 4 GiB app/base mix).
+// Pure (no I/O) so the scheduling-critical arithmetic + fallbacks are testable.
+const (
+	fallbackSandboxCPU   = 8    // vCPU — every first-party template bakes 8 burstable vCPUs (TIDAL T1.3)
+	fallbackSandboxMemMB = 4096 // MiB — dominant baked app/base size (4 GiB)
+)
+
+func sumLiveSandboxUsage(rows []any, live map[string]struct{}) (cpuUsed, memUsedMB int) {
+	seen := make(map[string]struct{}, len(live))
+	for _, sbAny := range rows {
+		row, ok := sbAny.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := row["id"].(string)
+		if _, isLive := live[id]; !isLive {
+			continue
+		}
+		seen[id] = struct{}{}
+		cpu := asInt(row["cpu"])
+		mem := asInt(row["memory_mb"])
+		if cpu <= 0 {
+			cpu = fallbackSandboxCPU
+		}
+		if mem <= 0 {
+			mem = fallbackSandboxMemMB
+		}
+		cpuUsed += cpu
+		memUsedMB += mem
+	}
+	if missing := len(live) - len(seen); missing > 0 {
+		cpuUsed += missing * fallbackSandboxCPU
+		memUsedMB += missing * fallbackSandboxMemMB
+	}
 	return
 }
 
 func (m *Manager) Shutdown() {
 	if m.reaper != nil {
 		m.reaper.Stop()
+	}
+	if m.failedJanitor != nil {
+		m.failedJanitor.Stop()
 	}
 	if m.dmsnap != nil {
 		m.dmsnap.Shutdown()
@@ -282,9 +486,7 @@ func (m *Manager) UpdateLifecycle(id string, ttl *int, persistent *bool) error {
 	// Persist the merged lifecycle state so it survives an agent restart.
 	if m.store != nil {
 		st, _ := m.lifecycle.Get(id)
-		if err := m.store.SetSandboxLifecycle(context.Background(), id, st.persistent, int64(st.ttl/time.Second)); err != nil {
-			m.log.Warn("persist sandbox lifecycle failed (non-fatal)", "id", id, "err", err)
-		}
+		go m.persistLifecycleWithRetry(id, st.persistent, int64(st.ttl/time.Second))
 	}
 	return nil
 }
@@ -314,6 +516,29 @@ func (m *Manager) ensureLifecycleState(ctx context.Context, id string) error {
 // explicitly-persistent sandbox (e.g. an app) is not downgraded to the default
 // TTL, and always treats durable templates (managed databases) as persistent as
 // a belt-and-braces guard.
+// persistLifecycleWithRetry writes the lifecycle row-columns, retrying while
+// the async row INSERT lands. Gives up loudly after ~15s.
+func (m *Manager) persistLifecycleWithRetry(id string, persistent bool, ttlSeconds int64) {
+	for attempt := 1; attempt <= 5; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		rows, err := m.store.SetSandboxLifecycle(ctx, id, persistent, ttlSeconds)
+		cancel()
+		if err == nil && rows > 0 {
+			return
+		}
+		if err == nil {
+			// 0 rows: the INSERT hasn't landed yet (or the sandbox is already
+			// gone — the retries below are cheap either way).
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		m.log.Warn("persist sandbox lifecycle failed (non-fatal)", "id", id, "err", err, "attempt", attempt)
+		time.Sleep(time.Duration(attempt) * time.Second)
+	}
+	m.log.Warn("persist sandbox lifecycle gave up — flag will not survive an agent restart",
+		"id", id, "persistent", persistent)
+}
+
 func (m *Manager) rehydrateLifecycle(ctx context.Context, id, template string) (time.Duration, bool) {
 	ttl := m.lifecycle.defaultTTL
 	persistent := isDurableTemplate(template)
@@ -345,10 +570,12 @@ func (m *Manager) setLifecycleForCreate(id string, req CreateRequest) {
 	// Persist lifecycle config so an agent restart can rehydrate it instead of
 	// downgrading an explicitly-persistent sandbox back to the default TTL.
 	// Best-effort: the in-memory store is the source of truth at runtime.
+	// RETRIED because the create pipeline INSERTs the sandbox row async — a
+	// plain UPDATE fired here races it, affects 0 rows, and reports no error
+	// (measured live: persistent:true sandboxes reaped after the next agent
+	// restart because the row still read persistent=0).
 	if m.store != nil {
-		if err := m.store.SetSandboxLifecycle(context.Background(), id, persistent, int64(ttl/time.Second)); err != nil {
-			m.log.Warn("persist sandbox lifecycle failed (non-fatal)", "id", id, "err", err)
-		}
+		go m.persistLifecycleWithRetry(id, persistent, int64(ttl/time.Second))
 	}
 }
 
@@ -370,6 +597,39 @@ func (m *Manager) MarkActivity(id string) {
 	m.actMu.Lock()
 	m.lastActivity[id] = time.Now()
 	m.actMu.Unlock()
+}
+
+// idleHibernateFailCap is the number of consecutive idle-hibernate failures
+// after which the sweeper gives up on a sandbox (until its next genuine idle
+// window) instead of retrying every 30s — the backstop against the retry-storm
+// that wedged prod.
+const idleHibernateFailCap = 3
+
+// noteHibernateResult records an idle-hibernate outcome. On success it clears
+// the failure counter. On failure it increments and returns the new count plus
+// whether the cap has been reached; when capped the caller bumps lastActivity
+// so the sandbox stops being re-selected until it idles again.
+func (m *Manager) noteHibernateResult(id string, err error) (fails int, capped bool) {
+	m.actMu.Lock()
+	defer m.actMu.Unlock()
+	if err == nil {
+		delete(m.hibFails, id)
+		// Reset the idle clock on success too, so a later wake + re-idle starts
+		// a fresh countdown rather than immediately re-qualifying.
+		m.lastActivity[id] = time.Now()
+		return 0, false
+	}
+	m.hibFails[id]++
+	fails = m.hibFails[id]
+	if fails >= idleHibernateFailCap {
+		// Give up: bump activity so the 30s sweep stops re-selecting it. The VM
+		// is healthy (Hibernate resumes it on failure), so leaving it running is
+		// safe; it gets another chance after the next full idle window.
+		m.lastActivity[id] = time.Now()
+		delete(m.hibFails, id)
+		return fails, true
+	}
+	return fails, false
 }
 
 // TunnelOpened registers a live pg-tunnel connection against a sandbox.
@@ -422,19 +682,38 @@ func (m *Manager) ActiveTunnels(id string) int {
 // We deliberately do NOT consult store status, because the row may be
 // stale across edges/agents (especially after a manual hibernate where
 // the response races the cache invalidation).
+// lifecycleLock returns the per-sandbox lifecycle mutex, locked. The returned
+// func unlocks it. Serializes Hibernate/Wake/EnsureRunning for one id.
+func (m *Manager) lifecycleLock(id string) func() {
+	v, _ := m.lifecycleMuMap.LoadOrStore(id, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (m *Manager) EnsureRunning(ctx context.Context, id string) error {
 	if id == "" {
 		return nil
 	}
+	// Fast path without the lock: already running.
 	if m.driver(id) != nil {
 		return nil
+	}
+	// Serialize with any concurrent wake/hibernate for this id. A connection
+	// arriving mid-hibernate blocks here until the snapshot completes, then
+	// wakes from it; two simultaneous connections serialize so only the first
+	// restores and the second sees driver!=nil.
+	unlock := m.lifecycleLock(id)
+	defer unlock()
+	if m.driver(id) != nil {
+		return nil // another waker won the race while we waited
 	}
 	hiberSnap := filepath.Join(m.cfg.DataDir, "vms", id, "hibernation", "vm.state")
 	if _, err := os.Stat(hiberSnap); err != nil {
 		return nil // nothing to wake — sandbox isn't ours or never hibernated here
 	}
 	m.log.Info("auto-wake on request", "id", id)
-	return m.Wake(ctx, id)
+	return m.wakeLocked(ctx, id)
 }
 
 // lastActivityFor returns the last-activity timestamp, defaulting to now.
@@ -535,8 +814,55 @@ func vsockExecEnabled() bool {
 // MVP semantics: detect orphaned sandboxes whose firecracker process is gone
 // and mark them failed (releasing their network allocation). True re-attach
 // to live PIDs would require the firecracker-go-sdk to support it.
+// rowAgentID extracts the ownership stamp from a sandbox row map.
+func rowAgentID(row map[string]any) string {
+	a, _ := row["agent_id"].(string)
+	return a
+}
+
+// ownsRow reports whether this agent is entitled to JUDGE a sandbox row —
+// mark it failed, release its network allocation, reclaim/delete it, or report
+// it. Owned = the row carries our agent_id. Legacy rows (empty agent_id,
+// created before the ownership column existed) count as ours ONLY when we hold
+// local evidence for the sandbox (vm dir, FC socket, or durable DB volume).
+// Rows owned by another agent — or unowned rows with no local evidence — are
+// NEVER touched: on the shared multi-node Postgres, an agent that judged every
+// row would mark a peer's healthy running sandbox failed the moment it
+// restarted first in a rolling deploy (the 2026-07-12 managed-DB incident).
+// Cleaning up rows for permanently-dead agents is the control plane's job (it
+// sees leases + heartbeats), not any peer's.
+func (m *Manager) ownsRow(row map[string]any) bool {
+	id, _ := row["id"].(string)
+	if id == "" {
+		return false
+	}
+	switch rowAgentID(row) {
+	case m.agentID:
+		return true
+	case "":
+		return m.hasLocalEvidence(id)
+	default:
+		return false
+	}
+}
+
+// hasLocalEvidence reports whether any local artifact ties a sandbox to this
+// host: its vm dir, its Firecracker control socket, or a durable DB volume.
+func (m *Manager) hasLocalEvidence(id string) bool {
+	if _, err := os.Stat(filepath.Join(m.cfg.DataDir, "vms", id)); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join("/tmp", fmt.Sprintf("fc-%s.socket", id))); err == nil {
+		return true
+	}
+	if _, err := os.Stat(m.dbVolumePath(id)); err == nil {
+		return true
+	}
+	return false
+}
+
 func (m *Manager) Recover(ctx context.Context) error {
-	all, err := m.store.ListSandboxes(ctx)
+	all, err := m.store.ListSandboxesForAgent(ctx, m.agentID)
 	if err != nil {
 		return err
 	}
@@ -549,16 +875,46 @@ func (m *Manager) Recover(ctx context.Context) error {
 		id, _ := row["id"].(string)
 		status, _ := row["status"].(string)
 		tmpl, _ := row["template"].(string)
+		owned := m.ownsRow(row)
 		// Only consider non-terminal sandboxes as "live" for vmDir GC
 		// purposes. Failed sandboxes' working dirs are leaked disk and
-		// should be reclaimed; users can recreate from the API.
-		if id != "" && status != string(StatusFailed) {
+		// should be reclaimed; users can recreate from the API. Rows we do
+		// NOT own always count as live: their state is their owner's
+		// business, never grounds for us to GC anything.
+		if id != "" && (!owned || status != string(StatusFailed)) {
 			live[id] = struct{}{}
+		}
+		// Ownership gate: everything below JUDGES the row (rehydrate, mark
+		// failed, release network). Only the owning agent may do that.
+		if !owned {
+			continue
+		}
+		// Claim legacy rows (pre-agent_id) we hold local evidence for, so
+		// ownership is explicit from here on.
+		if rowAgentID(row) == "" && m.agentID != "" {
+			if err := m.store.SetSandboxAgentID(ctx, id, m.agentID); err == nil {
+				m.log.Info("recover: claimed legacy sandbox row", "id", id, "agent_id", m.agentID)
+			}
 		}
 		if id != "" && status == string(StatusHibernated) && m.lifecycle != nil {
 			ttl, persistent := m.rehydrateLifecycle(ctx, id, tmpl)
 			m.lifecycle.Set(id, ttl, persistent)
 			m.MarkActivity(id)
+		}
+		// A row stuck "creating" at agent startup is an orphan: whatever
+		// in-process pipeline owned it (a clone staging, a mid-flight
+		// create) died with the previous agent process, and nothing will
+		// ever converge it. CAS it to failed so it is visible, deletable,
+		// and retryable instead of "provisioning" forever.
+		if id != "" && status == string(StatusCreating) {
+			if swapped, _ := m.store.SetStatusIf(ctx, id, string(StatusCreating), string(StatusFailed)); swapped {
+				m.log.Warn("recover: stranded creating row marked failed (pipeline died with previous agent process)",
+					"id", id, "template", tmpl)
+				if m.bus != nil {
+					m.bus.Emit(id, "recover.creating_orphan_failed", nil)
+				}
+			}
+			continue
 		}
 		if status != string(StatusRunning) && status != string(StatusPaused) {
 			continue
@@ -622,6 +978,14 @@ func (m *Manager) Recover(ctx context.Context) error {
 			if _, ok := live[e.Name()]; ok {
 				continue
 			}
+			// Never GC a dir whose Firecracker process is still alive — a
+			// missing/deleted row must not be grounds for pulling the disk out
+			// from under a running VM (belt-and-suspenders on top of the
+			// ownership scoping above).
+			if fcProcessAlive(e.Name()) {
+				m.log.Warn("recover: vm dir has no row but FC is alive; skipping gc", "id", e.Name())
+				continue
+			}
 			path := filepath.Join(vmsRoot, e.Name())
 			if rmErr := os.RemoveAll(path); rmErr == nil {
 				reclaimed++
@@ -655,15 +1019,25 @@ func (m *Manager) startHealthMonitor(id string, drv *firecracker.Driver) {
 			}
 			if !pidAlive(pid) {
 				m.log.Warn("firecracker died", "id", id, "pid", pid)
-				m.mu.Lock()
-				delete(m.drivers, id)
-				gc := m.guests[id]
-				delete(m.guests, id)
-				m.mu.Unlock()
-				if gc != nil {
-					_ = gc.Close()
-				}
-				_ = m.store.SetStatus(context.Background(), id, string(StatusFailed))
+				ctx := context.Background()
+				// FULL idempotent teardown — the death path previously did only
+				// SetStatus(failed) and stranded the loop device, NATID slot,
+				// netns, and vm dir forever (the slot was then preserved by the
+				// startup slotstore.Reconcile because the row lingered as
+				// "failed"). Run the SAME teardown a normal delete runs so the
+				// crash releases everything it owns. teardownResources is
+				// idempotent, so a user DELETE racing this crash is safe.
+				// KeepDurable: a crash is a runtime failure — the customer's
+				// durable DB volume must survive it (it is the restore source);
+				// only an explicit user DELETE destroys it.
+				m.teardownResourcesKeepDurable(ctx, id)
+				// Keep the row but mark it failed so the control plane / app
+				// health-monitor can observe the failure and react (redeploy /
+				// surface error). The slot is ALREADY released above, so a
+				// lingering failed row no longer leaks anything; the
+				// failed-row janitor deletes it terminally after the grace
+				// period.
+				_ = m.store.SetStatus(ctx, id, string(StatusFailed))
 				if m.bus != nil {
 					m.bus.Emit(id, "vm.died", map[string]any{"pid": pid})
 				}
@@ -805,11 +1179,10 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 
 	// Template-owned sizing: Firecracker snapshot restore cannot change vCPU
 	// or memory at restore time, so any per-request override is a lie that
-	// flows straight into the API response, the DB row, and (worst) the
-	// billing event. Read the template's meta.json — that's the source of
-	// truth — and force the request to match before *anything* persists.
-	// Pool claim, store writes, usage emit, and the customer's API response
-	// will all see the corrected values.
+	// flows straight into the API response and the DB row. Read the template's
+	// meta.json — that's the source of truth — and force the request to match
+	// before *anything* persists. Pool claim, store writes, and the caller's
+	// API response will all see the corrected values.
 	if req.Template != "" && req.FromSnapshot == "" {
 		ts := ReadTemplateSize(m.cfg.DataDir, req.Template)
 		if req.CPU != ts.CPU || req.MemoryMB != ts.MemoryMB {
@@ -828,6 +1201,14 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 		}
 	}
 
+	// Host memory admission (W0): placed AFTER the template-owns-size
+	// override so the gate sees the VM's EFFECTIVE memory, not the caller's
+	// wish. Refusing here (mapped to HTTP 507) is what stops an
+	// over-scheduled host from over-packing guests into OOM.
+	if err := m.admitMemory(req.MemoryMB); err != nil {
+		return nil, err
+	}
+
 	// --- timing: total wallclock from request to "running" ---------------
 	bootStart := time.Now()
 	phases := make(map[string]int64, 6)
@@ -842,6 +1223,23 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 	if id == "" {
 		id = uuid.NewString()
 	}
+
+	// Guarded cleanup: any error return from here on must not strand a network
+	// slot, a half-written sandbox row, or a vm dir. The network allocator owns
+	// slot indices in the local slotstore, and a leaked StatusCreating row
+	// (inserted below for the cold-boot path) would otherwise defeat the startup
+	// slot-Reconcile (which treats any persisted sandbox id as "live"). All three
+	// operations are idempotent, so this composes safely with the explicit
+	// cleanup that some error paths already do. Gated strictly on err!=nil
+	// (named return) so it NEVER tears down a successfully-created VM — both
+	// success returns set err==nil with a non-nil sb.
+	defer func() {
+		if err != nil {
+			_ = m.netPool.Release(context.Background(), id)
+			_ = m.store.DeleteSandbox(context.Background(), id)
+			_ = os.RemoveAll(filepath.Join(m.cfg.DataDir, "vms", id))
+		}
+	}()
 
 	// Detect NATID fast path early so we can skip the wasted legacy /30+TAP
 	// alloc (which costs ~500ms and is immediately released below).
@@ -912,7 +1310,15 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 	// impossible because the edge proxy may route the restore to any agent.
 	if req.FromSnapshot != "" && m.snapStore.Enabled() {
 		snapDir := snapshotDir(m.cfg, req.FromSnapshot)
-		if _, err := os.Stat(filepath.Join(snapDir, "vm.state")); err != nil {
+		// Fetch when vm.state is missing (nothing local) OR meta.json is
+		// missing (a crash between the mem/state fetch and the meta fetch —
+		// without meta we can't know whether a captured disk is promised) OR
+		// a partial earlier download left mem/state without the captured
+		// disk the meta promises — Download's repair path fetches just the
+		// missing legs (task_bb988c16 review finding).
+		_, vmStateErr := os.Stat(filepath.Join(snapDir, "vm.state"))
+		_, metaErr := os.Stat(filepath.Join(snapDir, "meta.json"))
+		if vmStateErr != nil || metaErr != nil || !snapstore.DiskRequirementMet(snapDir) {
 			tDL := time.Now()
 			dlCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			err := m.snapStore.Download(dlCtx, req.FromSnapshot, snapDir)
@@ -939,7 +1345,8 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 	// (the exact bug this guards against). Cold boot (~3s) attaches the
 	// volumes for real via Spec.Volumes; that latency is the documented
 	// cost of volume-attached creates.
-	if req.FromSnapshot == "" && len(req.Volumes) == 0 && templateSnapReady(m.cfg.DataDir, req.Template, m.keys.Fingerprint()) {
+	if req.FromSnapshot == "" && len(req.Volumes) == 0 &&
+		templateSnapReady(m.cfg.DataDir, req.Template, m.keys.Fingerprint()) {
 		// NAT-identity opt-in: if PANDASTACK_NATID=1, use the netns-isolated
 		// path that skips ALL guest-side reconfig. Empirically ~3.7x faster.
 		if os.Getenv("PANDASTACK_NATID") == "1" {
@@ -979,8 +1386,20 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 					if phasedBootTemplates[req.Template] {
 						dbImg, derr := m.ensureDBVolume(id)
 						if derr != nil {
-							m.log.Warn("db volume provision failed; booting without durable volume",
+							// FAIL CLOSED (was: warn + boot without the durable
+							// volume). A managed database without /dev/vdb is a
+							// zombie — the guest's corruption guard refuses to
+							// start postgres, and any writes that did happen
+							// would land on the throwaway rootfs and vanish on
+							// the next restore. Return the error outright: the
+							// fall-through target below is the v1 SNAPSHOT
+							// path, which would equally boot without the
+							// volume — only a hard failure here actually
+							// closes the hole.
+							m.log.Error("db volume provision failed; refusing to boot database without durable volume",
 								"sandbox", id, "err", derr)
+							_ = m.netPool.ReleaseNATID(ctx, id)
+							return nil, fmt.Errorf("db volume provision failed (refusing boot without durable volume): %w", derr)
 						} else {
 							dataDrivePath = dbImg
 						}
@@ -990,7 +1409,11 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 					)
 					if err != nil {
 						m.log.Warn("NATID restore failed", "err", err)
-						_ = m.netPool.Release(ctx, id)
+						// ReleaseNATID (not Release): the alloc above was made by
+						// AllocateNATID, so the symmetric release tears down the
+						// netns + frees the slot. A half-release (legacy Release)
+						// could strand the slot/netns mismatch.
+						_ = m.netPool.ReleaseNATID(ctx, id)
 						// Re-allocate legacy & fall through to v1.
 						alloc, _ = m.netPool.Allocate(ctx, id)
 					} else {
@@ -1032,7 +1455,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 						m.MarkActivity(id)
 						m.startHealthMonitor(id, drv)
 						go m.prewarmSSH(id, sb.GuestIP, bootStart)
-						if req.Template == pgManagedTemplate {
+						if isPGManagedTemplate(req.Template) {
 							go m.kickPGPhase2(id)
 						}
 						return sb, nil
@@ -1083,7 +1506,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 			m.MarkActivity(id)
 			m.startHealthMonitor(id, drv)
 			go m.prewarmSSH(id, sb.GuestIP, bootStart)
-			if req.Template == pgManagedTemplate {
+			if isPGManagedTemplate(req.Template) {
 				go m.kickPGPhase2(id)
 			}
 			return sb, nil
@@ -1101,7 +1524,44 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 			effectiveTemplate = meta.Template
 		}
 	}
-	{
+	// from_snapshot: prefer the snapshot's OWN captured rootfs — the disk
+	// exactly as it was in the snapshot's pause window (task_bb988c16). Older
+	// snapshots (pre-v0.15.44) and device-backed sandboxes carry no rootfs;
+	// they fall back to a fresh template clone below (memory-only restore).
+	snapshotDiskRestored := false
+	if req.FromSnapshot != "" {
+		snapRoot := filepath.Join(snapshotDir(m.cfg, req.FromSnapshot), "rootfs.ext4")
+		if _, serr := os.Stat(snapRoot); serr == nil {
+			tCopy := time.Now()
+			if err := cloneFile(snapRoot, rootfsPath); err != nil {
+				return nil, fmt.Errorf("copy snapshot rootfs: %w", err)
+			}
+			mark("rootfs_copy_ms", tCopy)
+			snapshotDiskRestored = true
+			// No key bake and no DiskGB grow on this path: the image already
+			// carries the baked keys (it descends from a baked template), and
+			// the restored guest kernel's in-memory ext4 superblock matches
+			// this disk byte-for-byte — resizing underneath it would corrupt.
+			// The keys are the ORIGIN agent's; with the fleet-shared keypair
+			// (the deployed norm) they match this agent's. Surface divergence
+			// loudly — it makes the SSH probe fail obscurely.
+			if meta, mErr := snapstore.ReadMeta(snapshotDir(m.cfg, req.FromSnapshot)); mErr == nil &&
+				meta.KeyFingerprint != "" && meta.KeyFingerprint != m.keys.Fingerprint() {
+				m.log.Warn("snapshot rootfs was baked with a DIFFERENT agent key — SSH probe will likely fail (fleet shared-key bootstrap divergence)",
+					"snapshot", req.FromSnapshot, "origin_fp", meta.KeyFingerprint, "local_fp", m.keys.Fingerprint())
+			}
+		} else if meta, mErr := snapstore.ReadMeta(snapshotDir(m.cfg, req.FromSnapshot)); mErr == nil && meta.DiskCaptured {
+			// meta promises a captured disk but it isn't here (partial
+			// download/publish). Restoring memory over a template disk would
+			// silently drop the user's files — fail the create instead; a
+			// retry re-enters the repair download above.
+			return nil, fmt.Errorf("snapshot %s captured a disk but rootfs.ext4 is missing locally (partial download or unpublished mirror) — refusing a memory-only restore that would lose files", req.FromSnapshot)
+		} else {
+			m.log.Warn("snapshot has no captured rootfs; restoring memory over a fresh template disk (files written after template bake will be absent)",
+				"snapshot", req.FromSnapshot)
+		}
+	}
+	if !snapshotDiskRestored {
 		// Always copy a fresh template rootfs as the disk backing.
 		// For cold boot: this is the standard path. For from_snapshot:
 		// FC's snapshot blob references the *original* rootfs path; we
@@ -1264,10 +1724,15 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 				}
 			}
 			if guestIP != "" {
-				newSb, err := m.restoreFromSnapshotNATID(ctx, sb, req, meta, snapDir, vmDir, rootfsPath, alloc, tapHostIP, guestIP, mac, bootStart, mark, phases)
+				newSb, err := m.restoreFromSnapshotNATID(ctx, sb, req, meta, snapDir, vmDir, rootfsPath, alloc, tapHostIP, guestIP, mac, bootStart, mark, phases, "" /*dataDrivePath: rootfs-only restore*/)
 				if err != nil {
 					m.log.Warn("NATID snapshot restore failed", "snapshot", req.FromSnapshot, "err", err)
-					_ = m.netPool.Release(ctx, id)
+					// ReleaseNATID (not Release): restoreFromSnapshotNATID
+					// converted the slot to a NATID alloc internally. Most of its
+					// error returns already release, but two early returns
+					// (vsock-bind mkdir, kernel lookup) leak the NATID slot — this
+					// is the symmetric backstop that frees it.
+					_ = m.netPool.ReleaseNATID(ctx, id)
 					_ = m.store.DeleteSandbox(ctx, id)
 					return nil, fmt.Errorf("snapshot restore: %w", err)
 				}
@@ -1285,6 +1750,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 		ConsolePath: filepath.Join(vmDir, "console.log"),
 		CPUs:        req.CPU,
 		MemoryMB:    req.MemoryMB,
+		Template:    req.Template,
 		Network:     alloc,
 		Vsock: firecracker.VsockSpec{
 			UDSPath: filepath.Join(vmDir, "fc-vsock.sock"),
@@ -1355,13 +1821,16 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 	// For postgres-16 (phased boot): deliver per-sandbox credentials so
 	// autostart.sh Phase 2 can rotate PG password and write ready.json.
 	// Works for both cold boot and snapshot restore paths.
-	if sb.Template == pgManagedTemplate {
+	if isPGManagedTemplate(sb.Template) {
 		go m.kickPGPhase2(id)
 	}
 
 	// First cold boot of a template auto-triggers snapshot creation in the
 	// background. Subsequent creates for the same template will land in the
 	// sub-second restore path. Best-effort; failures are logged.
+	//
+	// App images (the per-app disk images baked by BakeImage) are EXCLUDED:
+	// app sleep/wake is a disk-image + cold-boot model with NO memory snapshot
 	if req.Template != "" && !templateSnapReady(m.cfg.DataDir, req.Template, m.keys.Fingerprint()) {
 		go func(tpl string) {
 			bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -1382,6 +1851,10 @@ func (m *Manager) prewarmSSH(id, ip string, bootStart time.Time) {
 		m.log.Warn("ssh prewarm failed", "id", id, "err", err)
 		return
 	}
+	// Restored guests wake with the wall clock frozen at bake time, which
+	// breaks TLS once upstream certs rotate past the bake date (see
+	// syncGuestClock). Already off the hot path here (prewarm goroutine).
+	m.syncGuestClock(id, gc)
 	readyMS := time.Since(bootStart).Milliseconds()
 	m.mu.Lock()
 	m.guests[id] = gc
@@ -1390,6 +1863,35 @@ func (m *Manager) prewarmSSH(id, ip string, bootStart time.Time) {
 	if m.bus != nil {
 		m.bus.Emit(id, "sandbox.ssh_ready", map[string]any{"ssh_ready_ms": readyMS})
 	}
+}
+
+// DBCreds are the managed-Postgres credentials the control plane serves in a
+// database's connection string. An in-place restore captures the live values
+// and hands them back so the restored database keeps the SAME password + broker
+// token (kickPGPhase2 rotates the PG password via ALTER USER on every boot, so
+// re-injecting the old password makes the restored db answer to it unchanged).
+type DBCreds struct {
+	Password    string `json:"password"`
+	BrokerToken string `json:"broker_token"`
+}
+
+// setPendingPGCreds stashes creds for kickPGPhase2 to re-inject on the next boot
+// of id. Overwrites any prior value; consumed exactly once by takePendingPGCreds.
+func (m *Manager) setPendingPGCreds(id string, c *DBCreds) {
+	if c == nil || c.Password == "" || c.BrokerToken == "" {
+		return
+	}
+	m.pgCredsMu.Lock()
+	m.pendingPGCreds[id] = c
+	m.pgCredsMu.Unlock()
+}
+
+func (m *Manager) takePendingPGCreds(id string) *DBCreds {
+	m.pgCredsMu.Lock()
+	defer m.pgCredsMu.Unlock()
+	c := m.pendingPGCreds[id]
+	delete(m.pendingPGCreds, id)
+	return c
 }
 
 // kickPGPhase2 delivers per-sandbox credentials to a postgres-16 VM so
@@ -1407,17 +1909,26 @@ func (m *Manager) kickPGPhase2(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	password, err := generateToken(24)
-	if err != nil {
-		m.log.Error("pg phase2: generate password", "id", id, "err", err)
-		return
+	// In-place restore path: re-inject the database's EXISTING credentials so the
+	// connection string is unchanged. Otherwise generate fresh ones (cold boot,
+	// clone, failover).
+	var password, brokerToken string
+	if preserved := m.takePendingPGCreds(id); preserved != nil {
+		password, brokerToken = preserved.Password, preserved.BrokerToken
+		m.log.Info("pg phase2: preserving existing credentials (in-place restore)", "id", id)
+	} else {
+		p, err := generateToken(24)
+		if err != nil {
+			m.log.Error("pg phase2: generate password", "id", id, "err", err)
+			return
+		}
+		rawTok, err := generateToken(24)
+		if err != nil {
+			m.log.Error("pg phase2: generate broker token", "id", id, "err", err)
+			return
+		}
+		password, brokerToken = p, "pds_pg_"+rawTok
 	}
-	rawTok, err := generateToken(24)
-	if err != nil {
-		m.log.Error("pg phase2: generate broker token", "id", id, "err", err)
-		return
-	}
-	brokerToken := "pds_pg_" + rawTok
 
 	// Wait for SSH — retry with backoff (VM may need a moment post-resume).
 	var gc *guest.Client
@@ -1439,28 +1950,40 @@ func (m *Manager) kickPGPhase2(id string) {
 	}
 
 	// Tokens use base64url (A-Za-z0-9-_): safe inside single-quoted shell strings.
-	cmds := []string{
-		"mkdir -p /run/pandastack",
-		fmt.Sprintf("printf '%%s' '%s' > /run/pandastack/pg.password.new && chmod 600 /run/pandastack/pg.password.new", password),
-		fmt.Sprintf("printf '%%s' '%s' > /run/pandastack/broker.token.new && chmod 600 /run/pandastack/broker.token.new", brokerToken),
+	// Steps are (label, cmd) pairs so failure logs name the STEP, never the
+	// command — the credential-writing commands embed the plaintext password
+	// and broker token, which must not land in journald.
+	type deliverStep struct{ label, cmd string }
+	steps := []deliverStep{
+		{"mkdir", "mkdir -p /run/pandastack"},
+		{"pg-password", fmt.Sprintf("printf '%%s' '%s' > /run/pandastack/pg.password.new && chmod 600 /run/pandastack/pg.password.new", password)},
+		{"broker-token", fmt.Sprintf("printf '%%s' '%s' > /run/pandastack/broker.token.new && chmod 600 /run/pandastack/broker.token.new", brokerToken)},
 	}
 	// WAL archiving env must land before creds-ready: postgres starts as soon
 	// as the trigger file appears, and its first WAL segments should already
 	// flow to the relay (no archiving gap at the start of the timeline).
-	cmds = append(cmds, m.walEnvCmds(ctx, id)...)
-	cmds = append(cmds, "touch /run/pandastack/creds-ready")
-	for _, cmd := range cmds {
+	for i, cmd := range m.walEnvCmds(ctx, id) {
+		steps = append(steps, deliverStep{fmt.Sprintf("wal-env-%d", i), cmd})
+	}
+	steps = append(steps, deliverStep{"creds-ready", "touch /run/pandastack/creds-ready"})
+	for _, st := range steps {
 		delivered := false
+		var lastErr error
 		for attempt := 0; attempt < 5; attempt++ {
-			res, execErr := gc.Exec(ctx, cmd)
+			res, execErr := gc.Exec(ctx, st.cmd)
 			if execErr == nil && res.ExitCode == 0 {
 				delivered = true
 				break
 			}
+			if execErr != nil {
+				lastErr = execErr
+			} else {
+				lastErr = fmt.Errorf("exit %d", res.ExitCode)
+			}
 			time.Sleep(200 * time.Millisecond)
 		}
 		if !delivered {
-			m.log.Error("pg phase2: credential delivery failed", "id", id, "cmd", cmd)
+			m.log.Error("pg phase2: credential delivery failed", "id", id, "step", st.label, "err", lastErr)
 			return
 		}
 	}
@@ -1503,7 +2026,7 @@ func managedKind(sbAny any) string {
 	if !ok {
 		return ""
 	}
-	if tpl, _ := row["template"].(string); tpl == pgManagedTemplate {
+	if tpl, _ := row["template"].(string); isPGManagedTemplate(tpl) {
 		return "database"
 	}
 	if md, ok := row["metadata"].(map[string]string); ok {
@@ -1515,17 +2038,27 @@ func managedKind(sbAny any) string {
 }
 
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	return m.delete(ctx, id, false)
+	return m.delete(ctx, id, false, false)
 }
 
 // DeleteManaged tears down a sandbox even if it backs a managed feature. It is
 // for the owning feature's delete path (databases/apps API) only — the generic
 // DELETE /sandboxes/{id} route always calls Delete (force=false).
 func (m *Manager) DeleteManaged(ctx context.Context, id string) error {
-	return m.delete(ctx, id, true)
+	return m.delete(ctx, id, true, false)
 }
 
-func (m *Manager) delete(ctx context.Context, id string, force bool) error {
+// DeleteReap is the idle/TTL reaper's delete path. It tears down the sandbox but
+// DELIBERATELY does NOT cascade-delete the sandbox's snapshots: a snapshot is a
+// durable artifact meant to OUTLIVE its sandbox (the whole point is restore /
+// fork later). An idle auto-reap must not destroy what the user explicitly
+// saved. Only an EXPLICIT user/feature delete (Delete/DeleteManaged) cascades;
+// snapshots whose sandbox is gone are later expired by the grace-period reaper.
+func (m *Manager) DeleteReap(ctx context.Context, id string) error {
+	return m.delete(ctx, id, false, true)
+}
+
+func (m *Manager) delete(ctx context.Context, id string, force, reap bool) error {
 	// Guard: refuse to delete a managed (database/app) sandbox through the
 	// generic path. The owning feature deletes via DeleteManaged (force=true).
 	if !force {
@@ -1590,6 +2123,17 @@ func (m *Manager) delete(ctx context.Context, id string, force bool) error {
 	go func() {
 		if bus != nil {
 			bus.Emit(id, "sandbox.deleted", nil)
+		}
+		// Cascade-delete this sandbox's snapshots (DB row + local dir + GCS) ONLY
+		// on an explicit user/feature delete — NOT on an idle/TTL auto-reap. A
+		// snapshot is a durable artifact meant to outlive its sandbox (restore /
+		// fork later); reaping the idle sandbox must not destroy it. Orphaned
+		// snapshots (sandbox gone) are later expired by the grace-period reaper.
+		// Uses a fresh context because the request ctx is about to be cancelled.
+		if !reap {
+			cascadeCtx, cascadeCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			m.cascadeDeleteSnapshots(cascadeCtx, id)
+			cascadeCancel()
 		}
 		// RemoveSnap MUST happen before RemoveAll(vmDir) because cow.img
 		// lives inside vmDir and dm-snapshot must be detached first.
@@ -1666,6 +2210,12 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	if err := drv.Resume(ctx); err != nil {
 		return err
 	}
+	// The guest's wall clock froze for the whole pause — re-sync it (see
+	// syncGuestClock). Async: resume latency is user-visible and the guest
+	// is already usable; the sync lands within milliseconds.
+	if gc, err := m.Guest(id); err == nil {
+		go m.syncGuestClock(id, gc)
+	}
 	if m.bus != nil {
 		m.bus.Emit(id, "sandbox.resumed", nil)
 	}
@@ -1680,6 +2230,61 @@ type SnapshotResult struct {
 	StatePath string    `json:"state_path"`
 }
 
+// ErrSandboxNotRunnable is returned by CheckRunnable when an interactive guest
+// operation (exec/fs/pty) targets a sandbox whose guest is frozen (paused) or
+// gone (hibernated). Dialing such a guest blocks until the request times out,
+// so handlers fast-fail with this instead (HTTP 409).
+var ErrSandboxNotRunnable = errors.New("sandbox not running (paused or hibernated) — resume/wake it first")
+
+// CheckRunnable reports whether id can service a live guest request. A paused
+// VM's guest is frozen and a hibernated one has no process, so a TCP/vsock dial
+// to either hangs forever; the handler must reject up front. Unknown/other
+// statuses pass through (a missing row surfaces as 404 downstream, a "running"
+// row proceeds).
+func (m *Manager) CheckRunnable(ctx context.Context, id string) error {
+	row, err := m.store.GetSandbox(ctx, id)
+	if err != nil || row == nil {
+		return nil // let the downstream guest lookup produce the 404
+	}
+	rmap, _ := row.(map[string]any)
+	if rmap == nil {
+		return nil
+	}
+	switch st, _ := rmap["status"].(string); st {
+	case string(StatusPaused), string(StatusHibernated):
+		return ErrSandboxNotRunnable
+	}
+	return nil
+}
+
+// refreezeIfPaused re-pauses the Firecracker VM when the sandbox's stored status
+// is 'paused' but an operation just resumed it. Snapshot and Fork drive the VM
+// through pause→op→resume unconditionally (driver.CreateSnapshot /
+// PauseCopyResume), so running them against an already-paused sandbox leaves the
+// guest RUNNING while the row still says 'paused' — a running, exec-usable
+// sandbox that every status-driven sweep (idle reap, capacity accounting) then
+// ignores. Restoring the frozen state keeps VM and status consistent. Called
+// after the snapshot/fork op; best-effort.
+func (m *Manager) refreezeIfPaused(ctx context.Context, drv *firecracker.Driver, id string) {
+	if drv == nil {
+		return
+	}
+	row, err := m.store.GetSandbox(ctx, id)
+	if err != nil || row == nil {
+		return
+	}
+	rmap, _ := row.(map[string]any)
+	if rmap == nil {
+		return
+	}
+	if st, _ := rmap["status"].(string); st != string(StatusPaused) {
+		return
+	}
+	if err := drv.Pause(ctx); err != nil {
+		m.log.Warn("refreeze after snapshot/fork failed (sandbox may run unmetered)", "id", id, "err", err)
+	}
+}
+
 func (m *Manager) Snapshot(ctx context.Context, sandboxID string) (*SnapshotResult, error) {
 	drv := m.driver(sandboxID)
 	if drv == nil {
@@ -1687,13 +2292,38 @@ func (m *Manager) Snapshot(ctx context.Context, sandboxID string) (*SnapshotResu
 	}
 	snapID := uuid.NewString()
 	dir := snapshotDir(m.cfg, snapID)
-	if err := drv.CreateSnapshot(ctx, dir); err != nil {
-		return nil, err
-	}
-	// Persist meta.json so cross-agent restores can rebuild the symlink
-	// FC expects for the rootfs backing file. The rootfs path is the
-	// canonical per-sandbox VM dir layout we use everywhere.
+	// The rootfs path is the canonical per-sandbox VM dir layout used by every
+	// file-backed create path (reflink/clonefile). dm-snapshot-backed sandboxes
+	// (streaming seeds) have a device-mapper view instead of this file.
 	rootfsHostPath := filepath.Join(m.cfg.DataDir, "vms", sandboxID, "rootfs.ext4")
+	// Capture the live DISK inside the same pause window as memory+state so a
+	// from_snapshot restore gets a consistent (mem, disk) pair. Without this,
+	// restores ran the snapshot's memory over a fresh TEMPLATE disk — every
+	// file written after template bake silently vanished (task_bb988c16, found
+	// by the 2026-08-18 E2E). The copy is reflink-first, so the extra
+	// pause-window cost on XFS is sub-millisecond.
+	diskCaptured := false
+	if fi, statErr := os.Stat(rootfsHostPath); statErr == nil && fi.Mode().IsRegular() {
+		if err := drv.PauseForFork(ctx, dir, filepath.Join(dir, "rootfs.ext4"), rootfsHostPath); err != nil {
+			return nil, err
+		}
+		diskCaptured = true
+	} else {
+		// Device-backed rootfs (dm-snapshot over an NBD streaming base): there
+		// is no file to reflink and reading the whole device inside the pause
+		// window is unacceptable. Memory-only snapshot; restore falls back to
+		// a template disk exactly like pre-v0.15.44 snapshots.
+		m.log.Warn("snapshot: rootfs is not a regular file — capturing memory only, restore will use a template disk",
+			"sandbox", sandboxID, "rootfs", rootfsHostPath)
+		if err := drv.CreateSnapshot(ctx, dir); err != nil {
+			return nil, err
+		}
+	}
+	// The snapshot op pauses→snapshots→resumes the VM. If this sandbox was paused,
+	// that leaves it running with a 'paused' row (unmetered) — restore the freeze.
+	m.refreezeIfPaused(ctx, drv, sandboxID)
+	// Persist meta.json so cross-agent restores can rebuild the symlink
+	// FC expects for the rootfs backing file.
 	template := ""
 	natid := false
 	if sbAny, err := m.store.GetSandbox(ctx, sandboxID); err == nil && sbAny != nil {
@@ -1727,6 +2357,8 @@ func (m *Manager) Snapshot(ctx context.Context, sandboxID string) (*SnapshotResu
 		BakedTapHostIP:    bakedTapHost,
 		BakedGuestIP:      bakedGuest,
 		BakedMAC:          bakedMAC,
+		DiskCaptured:      diskCaptured,
+		KeyFingerprint:    m.keys.Fingerprint(),
 	}); err != nil {
 		m.log.Warn("snapshot meta write failed", "snapshot", snapID, "err", err)
 	}
@@ -1753,7 +2385,16 @@ func (m *Manager) Snapshot(ctx context.Context, sandboxID string) (*SnapshotResu
 			cancel()
 			m.log.Warn("snapshot gcs upload failed", "snapshot", snapID, "err", err)
 			// Don't fail the snapshot create — local copy is authoritative
-			// and same-agent forks still work.
+			// and same-agent forks still work. But scrub the partial remote
+			// prefix (best-effort) so a cross-agent restore hits a clean
+			// "not found" instead of a half-published snapshot; meta.json
+			// uploads last so a partial prefix can't claim a disk it doesn't
+			// have, and removing it entirely is stricter still.
+			delCtx, delCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if derr := m.snapStore.Delete(delCtx, snapID); derr != nil {
+				m.log.Warn("partial snapshot gcs scrub failed", "snapshot", snapID, "err", derr)
+			}
+			delCancel()
 		} else {
 			cancel()
 			m.log.Info("snapshot mirrored to gcs", "snapshot", snapID, "took_ms", time.Since(t0).Milliseconds())
@@ -1869,6 +2510,10 @@ func (m *Manager) Fork(ctx context.Context, parentID string, count int) (*ForkRe
 	if err := parentDrv.PauseCopyResume(ctx, parentRoot, stagedRoot); err != nil {
 		return nil, fmt.Errorf("fork copy rootfs: %w", err)
 	}
+	// PauseCopyResume unconditionally resumes the parent. If the parent was
+	// paused, that would leave it running behind a 'paused' row — restore the
+	// freeze so VM and status stay consistent.
+	m.refreezeIfPaused(ctx, parentDrv, parentID)
 	if m.bus != nil {
 		m.bus.Emit(parentID, "fork.staged", map[string]any{"snapshot": snapID, "count": count})
 	}
@@ -1946,6 +2591,7 @@ func (m *Manager) spawnChildFromRootfs(ctx context.Context, parentID, snapID, st
 	}
 	drv := firecracker.NewDriver(firecracker.Spec{
 		ID:          id,
+		Template:    sb.Template, // no-hugepage class must survive cold fork
 		KernelPath:  kernelPath,
 		RootfsPath:  rootfsPath,
 		SocketPath:  filepath.Join("/tmp", fmt.Sprintf("fc-%s.socket", id)),
@@ -2146,6 +2792,16 @@ func (m *Manager) GetTyped(ctx context.Context, id string) (*Sandbox, error) {
 		MAC:      stringOr(row["mac"]),
 		VsockCID: uint32(asInt(row["vsock_cid"])),
 		FromSnap: stringOr(row["from_snapshot"]),
+		BootMS:   int64(asInt(row["boot_ms"])),
+		BootMode: stringOr(row["boot_mode"]),
+	}
+	// CreatedAt must round-trip: callers mutate the struct returned here and
+	// hand it straight back to UpdateSandbox. Leaving it at the zero value is
+	// what corrupted created_at on live rows (see UpdateSandbox's comment) —
+	// UpdateSandbox no longer writes the column, but a *Sandbox that silently
+	// loses its creation time is a trap for anything else that reads it.
+	if t, ok := row["created_at"].(time.Time); ok {
+		sb.CreatedAt = t
 	}
 	if md, ok := row["metadata"].(map[string]string); ok {
 		sb.Metadata = md
@@ -2208,21 +2864,64 @@ func (m *Manager) spawnWarmChild(_ context.Context, _, _, _, _ string) (string, 
 // ---- Phase 3: Hibernate / Wake ----
 
 func (m *Manager) Hibernate(ctx context.Context, id string) error {
+	// Serialize against wake-on-connect: a connection arriving while this
+	// snapshot runs must wait (in EnsureRunning) and then wake from the
+	// finished snapshot, never dial the half-paused guest or restore a
+	// second copy.
+	unlock := m.lifecycleLock(id)
+	defer unlock()
 	drv := m.driver(id)
 	if drv == nil {
 		return errors.New("sandbox not found or not running")
 	}
 	vmDir := filepath.Join(m.cfg.DataDir, "vms", id)
 	hiberDir := filepath.Join(vmDir, "hibernation")
-	if err := os.MkdirAll(hiberDir, 0o755); err != nil {
+
+	// Snapshot into a TEMP dir and atomically rename it into place only on
+	// success. A failed/partial PauseAndSnapshot must never overwrite the
+	// last-good snapshot: the wedge incident showed a timed-out snapshot
+	// leaving vm.mem/vm.state inconsistent with the older vm.mem.header,
+	// which made the next wake unrestorable. Writing to a temp dir keeps any
+	// existing hibernation/ snapshot intact until a clean one is ready.
+	tmpDir := vmDir + string(os.PathSeparator) + "hibernation.tmp"
+	_ = os.RemoveAll(tmpDir)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return err
 	}
 	// Pause+snapshot+stop. CreateSnapshot internally pauses and would resume,
 	// so we use the lower-level pause-and-snapshot via ForkSnapshot semantics
 	// (without rootfs copy — rootfs stays in vmDir).
-	if err := drv.PauseAndSnapshot(ctx, hiberDir); err != nil {
+	if err := drv.PauseAndSnapshot(ctx, tmpDir); err != nil {
+		// PauseAndSnapshot pauses the VM FIRST; on any error (e.g. a snapshot
+		// timeout) the VM is left Paused and Stop() below is never reached, so
+		// without an explicit resume the VM wedges (FC alive, guest unreachable,
+		// agent still reports running). Resume it so a failed hibernate returns
+		// the VM to a healthy Running state and the sandbox stays usable. Use a
+		// fresh context so a deadline-exceeded parent ctx doesn't immediately
+		// fail the recovery resume.
+		if rerr := drv.Resume(context.Background()); rerr != nil {
+			m.log.Warn("hibernate: resume-after-fail failed", "id", id, "err", rerr)
+		}
+		_ = os.RemoveAll(tmpDir)
 		obs.HibernationTotal.WithLabelValues("hibernate_failed").Inc()
 		return fmt.Errorf("hibernate snapshot: %w", err)
+	}
+	// Snapshot is complete and consistent in tmpDir. Swap it in atomically:
+	// remove the old snapshot, then rename. (Rename onto a non-empty dir fails,
+	// so the explicit RemoveAll is required.)
+	if err := os.MkdirAll(hiberDir, 0o755); err == nil {
+		_ = os.RemoveAll(hiberDir)
+	}
+	if err := os.Rename(tmpDir, hiberDir); err != nil {
+		// Could not promote the new snapshot. The VM is already paused+snapshotted
+		// in tmpDir; resume it and bail rather than Stop() into a state with no
+		// usable hibernation dir.
+		if rerr := drv.Resume(context.Background()); rerr != nil {
+			m.log.Warn("hibernate: resume-after-rename-fail failed", "id", id, "err", rerr)
+		}
+		_ = os.RemoveAll(tmpDir)
+		obs.HibernationTotal.WithLabelValues("hibernate_failed").Inc()
+		return fmt.Errorf("hibernate promote snapshot: %w", err)
 	}
 	if err := drv.Stop(ctx); err != nil {
 		m.log.Warn("hibernate stop failed", "id", id, "err", err)
@@ -2246,18 +2945,31 @@ func (m *Manager) Hibernate(ctx context.Context, id string) error {
 	return m.store.SetStatus(ctx, id, string(StatusHibernated))
 }
 
+// Wake restores a hibernated sandbox. Serialized per id against concurrent
+// wakes and a racing Hibernate (see lifecycleMuMap).
 func (m *Manager) Wake(ctx context.Context, id string) error {
+	unlock := m.lifecycleLock(id)
+	defer unlock()
 	if m.driver(id) != nil {
 		return errors.New("sandbox already running")
 	}
+	return m.wakeLocked(ctx, id)
+}
+
+// wakeLocked is Wake's body; the caller MUST hold the id's lifecycle lock and
+// have already confirmed driver(id)==nil.
+func (m *Manager) wakeLocked(ctx context.Context, id string) error {
 	vmDir := filepath.Join(m.cfg.DataDir, "vms", id)
 	hiberDir := filepath.Join(vmDir, "hibernation")
 	if _, err := os.Stat(filepath.Join(hiberDir, "vm.state")); err != nil {
 		return fmt.Errorf("hibernation snapshot missing: %w", err)
 	}
-	// Fetch cpu/mem from store. Store lookup CAN fail across edges, so we
-	// fall back to defaults rather than abort the wake.
+	// Fetch cpu/mem/template from store. Store lookup CAN fail across edges, so
+	// we fall back to defaults rather than abort the wake. The template is used
+	// only by the netns-recovery path below (to reload the baked guest identity)
+	// — an empty template just disables recovery, it never blocks a normal wake.
 	cpu, mem := 1, 256
+	var template string
 	if sbAny, err := m.store.GetSandbox(ctx, id); err == nil && sbAny != nil {
 		if row, ok := sbAny.(map[string]any); ok {
 			if c := asInt(row["cpu"]); c > 0 {
@@ -2265,6 +2977,9 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 			}
 			if mm := asInt(row["memory_mb"]); mm > 0 {
 				mem = mm
+			}
+			if t, ok := row["template"].(string); ok {
+				template = t
 			}
 		}
 	}
@@ -2289,6 +3004,37 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	// use the same raw-HTTP /snapshot/load path NATID restore uses on
 	// first boot.
 	isNATID := strings.HasPrefix(alloc.TAP, "ns-")
+
+	// Netns recovery: a NATID sandbox persists its netns NAME (alloc.TAP, e.g.
+	// "ns-p0000008f") and Hibernate intentionally does NOT release the netns —
+	// it is meant to survive until wake. But the netns is named by SLOT INDEX,
+	// and on an agent restart the NATID prewarmer rebuilds the slot pool by
+	// index; netns.Create destroys any pre-existing namespace of that name. So a
+	// sandbox hibernated before a restart can find its netns torn down out from
+	// under it. Launching FC into a missing netns fails late and opaquely
+	// ("Cannot open network namespace" → no FC socket → /snapshot/load dials a
+	// socket that never appears). Detect it up front and re-allocate a FRESH
+	// netns wired with the SAME baked guest identity (tap0/IP/MAC frozen in the
+	// template snapshot) so the restored guest's network still matches. The
+	// netns NAME changes but the guest-visible network does not, which is all
+	// the snapshot cares about. The host-side proxy IP (ProxyGuestIP, the
+	// SSH/pg-tunnel dial target) DOES change with the new slot, so we persist it
+	// to the sandbox row after a successful wake (see below).
+	if isNATID && !netns.Exists(alloc.TAP) {
+		m.log.Warn("wake: NATID netns gone, re-allocating", "id", id, "stale_netns", alloc.TAP, "template", template)
+		obs.HibernationTotal.WithLabelValues("wake_netns_realloc").Inc()
+		newAlloc, rErr := m.reallocateNATID(ctx, id, template, alloc)
+		if rErr != nil {
+			// Recovery failed (e.g. template identity unavailable, pool
+			// exhausted). The data is safe on the durable volume/snapshot; the
+			// caller's never-fail layer decides whether to cold-restart.
+			_ = m.store.SetStatus(ctx, id, string(StatusFailed))
+			obs.HibernationTotal.WithLabelValues("wake_failed").Inc()
+			return fmt.Errorf("wake start (natid): netns %q gone and re-allocate failed: %w", alloc.TAP, rErr)
+		}
+		alloc = newAlloc
+	}
+
 	var drv *firecracker.Driver
 	if isNATID {
 		// The hibernation snapshot froze the guest's vsock device at the baked
@@ -2387,15 +3133,36 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	}
 	if guestIP != "" {
 		gc := guest.NewClient(guestIP, "root", m.keys.Signer())
-		readyCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		if err := gc.WaitReady(readyCtx, 8*time.Second); err == nil {
+		readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		readyErr := gc.WaitReady(readyCtx, 30*time.Second)
+		cancel()
+		if readyErr == nil {
+			// The woken guest's wall clock is frozen at hibernation time —
+			// re-sync before it's marked running (see syncGuestClock).
+			m.syncGuestClock(id, gc)
 			m.mu.Lock()
 			m.guests[id] = gc
 			m.mu.Unlock()
 		} else {
-			m.log.Warn("wake: ssh not ready within deadline", "id", id, "err", err)
+			// The VM resumed but the guest never came back (SSH never accepted).
+			// This is a FAILED wake, not a successful one: the snapshot restored a
+			// dead guest. Leaving the driver registered would strand the sandbox
+			// forever — every retry hits the `m.driver(id) != nil` guard at the top
+			// and returns "sandbox already running", with no path to recovery (the
+			// exact zombie that broke db 051f39bf). Tear the half-woken VM down so
+			// the sandbox is retry-able / failover-able: stop FC, drop the driver,
+			// and mark FAILED (not RUNNING). The caller redeploys/failovers.
+			m.log.Warn("wake: guest never became ready; tearing down half-woken VM",
+				"id", id, "err", readyErr)
+			_ = drv.Stop(context.Background())
+			m.mu.Lock()
+			delete(m.drivers, id)
+			delete(m.guests, id)
+			m.mu.Unlock()
+			obs.HibernationTotal.WithLabelValues("wake_failed").Inc()
+			_ = m.store.SetStatus(ctx, id, string(StatusFailed))
+			return fmt.Errorf("wake: guest never became ready: %w", readyErr)
 		}
-		cancel()
 	}
 
 	if m.bus != nil {
@@ -2416,6 +3183,63 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 // stash alongside the hibernation snapshot. For now we always fall back
 // to the store record (which carries guest_ip).
 func guestIPFromHiber(_ string) string { return "" }
+
+// reallocateNATID rebuilds a fresh NATID netns for a sandbox whose original
+// netns was torn down out from under it (e.g. the prewarmer rebuilt the slot
+// pool across an agent restart — see the recovery block in Wake). The snapshot
+// froze the guest's BAKED identity (tap0 device, guest IP, MAC), which is a
+// per-template constant recorded in the template's identity.json; reusing it
+// means the restored guest's network still matches even though the host-side
+// netns name + proxy dial IP are new.
+//
+// It releases any stale allocation for this id first (idempotent), claims a
+// fresh slot via AllocateNATID with the baked identity, and persists the new
+// proxy dial target (guest_ip) + netns name (host_tap) + mac to the sandbox
+// row so the post-wake SSH probe and later pg-tunnel/SSH dials reach the new
+// netns. Returns the new Allocation in the same shape Lookup would have.
+func (m *Manager) reallocateNATID(ctx context.Context, id, template string, stale network.Allocation) (network.Allocation, error) {
+	if template == "" {
+		return network.Allocation{}, fmt.Errorf("no template recorded for sandbox %s; cannot reload baked identity", id)
+	}
+	// The baked guest identity (tap0/IP/MAC) is a per-template constant frozen
+	// at bake time in the template snapshot's identity.json — the same source
+	// the create path uses (manager.go AllocateNATID call site).
+	tapHostIP, guestIP, mac, idErr := loadTemplateIdentity(templateSnapDir(m.cfg.DataDir, template))
+	if idErr != nil {
+		return network.Allocation{}, fmt.Errorf("load template identity (%s): %w", template, idErr)
+	}
+	// Drop the dead allocation + its (now-missing) netns/slot so the re-claim
+	// can't collide with a stale slotstore row. Best-effort: the netns is
+	// already gone; this mainly frees the slot index.
+	_ = m.netPool.ReleaseNATID(ctx, id)
+
+	na, aErr := m.netPool.AllocateNATID(ctx, id, tapHostIP, guestIP, mac, map[int]int{22: 22})
+	if aErr != nil {
+		return network.Allocation{}, fmt.Errorf("re-allocate netns: %w", aErr)
+	}
+	// Persist the NEW host-side dial target. guest_ip is the proxy IP the
+	// pg-tunnel/SSH paths dial; it changes with the new slot. host_tap holds
+	// the netns name (NATID convention). The returned Allocation drives the FC
+	// launch below, but the post-wake SSH readiness probe and every later
+	// pg-tunnel/SSH dial re-read guest_ip from THIS row — so if the write fails
+	// the FC launch still succeeds yet the readiness probe dials the stale (old,
+	// dead) proxy IP and the wake degrades to a clean retryable "guest never
+	// became ready" failure (not a silent half-wake). Log loudly either way.
+	if uErr := m.store.SetSandboxNetwork(ctx, id, na.ProxyGuestIP, na.Netns, na.MAC); uErr != nil {
+		m.log.Warn("wake: re-allocated netns but failed to persist new guest_ip", "id", id, "new_ip", na.ProxyGuestIP, "err", uErr)
+	}
+	m.log.Info("wake: NATID netns re-allocated", "id", id, "old_netns", stale.TAP, "new_netns", na.Netns, "new_proxy_ip", na.ProxyGuestIP)
+	// Return in Allocation shape (what the rest of Wake consumes via alloc.TAP).
+	return network.Allocation{
+		SandboxID: id,
+		TAP:       na.Netns,
+		HostIP:    na.ProxyHostIP,
+		GuestIP:   na.GuestIP,
+		MAC:       na.MAC,
+		Subnet:    na.VethHost,
+		Idx:       na.Idx,
+	}, nil
+}
 
 // ---- Phase 3: Idle sweeper ----
 
@@ -2494,6 +3318,16 @@ func (m *Manager) HibernateAllPersistent(ctx context.Context, parallelism int) (
 	return ok, errs
 }
 
+// RunDiskWatchdog runs the streaming-disk NBD watchdog (F5): it polls live
+// streamed bases and force-recovers any wedged device. No-op when dm-snapshot or
+// disk streaming is unavailable. Blocks until ctx is cancelled.
+func (m *Manager) RunDiskWatchdog(ctx context.Context) {
+	if m.dmsnap == nil {
+		return
+	}
+	m.dmsnap.RunWatchdog(ctx)
+}
+
 func (m *Manager) RunIdleSweeper(ctx context.Context, idleAfter time.Duration) {
 	if idleAfter <= 0 {
 		return
@@ -2537,8 +3371,19 @@ func (m *Manager) RunIdleSweeper(ctx context.Context, idleAfter time.Duration) {
 				continue
 			}
 			m.log.Info("idle sweep: hibernating", "id", id, "idle_for", now.Sub(m.lastActivityFor(id)))
-			if err := m.Hibernate(ctx, id); err != nil {
-				m.log.Warn("idle hibernate failed", "id", id, "err", err)
+			err := m.Hibernate(ctx, id)
+			fails, capped := m.noteHibernateResult(id, err)
+			if err != nil {
+				if capped {
+					// Repeatedly failed to hibernate this sandbox. Stop retrying
+					// (the 30s storm); it's running + healthy (Hibernate resumed
+					// it on failure) and will be retried after its next idle
+					// window. noteHibernateResult bumped lastActivity for us.
+					m.log.Error("idle hibernate giving up after repeated failures; leaving running",
+						"id", id, "fails", fails)
+				} else {
+					m.log.Warn("idle hibernate failed", "id", id, "err", err, "fails", fails)
+				}
 			}
 		}
 	}
@@ -2571,8 +3416,8 @@ func (m *Manager) VolumeDir() string { return filepath.Join(m.cfg.DataDir, "volu
 func (m *Manager) Store() *store.Store { return m.store }
 
 // ListBootEvents is a thin convenience wrapper used by /stats/boot.
-func (m *Manager) ListBootEvents(ctx context.Context, workspace string, limit int) ([]store.BootEvent, error) {
-	return m.store.ListBootEvents(ctx, workspace, limit)
+func (m *Manager) ListBootEvents(ctx context.Context, workspace string, limit int, since int64) ([]store.BootEvent, error) {
+	return m.store.ListBootEvents(ctx, workspace, limit, since)
 }
 
 func validVolumeName(n string) bool {
@@ -2629,6 +3474,11 @@ func (m *Manager) restoreFromSnapshotNATID(
 	bootStart time.Time,
 	mark func(string, time.Time),
 	phases map[string]int64,
+	// dataDrivePath, when non-empty, is patched onto the snapshot's baked "vol1"
+	// data drive before Resume — used by the warm memory-fork branch (TUSK T4.2)
+	// to attach the child's reflinked durable volume. "" for every other restore
+	// (rootfs-only), which leaves the baked topology untouched.
+	dataDrivePath string,
 ) (*Sandbox, error) {
 	id := sb.ID
 
@@ -2646,10 +3496,26 @@ func (m *Manager) restoreFromSnapshotNATID(
 	}
 	mark("natid_alloc_ms", tAlloc)
 
-	// Vsock handling. Snapshots carrying the "vsock" marker (taken from a
-	// NATID restores carry no vsock device. Legacy (pre-NATID) snapshots
-	// may encode a per-template UDS path: pre-create its parent dir and
-	// remove any stale socket so FC's bind succeeds.
+	// Vsock handling. NATID snapshots bake a vsock device at the FIXED
+	// firecracker.BakedVsockPath (the pandastack-daemon listener), and FC
+	// re-creates that listener on restore at the same absolute path. App/user
+	// snapshots are taken from a running NATID sandbox, so they DO carry that
+	// device — restoring one while another sandbox (e.g. the app's live one, or
+	// a concurrent restore) already holds the baked path collides with
+	// "Address in use (os error 98)". We therefore hand StartFromSnapNoDrive a
+	// per-sandbox bind dir (exactly like the template-snap restore path): FC is
+	// spawned in a private mount namespace and bind-mounts vsockBindDir over
+	// BakedVsockDir, so each restore's socket lands on its own inode.
+	vsockBindDir := filepath.Join(vmDir, "vsock")
+	if err := os.MkdirAll(vsockBindDir, 0o755); err != nil {
+		// NATID slot was already allocated above; release it before bailing so
+		// the slot/netns isn't stranded (the caller's ReleaseNATID is the
+		// backstop, but releasing here keeps the contract local).
+		_ = m.netPool.ReleaseNATID(ctx, id)
+		return nil, fmt.Errorf("mkdir vsock bind dir: %w", err)
+	}
+	// Legacy (pre-NATID) snapshots may encode a per-template UDS path instead:
+	// pre-create its parent dir and remove any stale socket so FC's bind succeeds.
 	if meta.VsockUDSPath != "" {
 		if err := os.MkdirAll(filepath.Dir(meta.VsockUDSPath), 0o755); err != nil {
 			m.log.Warn("vsock parent mkdir failed", "path", meta.VsockUDSPath, "err", err)
@@ -2659,19 +3525,21 @@ func (m *Manager) restoreFromSnapshotNATID(
 
 	kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
 	if err != nil {
+		_ = m.netPool.ReleaseNATID(ctx, id)
 		return nil, err
 	}
 
 	drv := firecracker.NewDriver(firecracker.Spec{
-		ID:          id,
-		KernelPath:  kernelPath,
-		RootfsPath:  rootfsPath,
-		SocketPath:  filepath.Join("/tmp", fmt.Sprintf("fc-%s.socket", id)),
-		LogPath:     filepath.Join(vmDir, "firecracker.log"),
-		ConsolePath: filepath.Join(vmDir, "console.log"),
-		CPUs:        req.CPU,
-		MemoryMB:    req.MemoryMB,
-		Netns:       natAlloc.Netns,
+		ID:           id,
+		KernelPath:   kernelPath,
+		RootfsPath:   rootfsPath,
+		SocketPath:   filepath.Join("/tmp", fmt.Sprintf("fc-%s.socket", id)),
+		LogPath:      filepath.Join(vmDir, "firecracker.log"),
+		ConsolePath:  filepath.Join(vmDir, "console.log"),
+		CPUs:         req.CPU,
+		MemoryMB:     req.MemoryMB,
+		Netns:        natAlloc.Netns,
+		VsockBindDir: vsockBindDir,
 	}, m.log.With("sandbox", id, "natid", true, "fork", true))
 
 	tLoad := time.Now()
@@ -2686,6 +3554,16 @@ func (m *Manager) restoreFromSnapshotNATID(
 		_ = drv.Stop(ctx)
 		_ = m.netPool.ReleaseNATID(ctx, id)
 		return nil, fmt.Errorf("patch rootfs: %w", err)
+	}
+	// Warm memory-fork (T4.2): attach the child's reflinked durable volume onto
+	// the baked "vol1" data drive before Resume, so the restored (hot) postgres
+	// resumes against the exact on-disk bytes captured in the same pause window.
+	if dataDrivePath != "" {
+		if err := drv.PatchDrive(ctx, pgDataDriveID, dataDrivePath); err != nil {
+			_ = drv.Stop(ctx)
+			_ = m.netPool.ReleaseNATID(ctx, id)
+			return nil, fmt.Errorf("patch data drive: %w", err)
+		}
 	}
 	mark("drive_patch_ms", tPatch)
 
@@ -2734,6 +3612,10 @@ func (m *Manager) restoreFromSnapshotNATID(
 	gc := guest.NewClient(natAlloc.ProxyGuestIP, "root", m.keys.Signer())
 	readyCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	if err := gc.WaitReady(readyCtx, 8*time.Second); err == nil {
+		// The restored guest's wall clock is frozen at seed-bake time; set it
+		// before the caller's first TLS handshake can see a stale date (see
+		// syncGuestClock). One exec on a path that already blocked on WaitReady.
+		m.syncGuestClock(id, gc)
 		m.mu.Lock()
 		m.guests[id] = gc
 		m.mu.Unlock()
@@ -2754,4 +3636,32 @@ func (m *Manager) restoreFromSnapshotNATID(
 		"boot_ms", sb.BootMS, "phases", phases)
 
 	return sb, nil
+}
+
+
+// WorkspaceForRequest resolves the tenant a request acts on: the header value
+// when the caller supplied one, otherwise the workspace recorded on the
+// sandbox's own row. The fallback exists because internal callers (the
+// managed-database tunnel) authenticate with the node token and send no
+// workspace header, yet still drive the guest and would otherwise bypass
+// per-workspace checks entirely.
+func (m *Manager) WorkspaceForRequest(ctx context.Context, headerWS, sandboxID string) string {
+	if headerWS != "" {
+		return headerWS
+	}
+	if sandboxID == "" || m.store == nil {
+		return ""
+	}
+	row, err := m.store.GetSandbox(ctx, sandboxID)
+	if err != nil || row == nil {
+		return ""
+	}
+	rmap, _ := row.(map[string]any)
+	if rmap == nil {
+		return ""
+	}
+	if md, ok := rmap["metadata"].(map[string]string); ok {
+		return md["workspace"]
+	}
+	return ""
 }

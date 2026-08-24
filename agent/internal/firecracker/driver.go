@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,6 +66,9 @@ type Spec struct {
 	ConsolePath string
 	CPUs        int
 	MemoryMB    int
+	// Template is the template name this VM boots from (cold boot only; used
+	// by the per-template no-hugepage gate — TIDAL squeezable class).
+	Template    string
 	Network     network.Allocation
 	Vsock       VsockSpec // optional: if UDSPath set, vsock device attached on cold boot
 	MMDS        MMDSSpec  // optional: enable FC MMDS for zero-config restores
@@ -98,6 +103,12 @@ type Driver struct {
 	// was restored from a snapshot carrying the hugepages marker. Snapshots
 	// taken from this VM inherit the marker (see markSnapshotHugepages).
 	hugepages bool
+
+	// Shared FC API-socket HTTP clients (lazy; see warmfork.go helpers).
+	// Per-op client construction leaked one idle keep-alive conn per call.
+	hcOnce sync.Once
+	hc     *http.Client
+	hcLong *http.Client
 }
 
 // PID returns the underlying firecracker process ID, or 0 if not running.
@@ -278,7 +289,7 @@ func (d *Driver) Start(ctx context.Context) error {
 	// overcommit budget boots fine but EFAULTs later when the snapshot dump
 	// faults in every page (see hugePagesFit). Fall back to 4 KiB pages —
 	// the snapshot then simply carries no hugepages marker.
-	if d.spec.FromSnapDir == "" && hugePagesEnabled() {
+	if d.spec.FromSnapDir == "" && hugePagesEnabled() && !noHugeTemplate(d.spec.Template) {
 		if ok, reason := hugePagesFit(d.spec.MemoryMB); !ok {
 			if d.log != nil {
 				d.log.Warn("hugepages: over hugetlb budget, falling back to 4 KiB pages",
@@ -324,6 +335,7 @@ func (d *Driver) Start(ctx context.Context) error {
 }
 
 func (d *Driver) Stop(ctx context.Context) error {
+	defer d.closeHTTPClients()
 	return d.stopInternal(ctx, false)
 }
 
@@ -338,7 +350,7 @@ func (d *Driver) stopInternal(ctx context.Context, fast bool) error {
 	// Warm-fork driver (raw process, no SDK).
 	if d.proc != nil {
 		if !fast {
-			hc := newUnixHTTP(d.spec.SocketPath)
+			hc := d.hcShort()
 			_ = putJSON(hc, "/actions", map[string]string{"action_type": "SendCtrlAltDel"})
 		}
 		done := make(chan struct{})
@@ -402,7 +414,7 @@ func (d *Driver) stopInternal(ctx context.Context, fast bool) error {
 
 func (d *Driver) Pause(ctx context.Context) error {
 	if d.proc != nil {
-		return patchJSON(newUnixHTTP(d.spec.SocketPath), "/vm", map[string]string{"state": "Paused"})
+		return patchJSON(d.hcShort(), "/vm", map[string]string{"state": "Paused"})
 	}
 	if d.machine == nil {
 		return fmt.Errorf("machine not started")
@@ -412,7 +424,7 @@ func (d *Driver) Pause(ctx context.Context) error {
 
 func (d *Driver) Resume(ctx context.Context) error {
 	if d.proc != nil {
-		return patchJSON(newUnixHTTP(d.spec.SocketPath), "/vm", map[string]string{"state": "Resumed"})
+		return patchJSON(d.hcShort(), "/vm", map[string]string{"state": "Resumed"})
 	}
 	if d.machine == nil {
 		return fmt.Errorf("machine not started")
@@ -425,7 +437,7 @@ func (d *Driver) Resume(ctx context.Context) error {
 // guest reads this via http://169.254.169.254/<key> after AllowMMDS=true.
 // Idempotent — call as many times as needed.
 func (d *Driver) PutMMDS(ctx context.Context, body any) error {
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	return putJSON(hc, "/mmds", body)
 }
 
@@ -440,17 +452,18 @@ func (d *Driver) CreateSnapshot(ctx context.Context, dir string) error {
 	// (see warmfork.go::StartFromSnapNoDrive), so d.machine is nil; we
 	// drive firecracker directly over its unix socket.
 	if d.proc != nil {
-		hc := newUnixHTTP(d.spec.SocketPath)
-		if err := patchJSON(hc, "/vm", map[string]string{"state": "Paused"}); err != nil {
+		// Long client for both pause and snapshot: pausing a busy multi-GB guest
+		// can exceed the default 10s, and a timed-out pause leaves the VM Paused
+		// on the FC side (see PauseAndSnapshot).
+		hcLong := d.hcLongClient()
+		if err := patchJSON(hcLong, "/vm", map[string]string{"state": "Paused"}); err != nil {
 			return fmt.Errorf("pause: %w", err)
 		}
 		defer func() {
-			_ = patchJSON(hc, "/vm", map[string]string{"state": "Resumed"})
+			_ = patchJSON(hcLong, "/vm", map[string]string{"state": "Resumed"})
 		}()
 		// Snapshot can take 10-60s on multi-GB guests (FC writes the full
-		// memory image to disk synchronously). The default 10s client times
-		// out, so use the long-timeout client for the create call.
-		hcLong := newUnixHTTPLong(d.spec.SocketPath)
+		// memory image to disk synchronously).
 		if err := putJSON(hcLong, "/snapshot/create", map[string]any{
 			"snapshot_type": "Full",
 			"snapshot_path": state,
@@ -488,11 +501,14 @@ func (d *Driver) PauseCopyResume(ctx context.Context, src, dst string) error {
 	// firecracker-go-sdk (d.machine == nil), so drive firecracker directly over
 	// its unix socket — mirrors CreateSnapshot/Pause/Resume.
 	if d.proc != nil {
-		hc := newUnixHTTP(d.spec.SocketPath)
-		if err := patchJSON(hc, "/vm", map[string]string{"state": "Paused"}); err != nil {
+		// Long client for pause+resume: pausing a busy multi-GB guest can
+		// exceed 10s, and a timed-out pause leaves the VM Paused on the FC
+		// side while the agent sees failure (the hibernate pause-wedge class).
+		hcLong := d.hcLongClient()
+		if err := patchJSON(hcLong, "/vm", map[string]string{"state": "Paused"}); err != nil {
 			return fmt.Errorf("pause: %w", err)
 		}
-		defer func() { _ = patchJSON(hc, "/vm", map[string]string{"state": "Resumed"}) }()
+		defer func() { _ = patchJSON(hcLong, "/vm", map[string]string{"state": "Resumed"}) }()
 		return copyFileLocal(src, dst)
 	}
 	if d.machine == nil {
@@ -518,17 +534,21 @@ func (d *Driver) PauseForFork(ctx context.Context, dir, rootfsDst, rootfsSrc str
 	// firecracker-go-sdk (d.machine == nil), so drive firecracker directly over
 	// its unix socket — mirrors PauseAndSnapshot.
 	if d.proc != nil {
-		hc := newUnixHTTP(d.spec.SocketPath)
-		if err := patchJSON(hc, "/vm", map[string]string{"state": "Paused"}); err != nil {
+		// Long client for pause+resume — same rationale as CreateSnapshot: a
+		// >10s pause of a busy guest must not trip the short client's deadline
+		// and wedge the VM Paused (Manager.Snapshot now routes through here,
+		// so it needs the same pause-wedge protection).
+		hcLong0 := d.hcLongClient()
+		if err := patchJSON(hcLong0, "/vm", map[string]string{"state": "Paused"}); err != nil {
 			return fmt.Errorf("pause: %w", err)
 		}
-		defer func() { _ = patchJSON(hc, "/vm", map[string]string{"state": "Resumed"}) }()
+		defer func() { _ = patchJSON(hcLong0, "/vm", map[string]string{"state": "Resumed"}) }()
 		// Copy rootfs while VM is paused (no in-flight writes).
 		if err := copyFileLocal(rootfsSrc, rootfsDst); err != nil {
 			return fmt.Errorf("copy rootfs: %w", err)
 		}
 		// Full-memory snapshot can take 10-60s; use the long-timeout client.
-		hcLong := newUnixHTTPLong(d.spec.SocketPath)
+		hcLong := d.hcLongClient()
 		if err := putJSON(hcLong, "/snapshot/create", map[string]any{
 			"snapshot_type": "Full",
 			"snapshot_path": state,
@@ -563,6 +583,76 @@ func (d *Driver) PauseForFork(ctx context.Context, dir, rootfsDst, rootfsSrc str
 	return nil
 }
 
+// PauseForForkWithVolume is PauseForFork plus an EXTRA reflink of a durable
+// data volume, all inside the SAME pause window (TUSK T4.2 warm memory-fork).
+//
+// Why the extra copy must be in the same pause as the memory snapshot: a warm
+// branch restores the child from this vm.mem — Postgres resumes as a LIVE
+// continuation with its shared_buffers already hot. Those in-memory buffers
+// (and the WAL/pg_control state) must correspond to the EXACT on-disk bytes the
+// child will attach as its data volume. If the volume were reflinked at a
+// different instant than the memory dump, the restored postgres would see a
+// disk that disagrees with its own buffers/pg_control → corruption on resume.
+// Capturing rootfs, the data volume, and memory while the guest is frozen (no
+// in-flight virtio writes) makes all three a single point-in-time image.
+//
+// Order inside the pause: reflink rootfs → reflink data volume → Full memory
+// snapshot. Resume is unconditional (defer), same as PauseForFork.
+func (d *Driver) PauseForForkWithVolume(ctx context.Context, dir, rootfsDst, rootfsSrc, volDst, volSrc string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	mem := filepath.Join(dir, "vm.mem")
+	state := filepath.Join(dir, "vm.state")
+
+	if d.proc != nil {
+		hcLong0 := d.hcLongClient()
+		if err := patchJSON(hcLong0, "/vm", map[string]string{"state": "Paused"}); err != nil {
+			return fmt.Errorf("pause: %w", err)
+		}
+		defer func() { _ = patchJSON(hcLong0, "/vm", map[string]string{"state": "Resumed"}) }()
+		if err := copyFileLocal(rootfsSrc, rootfsDst); err != nil {
+			return fmt.Errorf("copy rootfs: %w", err)
+		}
+		if err := copyFileLocal(volSrc, volDst); err != nil {
+			return fmt.Errorf("copy data volume: %w", err)
+		}
+		hcLong := d.hcLongClient()
+		if err := putJSON(hcLong, "/snapshot/create", map[string]any{
+			"snapshot_type": "Full",
+			"snapshot_path": state,
+			"mem_file_path": mem,
+		}); err != nil {
+			return fmt.Errorf("create snapshot: %w", err)
+		}
+		if d.hugepages {
+			d.markSnapshotHugepages(dir)
+		}
+		return nil
+	}
+
+	if d.machine == nil {
+		return fmt.Errorf("machine not started")
+	}
+	if err := d.machine.PauseVM(ctx); err != nil {
+		return fmt.Errorf("pause: %w", err)
+	}
+	defer func() { _ = d.machine.ResumeVM(ctx) }()
+	if err := copyFileLocal(rootfsSrc, rootfsDst); err != nil {
+		return fmt.Errorf("copy rootfs: %w", err)
+	}
+	if err := copyFileLocal(volSrc, volDst); err != nil {
+		return fmt.Errorf("copy data volume: %w", err)
+	}
+	if err := d.machine.CreateSnapshot(ctx, mem, state); err != nil {
+		return fmt.Errorf("create snapshot: %w", err)
+	}
+	if d.hugepages {
+		d.markSnapshotHugepages(dir)
+	}
+	return nil
+}
+
 // PauseAndSnapshot pauses the VM, snapshots into dir, and leaves it paused.
 // Caller is expected to call Stop() next (used for hibernation).
 func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
@@ -573,13 +663,18 @@ func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
 	state := filepath.Join(dir, "vm.state")
 
 	if d.proc != nil {
-		hc := newUnixHTTP(d.spec.SocketPath)
-		if err := patchJSON(hc, "/vm", map[string]string{"state": "Paused"}); err != nil {
+		// Pausing a busy multi-GB guest can itself take >10s (FC must quiesce
+		// every vCPU and flush device state before acking). The default 10s
+		// client timed out the pause on a dirty 2nd-hibernate guest, which —
+		// because the FC-side pause kept running — left the VM Paused while the
+		// agent saw a failure and wedged it. Use the long client for BOTH the
+		// pause and the snapshot so neither leg trips a too-short client deadline.
+		hcLong := d.hcLongClient()
+		if err := patchJSON(hcLong, "/vm", map[string]string{"state": "Paused"}); err != nil {
 			return fmt.Errorf("pause: %w", err)
 		}
 		// Snapshot can take 10-60s on multi-GB guests (FC writes the full
-		// memory image to disk synchronously). Use the long-timeout client.
-		hcLong := newUnixHTTPLong(d.spec.SocketPath)
+		// memory image to disk synchronously).
 		if err := putJSON(hcLong, "/snapshot/create", map[string]any{
 			"snapshot_type": "Full",
 			"snapshot_path": state,
@@ -608,6 +703,15 @@ func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
 	return nil
 }
 
+// ficloneIoctl is FICLONE from linux/fs.h: _IOW(0x94, 9, int).
+const ficloneIoctl = 0x40049409
+
+// copyFileLocal copies src to dst, reflink-first: on XFS/btrfs (the prod data
+// dir) FICLONE is a metadata-only CoW clone regardless of file size, which
+// keeps the VM-paused windows in PauseForFork/PauseCopyResume sub-millisecond
+// instead of a multi-second byte copy. Falls back to a plain copy on
+// filesystems without reflink (and on block-device sources, where FICLONE
+// returns ENOTTY).
 func copyFileLocal(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -617,6 +721,9 @@ func copyFileLocal(src, dst string) error {
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, out.Fd(), uintptr(ficloneIoctl), in.Fd()); errno == 0 {
+		return out.Close()
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()

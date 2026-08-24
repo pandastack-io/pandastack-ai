@@ -2,12 +2,25 @@
 // Package network manages per-sandbox TAP devices and /30 IP allocations.
 //
 // Each sandbox gets:
-//   - tap<short-id> on the Lima VM
-//   - a /30 carved from the configured CIDR (e.g. 172.20.0.0/16 → /30s)
+//   - tap<short-id> on the Lima VM (legacy path) or a netns+veth (NATID path)
+//   - a /30 carved from the configured CIDR (legacy 172.20.0.0/16) or the NATID
+//     base (10.200.0.0/16); the /30 SLOT INDEX is owned by the local slotstore
 //   - guest MAC derived from the IP
-//   - vsock CID (monotonic counter, persisted in SQLite)
+//   - vsock CID (monotonic counter, persisted in the main store)
 //
-// Allocation must be persisted so we can recover after an agent crash.
+// SLOT OWNERSHIP lives in ONE place: the local slotstore (internal/slotstore),
+// a per-host SQLite ledger with one row per /30 index. This replaced the old
+// in-memory freeIdx + monotonic-high-water scheme that was patched three times
+// (v0.3.11 leak, v0.3.12 NATID-leak, v0.3.13 concurrent double-free) because
+// ownership lived in two hand-synced structures. Claim = atomic lowest-free
+// UPDATE; release = RowsAffected-gated UPDATE. Both the legacy Allocate and the
+// NATID mint paths claim from the same slotstore, so a slot freed by one path is
+// reused by the other (one index space; different base CIDRs, but the index is
+// what's allocated).
+//
+// The allocation PAYLOAD (TAP name, IPs, MAC) is still persisted in the main
+// store so teardown/Lookup can find the kernel objects to destroy. But the slot
+// INDEX is no longer derived from that payload — slotstore owns it.
 package network
 
 import (
@@ -21,6 +34,7 @@ import (
 	"sync"
 
 	"github.com/pandastack/agent/internal/netns"
+	"github.com/pandastack/agent/internal/slotstore"
 	"github.com/pandastack/agent/internal/store"
 )
 
@@ -39,19 +53,28 @@ type Allocation struct {
 	MAC       string `json:"mac"`
 	VsockCID  uint32 `json:"vsock_cid"`
 	Subnet    string `json:"subnet"`
+
+	// Idx is the /30 slot index this allocation occupies, persisted on the
+	// payload purely for observability/diagnostics. The AUTHORITATIVE owner of
+	// the index is the slotstore, not this field — Release frees the slot by
+	// sandbox_id in the slotstore, never by parsing this back out.
+	Idx uint32 `json:"idx"`
 }
 
 type Pool struct {
 	mu      sync.Mutex
 	store   *store.Store
+	slots   *slotstore.Store
 	base    *net.IPNet
-	next    uint32 // index of next /30 (0..N)
-	nextCID uint32
+	nextCID uint32 // vsock CID high-water (separate uint32 space, never reclaimed)
 
 	// natidFree is a per-template-identity free list of pre-built NATID
 	// slots. The key is identityKey(tapHostIP, guestIP, mac). Pre-building
 	// netns + veth + tap + iptables ahead of POST /sandboxes lets
-	// AllocateNATID return in O(1) (~5ms) instead of ~500ms.
+	// AllocateNATID return in O(1) (~5ms) instead of ~500ms. This is a CACHE of
+	// wired-up kernel objects, NOT slot ownership — each parked slot already
+	// holds its slotstore claim (under a "prebuilt:<idx>" sentinel) so a crash
+	// can't leak it.
 	natidFree map[string][]NATIDAlloc
 	// natidRefill, if set, is invoked (in a goroutine) after each Claim so
 	// the manager can top the pool back up.
@@ -60,7 +83,10 @@ type Pool struct {
 
 const minVsockCID = 3 // 0,1,2 are reserved by virtio-vsock spec
 
-func NewPool(cidr string, st *store.Store) (*Pool, error) {
+// NewPool builds the allocator. cidr is the legacy /30 base; slots is the local
+// slotstore that owns slot indices. The slotstore is seeded to the pool
+// capacity (number of /30s in the /16) so claims always find rows.
+func NewPool(cidr string, st *store.Store, slots *slotstore.Store) (*Pool, error) {
 	_, n, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return nil, fmt.Errorf("parse cidr: %w", err)
@@ -69,73 +95,116 @@ func NewPool(cidr string, st *store.Store) (*Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Pool{store: st, base: n, next: used.NextSubnet, nextCID: used.NextVsockCID,
+	p := &Pool{store: st, slots: slots, base: n, nextCID: used.NextVsockCID,
 		natidFree: map[string][]NATIDAlloc{}}
 	if p.nextCID < minVsockCID {
 		p.nextCID = minVsockCID
 	}
+	// Seed the slot ledger to capacity. The legacy and NATID bases are both /16
+	// (16,384 /30s), so one capacity covers both index spaces.
+	if err := slots.Seed(context.Background(), poolCapacity(n)); err != nil {
+		return nil, fmt.Errorf("seed slots: %w", err)
+	}
 	return p, nil
 }
 
-func (p *Pool) Allocate(ctx context.Context, sandboxID string) (Allocation, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// Reconcile frees slot rows whose owner is not among the live sandboxes the
+// manager recovered. Call once at startup AFTER Recover() has determined the
+// live set. This reclaims slots stranded by a crash mid-allocate (a slot claimed
+// before the sandbox row existed) — which the sandbox-row-walking Recover() path
+// cannot see. Returns the number of slots reclaimed.
+func (p *Pool) Reconcile(ctx context.Context, liveSandboxIDs []string) (int, error) {
+	return p.slots.Reconcile(ctx, liveSandboxIDs)
+}
 
-	idx := p.next
-	subnet, host, guest, err := carve(p.base, idx)
+// SlotStats exposes pool occupancy (for metrics + soak assertions).
+func (p *Pool) SlotStats(ctx context.Context) (slotstore.Stats, error) {
+	return p.slots.Stats(ctx)
+}
+
+// poolCapacity returns the number of /30 subnets in base.
+func poolCapacity(base *net.IPNet) uint32 {
+	ones, _ := base.Mask.Size()
+	total := uint32(1) << (32 - ones)
+	return total / 4
+}
+
+func (p *Pool) Allocate(ctx context.Context, sandboxID string) (Allocation, error) {
+	// Claim an index from the authoritative slot ledger. Atomic + lowest-free;
+	// returns slotstore.ErrPoolExhausted when full (no silent dup, no leak).
+	idx, err := p.slots.Claim(ctx, sandboxID, "legacy")
 	if err != nil {
 		return Allocation{}, err
 	}
-	cid := p.nextCID
-	tap := tapName(sandboxID)
-	mac := macFromIP(guest)
 
+	p.mu.Lock()
+	cid := p.nextCID
+	p.nextCID = cid + 1
+	p.mu.Unlock()
+
+	subnet, host, guest, err := carve(p.base, idx)
+	if err != nil {
+		_, _ = p.slots.Release(ctx, sandboxID)
+		return Allocation{}, err
+	}
 	alloc := Allocation{
 		SandboxID: sandboxID,
-		TAP:       tap,
+		TAP:       tapName(sandboxID),
 		HostIP:    host.String(),
 		GuestIP:   guest.String(),
-		MAC:       mac,
+		MAC:       macFromIP(guest),
 		VsockCID:  cid,
 		Subnet:    subnet.String(),
+		Idx:       idx,
 	}
 
 	if err := setupTAP(alloc); err != nil {
+		_, _ = p.slots.Release(ctx, sandboxID)
 		return Allocation{}, fmt.Errorf("setup tap: %w", err)
 	}
-
 	if err := p.store.SaveAllocation(ctx, alloc); err != nil {
 		_ = teardownTAP(alloc.TAP)
+		_, _ = p.slots.Release(ctx, sandboxID)
 		return Allocation{}, err
 	}
-
-	p.next = idx + 1
-	p.nextCID = cid + 1
-	if err := p.store.SaveNetworkState(ctx, store.NetworkState{NextSubnet: p.next, NextVsockCID: p.nextCID}); err != nil {
-		return Allocation{}, err
+	// Persist the vsock CID high-water (separate uint32 space; not reclaimed).
+	// Update ONLY the CID column — next_subnet is vestigial (slotstore owns slot
+	// indices) and must not be clobbered.
+	if err := p.store.SaveVsockCID(ctx, cid+1); err != nil {
+		// Non-fatal: a lost CID just means the next boot may reissue it; vsock
+		// CIDs are per-sandbox and short-lived, and the space is ~4 billion.
+		_ = err
 	}
 	return alloc, nil
 }
 
 func (p *Pool) Release(ctx context.Context, sandboxID string) error {
-	p.mu.Lock()
-
-	alloc, err := p.store.GetAllocation(ctx, sandboxID)
-	if err != nil {
-		p.mu.Unlock()
-		return err
+	// Read the allocation payload so we know which kernel objects to tear down.
+	// Missing row = already released; still attempt the slot release (idempotent).
+	payload, err := p.store.GetAllocationJSON(ctx, sandboxID)
+	var alloc Allocation
+	if err == nil {
+		_ = json.Unmarshal([]byte(payload), &alloc)
 	}
-	// Delete the DB record while holding the lock, then release before the
-	// slow kernel-level teardown. netnsDestroy can block for seconds if the
-	// guest process is still alive (conntrack cleanup) — holding the mutex
-	// during that would starve every concurrent Release/AllocateNATID call.
-	storeErr := p.store.DeleteAllocation(ctx, sandboxID)
-	p.mu.Unlock()
 
-	if strings.HasPrefix(alloc.TAP, "ns-") {
-		_ = netnsDestroy(alloc.TAP, alloc.Subnet)
-	} else {
-		_ = teardownTAP(alloc.TAP)
+	// Kernel teardown FIRST, while the slot is still owned. Mirrors the
+	// destroy-first/free-last ordering in ReleaseNATID: freeing the slot before
+	// destroying its netns lets a SIGKILL in between leave a reusable index whose
+	// dead netns still poisons the next adopter. Destroy is idempotent, so a
+	// re-run after a crash is harmless.
+	if alloc.TAP != "" {
+		if strings.HasPrefix(alloc.TAP, "ns-") {
+			_ = netnsDestroy(alloc.TAP, alloc.Subnet)
+		} else {
+			_ = teardownTAP(alloc.TAP)
+		}
+	}
+	// Remove the payload row next.
+	storeErr := p.store.DeleteAllocation(ctx, sandboxID)
+	// Free the slot LAST — the ownership hand-off. RowsAffected gate lives inside
+	// slotstore, so concurrent same-id releases can't double-free.
+	if _, serr := p.slots.Release(ctx, sandboxID); serr != nil {
+		return serr
 	}
 	return storeErr
 }

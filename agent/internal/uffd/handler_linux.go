@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -55,6 +56,12 @@ type Handler struct {
 	faults   atomic.Int64
 	copied   atomic.Int64
 	closeOne sync.Once
+
+	rstats retryStats
+	// lastProgressNanos is the unix-nanos of the most recent forward progress
+	// (a fault completed, or a fault is actively retrying). The watchdog reads
+	// it via StalledFor to tell "slow but trying" from a wedged handler.
+	lastProgressNanos atomic.Int64
 }
 
 // New returns a Handler that will listen on sock and resolve faults via r.
@@ -185,6 +192,10 @@ func (h *Handler) faultLoop(ctx context.Context, mappings []GuestRegionUffdMappi
 		}
 	}
 
+	// Seed the watchdog clock so a freshly-live, not-yet-faulted handler is
+	// never seen as stalled before its first fault.
+	h.lastProgressNanos.Store(nowNanos())
+
 	jobs := make(chan uint64, 1024)
 	var wg sync.WaitGroup
 	var fatal atomic.Value // stores error
@@ -271,9 +282,18 @@ func (h *Handler) servePage(ctx context.Context, mappings []GuestRegionUffdMappi
 	pageStart := addr &^ (ps - 1)
 	page := buf[:ps]
 	fileOff := m.fileOffset(pageStart)
-	if err := h.resolver.ResolvePage(ctx, fileOff, page); err != nil {
+	// A transient resolve failure (e.g. the GCS memory backend blips) must not
+	// kill the VM: retry with backoff for up to the fault-retry budget, only
+	// escalating to a fatal handler error on a sustained outage. Progress is
+	// stamped so the watchdog sees an actively-retrying fault as alive.
+	err := resolveWithRetry(ctx, faultRetryBudget,
+		func() error { return h.resolver.ResolvePage(ctx, fileOff, page) },
+		func() { h.rstats.retries.Add(1) },
+		&h.lastProgressNanos)
+	if err != nil {
 		return fmt.Errorf("uffd: resolve off %d: %w", fileOff, err)
 	}
+	h.lastProgressNanos.Store(nowNanos())
 	if err := uffdCopy(h.uffd, pageStart, page); err != nil {
 		// EEXIST: the page was already populated (e.g. a racing fault or a
 		// prefault). Benign — the guest will see the bytes either way.
@@ -285,6 +305,26 @@ func (h *Handler) servePage(ctx context.Context, mappings []GuestRegionUffdMappi
 	h.copied.Add(1)
 	return nil
 }
+
+// FaultRetries reports the total number of resolve-retry attempts the handler
+// has made across all faults — a nonzero value means the memory backend has
+// been blipping. Published to metrics at teardown.
+func (h *Handler) FaultRetries() int64 { return h.rstats.retries.Load() }
+
+// StalledFor reports whether the handler has made no forward progress (no fault
+// completed and none actively retrying) for longer than d. This is the memory
+// analog of the streaming-disk F5 watchdog signal: a wedged handler that has
+// blown its fault-retry budget and is failing looks stalled here so a monitor
+// can fail the sandbox loudly instead of leaving a silently-hung guest.
+func (h *Handler) StalledFor(d time.Duration) bool {
+	last := h.lastProgressNanos.Load()
+	if last == 0 {
+		return false // not started yet
+	}
+	return time.Since(time.Unix(0, last)) > d
+}
+
+func nowNanos() int64 { return time.Now().UnixNano() }
 
 // findMapping returns the region containing host virtual address addr.
 func findMapping(mappings []GuestRegionUffdMapping, addr uint64) (GuestRegionUffdMapping, bool) {

@@ -6,6 +6,7 @@ package uffd
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/pandastack/agent/internal/memstream"
 )
@@ -37,3 +38,9 @@ func (h *Handler) Close() error { return nil }
 
 // Stats returns zeroed counters off Linux.
 func (h *Handler) Stats() Stats { return Stats{} }
+
+// FaultRetries returns 0 off Linux.
+func (h *Handler) FaultRetries() int64 { return 0 }
+
+// StalledFor always reports false off Linux (no handler runs).
+func (h *Handler) StalledFor(_ time.Duration) bool { return false }
