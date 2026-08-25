@@ -7,6 +7,7 @@ const PROTECTED_PREFIXES = [
   "/sandboxes",
   "/databases",
   "/volumes",
+  "/snapshots",
   "/templates",
   "/stats",
   "/observability",

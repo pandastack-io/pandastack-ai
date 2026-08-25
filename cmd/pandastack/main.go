@@ -175,7 +175,8 @@ GLOBAL FLAGS
 
 ENV
   PANDASTACK_API       base URL (default: https://api.pandastack.ai)
-  PANDASTACK_TOKEN     bearer token (overrides saved config)
+  PANDASTACK_API_KEY   bearer token (overrides saved config)
+  PANDASTACK_TOKEN     deprecated alias for PANDASTACK_API_KEY
   PANDASTACK_SUPABASE_URL / PANDASTACK_SUPABASE_ANON_KEY for auth login`)
 }
 
@@ -203,7 +204,7 @@ func authLogin() error {
 	supabaseURL, supabaseKey := supabaseConfig()
 	if supabaseURL == "" || supabaseKey == "" {
 		fmt.Println("Supabase auth is not configured.")
-		fmt.Println("Get a token from https://app.pandastack.ai/settings/tokens and run: export PANDASTACK_TOKEN=cfat_...")
+		fmt.Println("Create a token in the dashboard under Settings -> API Tokens, then run: export PANDASTACK_API_KEY=pds_...")
 		return nil
 	}
 	email, err := promptLine("Email: ")
@@ -1053,6 +1054,12 @@ func apiBase() string {
 }
 
 func authToken() string {
+	// PANDASTACK_API_KEY is the documented name (every docs page and the README
+	// use it). PANDASTACK_TOKEN is the older name this CLI originally shipped
+	// with and is still honoured so existing shells and CI jobs keep working.
+	if tok := os.Getenv("PANDASTACK_API_KEY"); tok != "" {
+		return tok
+	}
 	if tok := os.Getenv("PANDASTACK_TOKEN"); tok != "" {
 		return tok
 	}
@@ -1115,7 +1122,7 @@ func apiDoRaw(method, path string, rd io.Reader, contentType, token string, time
 
 func httpError(status int, method, body string) error {
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return fmt.Errorf("Not logged in. Run `pandastack auth login` or set PANDASTACK_TOKEN")
+		return fmt.Errorf("Not logged in. Run `pandastack auth login` or set PANDASTACK_API_KEY")
 	}
 	if body == "" {
 		return fmt.Errorf("HTTP %d %s", status, method)

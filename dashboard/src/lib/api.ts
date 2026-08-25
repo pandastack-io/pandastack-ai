@@ -41,6 +41,15 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+export type SnapshotInfo = {
+  id: string;
+  workspace?: string;
+  sandbox_id: string;
+  template?: string;
+  size_bytes?: number;
+  created_at: string;
+};
+
 export type Sandbox = {
   id: string;
   template: string;
@@ -367,6 +376,12 @@ export const api = {
     call<void>(`/sandboxes/${id}/pause`, { method: "POST" }),
   resume: (id: string) =>
     call<void>(`/sandboxes/${id}/resume`, { method: "POST" }),
+  snapshots: async () => {
+    const data = await call<{ snapshots: SnapshotInfo[] } | SnapshotInfo[]>("/snapshots");
+    return Array.isArray(data) ? data : data.snapshots ?? [];
+  },
+  deleteSnapshot: (id: string) =>
+    call<void>(`/snapshots/${encodeURIComponent(id)}`, { method: "DELETE" }),
   snapshot: (id: string) =>
     call<{ id: string; sandbox_id: string; created_at: string }>(
       `/sandboxes/${id}/snapshots`,

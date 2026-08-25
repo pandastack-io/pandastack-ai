@@ -6,7 +6,7 @@ Stdlib-only Go CLI for PandaStack microVM sandboxes.
 
 ```sh
 export PANDASTACK_API=https://api.pandastack.ai
-export PANDASTACK_TOKEN=pds_...
+export PANDASTACK_API_KEY=pds_...   # PANDASTACK_TOKEN is still accepted
 ```
 
 Or log in once and let the CLI save `~/.config/pandastack/config.json`:

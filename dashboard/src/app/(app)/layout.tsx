@@ -37,6 +37,7 @@ import {
   MessageCircle,
   Globe,
   ExternalLink,
+  Camera,
 } from "lucide-react";
 
 const NAV = [
@@ -44,6 +45,7 @@ const NAV = [
   { href: "/databases",       label: "Databases",    icon: Database,   shortcut: "" },
   { href: "/templates",       label: "Templates",    icon: LayoutGrid, shortcut: "G T" },
   { href: "/volumes",         label: "Volumes",      icon: HardDrive,  shortcut: "" },
+  { href: "/snapshots",       label: "Snapshots",    icon: Camera,     shortcut: "" },
   { href: "/audit",           label: "Audit Log",    icon: Bell,       shortcut: "" },
   { href: "/stats",           label: "Performance",  icon: Activity,   shortcut: "" },
   { href: "/observability",   label: "Observability",icon: LineChart,  shortcut: "" },

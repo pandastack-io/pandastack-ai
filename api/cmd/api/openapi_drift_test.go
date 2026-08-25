@@ -122,13 +122,52 @@ func TestOpenAPIHasNoPhantomRoutes(t *testing.T) {
 	ops := specOperations(t)
 
 	// Routes served by the blanket /v1/ agent proxy (mux.Handle("/v1/", v1Handler))
-	// rather than HandleFunc — real surface the source harvest cannot see.
-	proxied := []string{"/v1/sandboxes", "/v1/volumes", "/v1/me", "/v1/databases/{id}/proxy"}
+	// rather than HandleFunc — real surface the source harvest cannot see here.
+	//
+	// This exemption used to be a bare prefix match, which made it a blind spot:
+	// ANY documented path under /v1/sandboxes was assumed to exist, so a spec
+	// entry for an agent handler that had been deleted (bake-image) sailed
+	// through and 404'd for real callers. When the agent source is available we
+	// now check those paths against the agent's own route literals instead of
+	// assuming. If it is not (the api module built standalone), fall back to the
+	// old prefix behaviour rather than failing spuriously.
+	// Prefixes the AGENT serves. These we can and do verify against the agent's
+	// own route literals.
+	agentProxied := []string{"/v1/sandboxes", "/v1/volumes"}
+	// Prefixes the API itself serves in a form the source harvest cannot see
+	// (mux.Handle rather than HandleFunc, or a trailing-slash ANY-method
+	// wildcard). These stay plain prefix exemptions.
+	apiOpaque := []string{"/v1/me", "/v1/databases/{id}/proxy"}
+
+	agentRoutes, haveAgentSrc := agentRouteLiterals()
+	// covered reports whether the agent registers something that actually serves
+	// this path: an exact match, or a trailing-slash route acting as a wildcard.
+	covered := func(agentPath string) bool {
+		if agentRoutes[agentPath] {
+			return true
+		}
+		for r := range agentRoutes {
+			if strings.HasSuffix(r, "/") && strings.HasPrefix(agentPath, r) {
+				return true
+			}
+		}
+		return false
+	}
 	isProxied := func(path string) bool {
-		for _, p := range proxied {
+		for _, p := range apiOpaque {
 			if strings.HasPrefix(path, p) {
 				return true
 			}
+		}
+		for _, p := range agentProxied {
+			if !strings.HasPrefix(path, p) {
+				continue
+			}
+			if !haveAgentSrc {
+				return true // agent tree absent: keep the permissive behaviour
+			}
+			// The api strips /v1 before proxying: /v1/sandboxes/x -> /sandboxes/x.
+			return covered(strings.TrimPrefix(path, "/v1"))
 		}
 		return false
 	}
@@ -150,4 +189,35 @@ func TestOpenAPIHasNoPhantomRoutes(t *testing.T) {
 		t.Errorf("operations documented in openapi.json but not registered in code (%d):\n  %s",
 			len(phantom), strings.Join(phantom, "\n  "))
 	}
+}
+
+// agentRouteLiterals harvests the agent's registered route paths from its
+// source, so the proxy exemption above can be checked rather than assumed.
+// ok=false when the agent tree is not present next to the api module, in which
+// case the caller keeps the permissive behaviour.
+func agentRouteLiterals() (map[string]bool, bool) {
+	dir := filepath.Join("..", "..", "..", "agent", "internal", "api")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	re := regexp.MustCompile(`HandleFunc\("(?:GET |POST |PUT |DELETE |PATCH |HEAD |OPTIONS )?(/[A-Za-z0-9/_{}.-]*)`)
+	out := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, m := range re.FindAllStringSubmatch(string(b), -1) {
+			out[strings.TrimSuffix(m[1], "/")] = true
+			out[m[1]] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }

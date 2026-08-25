@@ -77,7 +77,7 @@ function welcomeHtml(name: string): string {
 
               <p style="margin:0;font-size:13px;line-height:1.7;color:#737373;">
                 Questions? Reply to this email or join us on 
-                <a href="https://discord.gg/pandastack" style="color:#a3e635;text-decoration:none;">Discord</a>.
+                <a href="https://discord.gg/GzxpktHpHD" style="color:#a3e635;text-decoration:none;">Discord</a>.
                 We read every message.
               </p>
             </td>

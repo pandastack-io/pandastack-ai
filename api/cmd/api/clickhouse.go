@@ -175,22 +175,27 @@ func truncateUA(s string, n int) string {
 	return s[:n]
 }
 
-// loadEmbeddedSchema returns the contents of internal/clickhouse/schema.sql.
-// We read it from disk relative to the binary so a single binary works from
-// any CWD; if not found at the expected paths, we return an error and skip DDL.
+// loadEmbeddedSchema returns the ClickHouse DDL to bootstrap.
+//
+// The DDL is COMPILED IN (internal/clickhouse.SchemaDDL, //go:embed schema.sql),
+// not read from disk. An earlier version searched CWD-relative paths, which
+// meant the lookup failed in every real deployment — the api ships as a
+// distroless image containing only the binary, so api/internal/clickhouse/
+// does not exist next to it — and initClickHouse treats a load failure as a
+// warning and continues. The result was that nothing ever created the
+// http_requests / boot_events / sandbox_metrics tables, every insert failed
+// with UNKNOWN_TABLE, and the dashboard's charts were silently empty forever.
+//
+// /etc/pandastack/clickhouse-schema.sql is kept as an operator override for
+// deployments that need to pin their own DDL.
 func loadEmbeddedSchema() (string, error) {
-	candidates := []string{
-		"/etc/pandastack/clickhouse-schema.sql",
-		"api/internal/clickhouse/schema.sql",
-		"internal/clickhouse/schema.sql",
+	if b, err := os.ReadFile("/etc/pandastack/clickhouse-schema.sql"); err == nil {
+		return string(b), nil
 	}
-	for _, p := range candidates {
-		b, err := os.ReadFile(p)
-		if err == nil {
-			return string(b), nil
-		}
+	if s := strings.TrimSpace(clickhouse.SchemaDDL); s != "" {
+		return clickhouse.SchemaDDL, nil
 	}
-	return "", errors.New("schema.sql not found in any standard location")
+	return "", errors.New("embedded clickhouse schema is empty")
 }
 
 // ---------------- /v1/metrics/* query endpoints ----------------

@@ -75,11 +75,9 @@
           },
           "size": {
             "default": "1g",
-            "description": "RAM tier. Create-time only — resizing later means clone with a new size.",
+            "description": "Database size. This build ships a single managed-Postgres template, so 1g is the only value.",
             "enum": [
-              "1g",
-              "4g",
-              "16g"
+              "1g"
             ],
             "type": "string"
           }
@@ -155,11 +153,9 @@
             "type": "string"
           },
           "size": {
-            "description": "RAM tier, derived from the template.",
+            "description": "Database size. This build ships a single managed-Postgres template, so 1g is the only value.",
             "enum": [
-              "1g",
-              "4g",
-              "16g"
+              "1g"
             ],
             "type": "string"
           },
@@ -1275,7 +1271,7 @@
                 }
               }
             },
-            "description": "Invalid size (valid: 1g, 4g, 16g)."
+            "description": "Invalid size (valid: 1g)."
           },
           "401": {
             "content": {
@@ -2811,16 +2807,6 @@
             },
             "description": "JWT auth required"
           },
-          "402": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Org ownership limit reached for the caller's plan"
-          },
           "403": {
             "content": {
               "application/json": {
@@ -3175,16 +3161,6 @@
             },
             "description": "JWT auth required"
           },
-          "402": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Seat limit reached for the org's plan"
-          },
           "403": {
             "content": {
               "application/json": {
@@ -3521,95 +3497,6 @@
           }
         },
         "summary": "Get a sandbox (does not wake a hibernated sandbox)",
-        "tags": [
-          "Sandboxes"
-        ]
-      }
-    },
-    "/v1/sandboxes/{id}/bake-image": {
-      "post": {
-        "operationId": "bakeImage",
-        "parameters": [
-          {
-            "description": "Sandbox UUID",
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "properties": {
-                  "image_name": {
-                    "description": "Name for the baked template image (e.g. app-<app8>-<dep8>)",
-                    "type": "string"
-                  },
-                  "start_unit": {
-                    "description": "systemd unit file contents baked in to start the app on boot",
-                    "type": "string"
-                  },
-                  "workspace": {
-                    "description": "Owning workspace stamped into the image metadata",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "image_name"
-                ],
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "image": {
-                      "description": "Baked image name",
-                      "type": "string"
-                    },
-                    "status": {
-                      "const": "baked",
-                      "type": "string"
-                    }
-                  },
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Image baked"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Malformed body"
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Bake failed"
-          }
-        },
-        "summary": "Capture the running sandbox's rootfs as a custom template image (rootfs.ext4 + meta.json), optionally baking in a systemd start unit. No memory snapshot — booting the image is an ordinary cold-boot create",
         "tags": [
           "Sandboxes"
         ]
