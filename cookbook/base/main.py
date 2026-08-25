@@ -1,8 +1,8 @@
-"""base template — the universal apps runtime.
+"""base template — the universal language runtime.
 
 `base` ships Node 22, Python 3.12, Go, and Bun via mise. It's the default for
-apps and general-purpose workloads. This example verifies the runtimes are on
-PATH and runs a tiny program in each that's installed.
+general-purpose workloads. This example verifies the runtimes are on PATH and
+runs a tiny program in each that's installed.
 
 EXPECTED: base smoke OK
 """

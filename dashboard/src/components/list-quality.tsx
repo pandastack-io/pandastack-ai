@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 "use client";
 
-import { ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, MoreHorizontal, RefreshCw, Search, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Badge, Btn, Card, Input, SkeletonRow, Table } from "@/components/ui";
+import { useSeededList } from "@/lib/list-cache";
 
 export type SortDir = "asc" | "desc";
 export type BadgeTone = "default" | "success" | "warning" | "error" | "info" | "violet";
@@ -17,6 +18,67 @@ export function useDebouncedValue<T>(value: T, delay = 180) {
     return () => window.clearTimeout(id);
   }, [value, delay]);
   return debounced;
+}
+
+// useAsyncList encapsulates the fetch-list lifecycle every dashboard list page
+// hand-wired: items + loading + error state, an initial fetch on mount, a
+// refresh() that re-fetches (clearing error, surfacing failures via the optional
+// onError toast hook), and visibility-gated polling. Returns the pieces a page
+// needs (incl. setItems for optimistic local edits). `fetcher` is read from a
+// ref so callers don't need to memoize it.
+export function useAsyncList<T>(
+  fetcher: () => Promise<T[] | null | undefined>,
+  opts: { pollMs?: number; onError?: (message: string) => void; cacheKey?: string } = {},
+) {
+  // cacheKey opts this list into stale-while-revalidate: on re-navigation it
+  // paints the last-known rows instantly (no skeleton) and revalidates below.
+  const { items, setItems, loading, setLoading, commit } = useSeededList<T>(opts.cacheKey);
+  const [error, setError] = useState<string | null>(null);
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+  const onErrorRef = useRef(opts.onError);
+  onErrorRef.current = opts.onError;
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      commit((await fetcherRef.current()) ?? []);
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      setError(m);
+      onErrorRef.current?.(m);
+    } finally {
+      setLoading(false);
+    }
+  }, [commit, setLoading]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+  usePolling(() => void refresh(), opts.pollMs ?? 0);
+
+  return { items, setItems, loading, error, refresh } as const;
+}
+
+// usePolling runs `fn` every `ms`, but ONLY while the tab is visible — a hidden
+// background tab stops polling and resumes (with an immediate refresh) on
+// re-focus. Replaces hand-rolled setInterval(refresh, …) across the list pages,
+// which kept hammering the API even when no one was looking. `fn` is read from a
+// ref so callers don't need to memoize it.
+export function usePolling(fn: () => void, ms: number) {
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const tick = () => { if (document.visibilityState === "visible") fnRef.current(); };
+    const start = () => { if (timer == null) timer = setInterval(tick, ms); };
+    const stop = () => { if (timer != null) { clearInterval(timer); timer = null; } };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") { fnRef.current(); start(); }
+      else stop();
+    };
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { stop(); document.removeEventListener("visibilitychange", onVisibility); };
+  }, [ms]);
 }
 
 export function relativeTime(value?: string | number | Date | null) {
@@ -50,14 +112,49 @@ export function statusTone(status?: string | number | null): BadgeTone {
   const value = String(status ?? "").toLowerCase();
   if (["running", "active", "done", "success", "200", "201", "204", "owner"].includes(value)) return "success";
   if (["failed", "error", "deleted", "revoked", "canceled"].includes(value) || value.startsWith("5")) return "error";
-  if (["creating", "queued", "pending", "paused", "stopping", "past_due"].includes(value) || value.startsWith("4")) return "warning";
+  // Transient lifecycle states: treat as in-progress (amber), not stuck.
+  // "hibernating" runs while the snapshot bakes; "waking" while a request
+  // restores/cold-boots the sandbox or database.
+  if (["creating", "queued", "pending", "paused", "stopping", "hibernating", "waking"].includes(value) || value.startsWith("4")) return "warning";
   if (["admin", "trialing", "info"].includes(value) || value.startsWith("3")) return "info";
   if (["hibernated", "snapshot", "warm-fork"].includes(value)) return "violet";
   return "default";
 }
 
+// statusLabel maps a raw status to a human-friendly badge label. Transient
+// lifecycle states (which can sit for seconds-to-minutes) get a "…" so they read
+// as in-progress rather than a stuck terminal state.
+function statusLabel(value?: string | number | null): string {
+  switch (String(value ?? "").toLowerCase()) {
+    case "hibernating":
+      return "Saving snapshot…";
+    case "waking":
+      return "Waking…";
+    case "hibernated":
+      return "Asleep";
+    default:
+      return value == null ? "—" : String(value);
+  }
+}
+
 export function StatusBadge({ value }: { value?: string | number | null }) {
-  return <Badge variant={statusTone(value)}>{value ?? "—"}</Badge>;
+  return <Badge variant={statusTone(value)}>{statusLabel(value)}</Badge>;
+}
+
+// DbStatusBadge: database-aware status. An auto-suspended (hibernated)
+// database is a normal resting state — it resumes automatically on the next
+// connection — so it renders as a calm "Idle" rather than the alarming
+// "Asleep". Every other status shows through unchanged.
+export function DbStatusBadge({ status }: { status?: string | null }) {
+  const v = String(status ?? "").toLowerCase();
+  if (v === "hibernated") {
+    return (
+      <span title="Idle — compute paused. Resumes automatically within a few seconds on the next connection. Storage and data are unaffected.">
+        <Badge variant="info">Idle</Badge>
+      </span>
+    );
+  }
+  return <StatusBadge value={status} />;
 }
 
 export function CopyButton({ text, label = "Copy", title }: { text: string; label?: string; title?: string }) {

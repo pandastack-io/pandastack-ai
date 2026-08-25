@@ -36,18 +36,26 @@ resource "aws_eip" "db_proxy" {
   tags   = merge(local.tags, { Name = "${local.name}-db-proxy-ip" })
 }
 
-# Single small VM — the proxy is lightweight (io.Copy only, no compute).
+# Single VM. The proxy does no query work (io.Copy only), but it terminates TLS
+# for every managed-database connection in the fleet and holds each session open,
+# so it is sized for connections and bandwidth rather than CPU.
+#
+# NOTE: this is a single instance behind a single EIP, i.e. a single point of
+# failure for customer database connectivity. Sandboxes and the control plane
+# are unaffected if it dies, and the ASG-less design keeps the EIP stable, but
+# an HA deployment should front two proxies with an NLB. See infra/README.md.
 resource "aws_instance" "db_proxy" {
   ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.small"
+  instance_type          = var.db_proxy_instance_type
   subnet_id              = aws_subnet.public[var.availability_zones[0]].id
   vpc_security_group_ids = [aws_security_group.db_proxy.id]
   key_name               = aws_key_pair.this.key_name
   iam_instance_profile   = aws_iam_instance_profile.node.name
 
   root_block_device {
-    volume_size = 20
+    volume_size = var.db_proxy_disk_size_gb
     volume_type = "gp3"
+    encrypted   = true
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-db-proxy.sh.tftpl", {
@@ -55,6 +63,7 @@ resource "aws_instance" "db_proxy" {
     secret_prefix       = local.name
     db_proxy_binary_url = var.db_proxy_binary_url
     sni_suffix          = ".db.${var.cloudflare_zone_name}"
+    acme_email          = var.acme_email
   }))
 
   tags = merge(local.tags, { role = "db-proxy", Name = "${local.name}-db-proxy" })

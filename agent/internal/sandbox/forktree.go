@@ -108,11 +108,19 @@ func (m *Manager) ForkTree(ctx context.Context, parentID string, count int, extr
 				MetaForkParentID: parentID,
 				"fork_index":     fmt.Sprintf("%d", i),
 			}
+			// Caller-supplied metadata is applied BEFORE the platform keys, and
+			// the platform keys are then written unconditionally. Applying it
+			// last let a fork-tree body overwrite "workspace" (the tenancy
+			// boundary) and "kind"/"app.id" (the workload class) — the same
+			// escape stampWorkspaceMeta closes on the create path.
+			for k, v := range extraMeta {
+				if isReservedMeta(k) {
+					continue
+				}
+				md[k] = v
+			}
 			if parentWorkspace != "" {
 				md["workspace"] = parentWorkspace
-			}
-			for k, v := range extraMeta {
-				md[k] = v
 			}
 			req := CreateRequest{
 				Template:     tpl,
@@ -196,4 +204,17 @@ func (m *Manager) PromoteTreeWinner(ctx context.Context, treeID, winnerID string
 		})
 	}
 	return deleted, failures, nil
+}
+
+
+// isReservedMeta reports whether a metadata key is platform-owned and must
+// never be taken from a client. Mirrors reservedMeta in internal/api/router.go;
+// kept as its own predicate here because the fork-tree path does not route
+// through the HTTP body stamper.
+func isReservedMeta(k string) bool {
+	switch k {
+	case "workspace", "kind", "app.id":
+		return true
+	}
+	return false
 }

@@ -15,9 +15,9 @@ variable "spot_max_price" {
 }
 
 variable "use_spot" {
-  description = "Use Spot pricing (true) or on-demand (false)."
+  description = "Use Spot pricing (true) or on-demand (false). Defaults to on-demand: a Firecracker host holds running sandboxes and host-pinned managed-database PGDATA, so reclamation is a data-plane event, not a cost optimisation."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "root_volume_size_gb" {

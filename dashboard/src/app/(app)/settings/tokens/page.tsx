@@ -56,7 +56,7 @@ export default function TokensPage() {
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: "created_at", dir: "desc" });
   const confirm = useConfirm();
 
-  const exampleBase = process.env.NEXT_PUBLIC_PANDASTACK_API || "https://api.pandastack.ai";
+  const exampleBase = process.env.NEXT_PUBLIC_PANDASTACK_API || "http://localhost:8080";
   const examples = useMemo(
     () => ({
       curl: `curl -H "Authorization: Bearer ${EXAMPLE_TOKEN}" \\\n  ${exampleBase}/v1/sandboxes`,
@@ -66,7 +66,7 @@ sb = Sandbox.create(template="ubuntu-24.04")
 result = sb.exec("echo hello")
 print(result.stdout)
 sb.kill()`,
-      cli: `export PANDASTACK_TOKEN=${EXAMPLE_TOKEN}
+      cli: `export PANDASTACK_API_KEY=${EXAMPLE_TOKEN}
 pandastack sandbox create --template code-interpreter
 pandastack sandbox list
 pandastack sandbox exec <id> "echo hello"`,
@@ -248,7 +248,8 @@ pandastack sandbox exec <id> "echo hello"`,
           <div>
             <div className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>How to use</div>
             <div className="mt-0.5 text-[12px]" style={{ color: "var(--text-muted)" }}>
-              Replace {EXAMPLE_TOKEN} with a token you created.
+              Replace {EXAMPLE_TOKEN} with a token you created.{" "}
+              <a href="https://docs.pandastack.ai/docs/reference/rest-api" target="_blank" rel="noreferrer" className="font-medium transition-colors hover:text-emerald-400" style={{ color: "var(--text-secondary)" }}>Full API reference →</a>
             </div>
           </div>
           {exampleTab === "cli" && (

@@ -12,7 +12,10 @@ AGENT_BINARY_URL="${agent_binary_url}"
 S3_BUCKET="${s3_bucket_name}"
 
 apt-get update -y
-apt-get install -y awscli jq curl ca-certificates
+# zstd is not optional: agent/internal/seed/user_template.go bakes and pulls
+# custom templates with `tar --use-compress-program 'zstd -T0'`, so a host
+# without the binary fails every custom-template operation at runtime.
+apt-get install -y awscli jq curl ca-certificates zstd
 
 # Verify KVM is available (bare-metal required).
 if [ ! -e /dev/kvm ]; then

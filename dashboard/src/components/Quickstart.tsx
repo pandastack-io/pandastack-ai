@@ -54,7 +54,7 @@ await sandbox.kill();`,
 npm install -g @pandastack/sdk
 
 # Set your token
-export PANDASTACK_TOKEN=pds_...
+export PANDASTACK_API_KEY=pds_...
 
 # Create a sandbox
 pandastack sandbox create \\
@@ -80,7 +80,7 @@ db = client.databases.create(label="my-db")
 
 # Get connection URL
 print(db["connection_url"])
-# postgres://...@<id>.db.pandastack.ai:5432/pandastack
+# postgres://...@<id>.db.<your-domain>:5432/pandastack
 
 # Connect with psycopg2 or any PostgreSQL client
 import psycopg2
@@ -98,7 +98,7 @@ const db = await client.databases.create({
 
 // Get connection URL
 console.log(db.connection_url);
-// postgres://...@<id>.db.pandastack.ai:5432/pandastack
+// postgres://...@<id>.db.<your-domain>:5432/pandastack
 
 // Connect with pg or any PostgreSQL client
 import { Client as PgClient } from "pg";
@@ -108,7 +108,7 @@ await pgClient.connect();`,
 npm install -g @pandastack/sdk
 
 # Set your token
-export PANDASTACK_TOKEN=pds_...
+export PANDASTACK_API_KEY=pds_...
 
 # Create a database
 pandastack database create --label my-db
@@ -164,7 +164,7 @@ await sandbox.kill();`,
 npm install -g @pandastack/sdk
 
 # Set your token
-export PANDASTACK_TOKEN=pds_...
+export PANDASTACK_API_KEY=pds_...
 
 # Volumes are created via the SDK (client.volumes.create);
 # attach an existing volume at sandbox create time:

@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# deploy-gcp-multi.sh — enterprise multi-node deploy (api.pandastack.ai).
+# deploy-gcp-multi.sh — multi-node deploy driver for infra/terraform/envs/dev-gcp-multi.
 #
-# Topology (built fresh; existing pandastack-host remains as blue):
+# Topology (see infra/README.md for the sized production footprint):
 #   - Private VPC + dual subnets + Cloud NAT + Secret Manager
-#   - 2 edge VMs (e2-small) behind global HTTPS LB + managed cert + Cloud Armor
-#   - 2 agent VMs (n2d-standard-2, nested-virt, no public IP) in MIG
+#   - Edge MIG behind a global HTTPS LB + managed cert + Cloud Armor
+#   - Agent MIG (nested-virt Firecracker hosts, no public IP)
+#   - Cloud SQL (control plane) · ClickHouse VM · db-proxy VM
 #
 # Workflow:
 #   ./deploy-gcp-multi.sh up        # build/update stack + push binaries
 #   ./deploy-gcp-multi.sh status    # show LB IP + agent heartbeat
-#   ./deploy-gcp-multi.sh smoke     # exercise api.pandastack.ai end-to-end
-#   ./deploy-gcp-multi.sh cutover   # ensure api.pandastack.ai DNS → LB
+#   ./deploy-gcp-multi.sh smoke     # exercise api.$CLOUDFLARE_DOMAIN end-to-end
+#   ./deploy-gcp-multi.sh cutover   # ensure api.$CLOUDFLARE_DOMAIN DNS → LB
 #   ./deploy-gcp-multi.sh scale N   # scale agent MIG target_size
 #   ./deploy-gcp-multi.sh down      # tear down the stack
 #
-# Requires .env.local with DATABASE_URL, SUPABASE_*, CLOUDFLARE_* set.
+# Requires .env.local with DATABASE_URL, SUPABASE_*, CLOUDFLARE_* set —
+# including CLOUDFLARE_DOMAIN, your own public DNS zone. There is deliberately
+# no default: a wrong default would point your deploy at someone else's zone.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +40,9 @@ require jq
 require curl
 
 : "${GCS_BUILD_BUCKET:?set GCS_BUILD_BUCKET to your build-artifacts bucket}"
+# Your own public DNS zone (e.g. example.com). No default on purpose — a default
+# here would silently aim DNS upserts and smoke tests at someone else's zone.
+: "${CLOUDFLARE_DOMAIN:?set CLOUDFLARE_DOMAIN to your public DNS zone (e.g. example.com)}"
 
 write_tfvars() {
   : "${DATABASE_URL:?need DATABASE_URL in .env.local}"
@@ -57,7 +63,7 @@ ssh_allowed_cidr     = "${SSH_CIDR}"
 
 cloudflare_api_token = "${CLOUDFLARE_API_TOKEN}"
 cloudflare_zone_id   = "${CLOUDFLARE_ZONE_ID}"
-cloudflare_zone_name = "${CLOUDFLARE_DOMAIN:-pandastack.ai}"
+cloudflare_zone_name = "${CLOUDFLARE_DOMAIN}"
 
 database_url         = "${DATABASE_URL}"
 clickhouse_url       = "${CLICKHOUSE_URL:-}"
@@ -143,15 +149,15 @@ cmd_up() {
   step "Deploy frontend dashboard to Cloudflare Pages"
   cmd_deploy_frontend || warn "frontend deploy failed; run './deploy-gcp-multi.sh deploy-frontend' to retry"
 
-  step "Upsert Cloudflare DNS: api.pandastack.ai → $LB_IP (proxied)"
+  step "Upsert Cloudflare DNS: api.${CLOUDFLARE_DOMAIN} → $LB_IP (proxied)"
   CF_PROXIED=true _cf_upsert_a api "$LB_IP"
 
   step "Smoke tests"
   cmd_smoke || warn "smoke tests had failures — investigate before declaring victory"
 
   step "✅ One-click deploy done."
-  echo "  frontend: https://app.${CLOUDFLARE_DOMAIN:-pandastack.ai}"
-  echo "  api:      https://api.${CLOUDFLARE_DOMAIN:-pandastack.ai}"
+  echo "  frontend: https://app.${CLOUDFLARE_DOMAIN}"
+  echo "  api:      https://api.${CLOUDFLARE_DOMAIN}"
 }
 
 _wait_edge_healthy() {
@@ -181,7 +187,7 @@ _cf_upsert_a() {
   local name="$1" ip="$2" proxied="${CF_PROXIED:-true}"
   local existing
   existing=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-    "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=${name}.${CLOUDFLARE_DOMAIN:-pandastack.ai}&type=A" \
+    "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=${name}.${CLOUDFLARE_DOMAIN}&type=A" \
     | jq -r '.result[0].id // ""')
   if [ -n "$existing" ]; then
     curl -fsS -X PATCH -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "content-type: application/json" \
@@ -200,7 +206,7 @@ _cf_upsert_cname() {
   local name="$1" target="$2" proxied="${CF_PROXIED:-true}"
   local existing
   existing=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-    "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=${name}.${CLOUDFLARE_DOMAIN:-pandastack.ai}&type=CNAME" \
+    "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=${name}.${CLOUDFLARE_DOMAIN}&type=CNAME" \
     | jq -r '.result[0].id // ""')
   if [ -n "$existing" ]; then
     curl -fsS -X PATCH -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "content-type: application/json" \
@@ -345,8 +351,8 @@ cmd_deploy_frontend() {
   : "${CLOUDFLARE_API_TOKEN:?need CLOUDFLARE_API_TOKEN}"
   : "${CLOUDFLARE_ACCOUNT_ID:?need CLOUDFLARE_ACCOUNT_ID in .env.local}"
   local project="${CF_PAGES_PROJECT:-pandastack-dashboard}"
-  local api_host="api.${CLOUDFLARE_DOMAIN:-pandastack.ai}"
-  local app_host="app.${CLOUDFLARE_DOMAIN:-pandastack.ai}"
+  local api_host="api.${CLOUDFLARE_DOMAIN}"
+  local app_host="app.${CLOUDFLARE_DOMAIN}"
 
   step "Build dashboard for Cloudflare Pages"
   (cd "$REPO/dashboard" && cat > .env.production <<EOF
@@ -421,8 +427,8 @@ cmd_status() {
 }
 
 cmd_smoke() {
-  step "Smoke test against api.pandastack.ai"
-  HOST="api.pandastack.ai"
+  step "Smoke test against api.${CLOUDFLARE_DOMAIN}"
+  HOST="api.${CLOUDFLARE_DOMAIN}"
   curl -fsS "https://$HOST/healthz" || die "healthz failed"
   echo " ✓ healthz"
   curl -fsS "https://$HOST/version" | jq . || true
@@ -443,7 +449,7 @@ cmd_smoke() {
 }
 
 cmd_cutover() {
-  step "Cloudflare DNS: ensure api.pandastack.ai → LB IP (orange-cloud)"
+  step "Cloudflare DNS: ensure api.${CLOUDFLARE_DOMAIN} → LB IP (orange-cloud)"
   LB_IP=$(terraform -chdir="$TF" output -raw lb_ip)
   ZONE="$CLOUDFLARE_ZONE_ID"
   TOK="$CLOUDFLARE_API_TOKEN"
@@ -451,7 +457,7 @@ cmd_cutover() {
   upsert() {
     local name="$1" ip="$2"
     EXISTING=$(curl -fsS -H "Authorization: Bearer $TOK" \
-      "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=${name}.${CLOUDFLARE_DOMAIN:-pandastack.ai}&type=A" \
+      "https://api.cloudflare.com/client/v4/zones/$ZONE/dns_records?name=${name}.${CLOUDFLARE_DOMAIN}&type=A" \
       | jq -r '.result[0].id // ""')
     if [ -n "$EXISTING" ]; then
       curl -fsS -X PATCH -H "Authorization: Bearer $TOK" -H "content-type: application/json" \

@@ -4,7 +4,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -72,10 +71,6 @@ func main() {
 		err = sandboxCmd(args)
 	case "token", "tokens":
 		err = tokenCmd(args)
-	case "function", "functions", "fn":
-		err = functionCmd(args)
-	case "schedule", "schedules":
-		err = scheduleCmd(args)
 	case "ssh":
 		// shorthand: pandastack ssh <id>  (same as pandastack sandbox ssh <id>)
 		if len(args) < 1 {
@@ -170,25 +165,6 @@ COMMANDS
   token create NAME                               create a new API token
   token revoke PREFIX                             revoke a token by prefix
 
-  function list                                   list deployed functions
-  function deploy FILE [--name NAME] [--runtime python|nodejs] [--env KEY=VAL] [--public] [--template NAME]
-                                                   deploy a function from source code
-  function get ID                                 show function details as JSON
-  function update ID [--name NAME] [--env KEY=VAL] [--public[=true|false]]
-                                                   update a function
-  function delete ID                              delete a function
-  function logs ID                                list recent function runs
-  function run ID                                 trigger a function manually
-
-  schedule list                                   list all schedules
-  schedule create --name NAME --function-id ID --cron SPEC
-                                                   create a cron schedule
-  schedule get ID                                 show schedule details as JSON
-  schedule pause ID                               pause a schedule
-  schedule resume ID                              resume a schedule
-  schedule trigger ID                             trigger a schedule immediately
-  schedule delete ID                              delete a schedule
-
   ssh ID                                          shorthand for sandbox ssh ID
 
   version                                         print client and server versions
@@ -199,7 +175,8 @@ GLOBAL FLAGS
 
 ENV
   PANDASTACK_API       base URL (default: https://api.pandastack.ai)
-  PANDASTACK_TOKEN     bearer token (overrides saved config)
+  PANDASTACK_API_KEY   bearer token (overrides saved config)
+  PANDASTACK_TOKEN     deprecated alias for PANDASTACK_API_KEY
   PANDASTACK_SUPABASE_URL / PANDASTACK_SUPABASE_ANON_KEY for auth login`)
 }
 
@@ -227,7 +204,7 @@ func authLogin() error {
 	supabaseURL, supabaseKey := supabaseConfig()
 	if supabaseURL == "" || supabaseKey == "" {
 		fmt.Println("Supabase auth is not configured.")
-		fmt.Println("Get a token from https://app.pandastack.ai/settings/tokens and run: export PANDASTACK_TOKEN=cfat_...")
+		fmt.Println("Create a token in the dashboard under Settings -> API Tokens, then run: export PANDASTACK_API_KEY=pds_...")
 		return nil
 	}
 	email, err := promptLine("Email: ")
@@ -1077,6 +1054,12 @@ func apiBase() string {
 }
 
 func authToken() string {
+	// PANDASTACK_API_KEY is the documented name (every docs page and the README
+	// use it). PANDASTACK_TOKEN is the older name this CLI originally shipped
+	// with and is still honoured so existing shells and CI jobs keep working.
+	if tok := os.Getenv("PANDASTACK_API_KEY"); tok != "" {
+		return tok
+	}
 	if tok := os.Getenv("PANDASTACK_TOKEN"); tok != "" {
 		return tok
 	}
@@ -1139,7 +1122,7 @@ func apiDoRaw(method, path string, rd io.Reader, contentType, token string, time
 
 func httpError(status int, method, body string) error {
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		return fmt.Errorf("Not logged in. Run `pandastack auth login` or set PANDASTACK_TOKEN")
+		return fmt.Errorf("Not logged in. Run `pandastack auth login` or set PANDASTACK_API_KEY")
 	}
 	if body == "" {
 		return fmt.Errorf("HTTP %d %s", status, method)
@@ -1474,448 +1457,4 @@ func tokenRevoke(prefix string) error {
 	}
 	fmt.Printf("✓ revoked token %s\n", prefix)
 	return nil
-}
-
-// ----------------------------------------------------------------------------
-// Subcommand: function / schedule
-// ----------------------------------------------------------------------------
-
-type stringMapFlag map[string]string
-
-func (m *stringMapFlag) String() string {
-	if m == nil || len(*m) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(*m))
-	for k, v := range *m {
-		parts = append(parts, k+"="+v)
-	}
-	return strings.Join(parts, ",")
-}
-
-func (m *stringMapFlag) Set(value string) error {
-	parts := strings.SplitN(value, "=", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-		return fmt.Errorf("invalid KEY=VAL: %q", value)
-	}
-	if *m == nil {
-		*m = map[string]string{}
-	}
-	(*m)[strings.TrimSpace(parts[0])] = parts[1]
-	return nil
-}
-
-type optionalBoolFlag struct {
-	set   bool
-	value bool
-}
-
-func (f *optionalBoolFlag) String() string {
-	if !f.set {
-		return ""
-	}
-	return strconv.FormatBool(f.value)
-}
-
-func (f *optionalBoolFlag) Set(value string) error {
-	if value == "" {
-		f.value = true
-		f.set = true
-		return nil
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return err
-	}
-	f.value = parsed
-	f.set = true
-	return nil
-}
-
-func (f *optionalBoolFlag) IsBoolFlag() bool { return true }
-
-func functionCmd(args []string) error {
-	if len(args) == 0 {
-		return errors.New("function requires a subcommand: list | deploy | get | update | delete | logs | run")
-	}
-	switch args[0] {
-	case "list", "ls":
-		return functionList()
-	case "deploy":
-		return functionDeploy(args[1:])
-	case "get":
-		if len(args) < 2 {
-			return errors.New("function get ID")
-		}
-		return functionGet(args[1])
-	case "update":
-		return functionUpdate(args[1:])
-	case "delete", "rm":
-		if len(args) < 2 {
-			return errors.New("function delete ID")
-		}
-		return functionDelete(args[1])
-	case "logs":
-		if len(args) < 2 {
-			return errors.New("function logs ID")
-		}
-		return functionLogs(args[1])
-	case "run":
-		if len(args) < 2 {
-			return errors.New("function run ID")
-		}
-		return functionRun(args[1])
-	default:
-		return fmt.Errorf("unknown function subcommand: %s", args[0])
-	}
-}
-
-func functionList() error {
-	body, err := apiGET("/v1/functions")
-	if err != nil {
-		return err
-	}
-	var list []map[string]any
-	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(list)
-	}
-	if len(list) == 0 {
-		fmt.Println("no functions")
-		return nil
-	}
-	fmt.Printf("%-38s %-24s %-8s %-7s %-48s %s\n", "ID", "NAME", "RUNTIME", "PUBLIC", "ENDPOINT", "CREATED")
-	for _, fn := range list {
-		fmt.Printf("%-38v %-24v %-8v %-7v %-48v %v\n", fn["id"], fn["name"], fn["runtime"], fn["public"], functionEndpoint(fn), fn["created_at"])
-	}
-	return nil
-}
-
-func functionDeploy(args []string) error {
-	fs := flag.NewFlagSet("function deploy", flag.ExitOnError)
-	name := fs.String("name", "", "function name")
-	runtime := fs.String("runtime", "", "runtime (python or nodejs)")
-	template := fs.String("template", "code-interpreter", "template to run the function in")
-	public := fs.Bool("public", false, "expose a public HTTP endpoint")
-	var env stringMapFlag
-	fs.Var(&env, "env", "env var (KEY=VAL, repeatable)")
-	_ = fs.Parse(args)
-	rest := fs.Args()
-	if len(rest) < 1 {
-		return errors.New("function deploy FILE")
-	}
-	file := rest[0]
-	code, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	resolvedRuntime := strings.TrimSpace(*runtime)
-	if resolvedRuntime == "" {
-		resolvedRuntime, err = inferFunctionRuntime(file)
-		if err != nil {
-			return err
-		}
-	}
-	resolvedName := strings.TrimSpace(*name)
-	if resolvedName == "" {
-		resolvedName = strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
-	}
-	body, err := apiPOST("/v1/functions", map[string]any{
-		"name":       resolvedName,
-		"runtime":    resolvedRuntime,
-		"entrypoint": filepath.Base(file),
-		"code":       base64.StdEncoding.EncodeToString(code),
-		"template":   *template,
-		"env":        map[string]string(env),
-		"public":     *public,
-	})
-	if err != nil {
-		return err
-	}
-	var fn map[string]any
-	if err := json.Unmarshal(body, &fn); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(fn)
-	}
-	fmt.Printf("✓ deployed function %v (%v)\n", fn["name"], fn["id"])
-	if endpoint := functionEndpoint(fn); endpoint != "" && endpoint != "<nil>" {
-		fmt.Printf("endpoint: %s\n", endpoint)
-	}
-	return nil
-}
-
-func functionGet(id string) error {
-	body, err := apiGET("/v1/functions/" + url.PathEscape(id))
-	if err != nil {
-		return err
-	}
-	var fn any
-	if err := json.Unmarshal(body, &fn); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	return printJSON(fn)
-}
-
-func functionUpdate(args []string) error {
-	if len(args) < 1 {
-		return errors.New("function update ID")
-	}
-	id := args[0]
-	fs := flag.NewFlagSet("function update", flag.ExitOnError)
-	name := fs.String("name", "", "new function name")
-	var public optionalBoolFlag
-	var env stringMapFlag
-	fs.Var(&env, "env", "env var (KEY=VAL, repeatable)")
-	fs.Var(&public, "public", "set public endpoint state")
-	_ = fs.Parse(args[1:])
-	bodyReq := map[string]any{}
-	if strings.TrimSpace(*name) != "" {
-		bodyReq["name"] = *name
-	}
-	if len(env) > 0 {
-		bodyReq["env"] = map[string]string(env)
-	}
-	if public.set {
-		bodyReq["public"] = public.value
-	}
-	if len(bodyReq) == 0 {
-		return errors.New("provide at least one of --name, --env, or --public")
-	}
-	body, err := apiDo("PATCH", "/v1/functions/"+url.PathEscape(id), bodyReq)
-	if err != nil {
-		return err
-	}
-	var fn any
-	if err := json.Unmarshal(body, &fn); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(fn)
-	}
-	fmt.Printf("updated function %s\n", id)
-	return printJSON(fn)
-}
-
-func functionDelete(id string) error {
-	if err := apiDELETE("/v1/functions/" + url.PathEscape(id)); err != nil {
-		return err
-	}
-	fmt.Printf("deleted function %s\n", id)
-	return nil
-}
-
-func functionLogs(id string) error {
-	body, err := apiGET("/v1/functions/" + url.PathEscape(id) + "/runs")
-	if err != nil {
-		return err
-	}
-	var runs []map[string]any
-	if err := json.Unmarshal(body, &runs); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(runs)
-	}
-	if len(runs) == 0 {
-		fmt.Println("no runs")
-		return nil
-	}
-	fmt.Printf("%-38s %-10s %-9s %-11s %s\n", "RUN ID", "STATUS", "EXIT", "DURATION", "STARTED")
-	for _, run := range runs {
-		fmt.Printf("%-38v %-10v %-9v %-11v %v\n", run["id"], run["status"], run["exit_code"], run["duration_ms"], run["started_at"])
-	}
-	return nil
-}
-
-func functionRun(id string) error {
-	body, err := apiPOST("/v1/functions/"+url.PathEscape(id)+"/runs", map[string]any{})
-	if err != nil {
-		return err
-	}
-	var run map[string]any
-	if err := json.Unmarshal(body, &run); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(run)
-	}
-	if stdout, _ := run["stdout"].(string); stdout != "" {
-		fmt.Fprint(os.Stdout, stdout)
-	}
-	if stderr, _ := run["stderr"].(string); stderr != "" {
-		fmt.Fprint(os.Stderr, stderr)
-	}
-	fmt.Printf("run %v status=%v exit=%v duration_ms=%v\n", run["id"], run["status"], run["exit_code"], run["duration_ms"])
-	return nil
-}
-
-func scheduleCmd(args []string) error {
-	if len(args) == 0 {
-		return errors.New("schedule requires a subcommand: list | create | get | pause | resume | trigger | delete")
-	}
-	switch args[0] {
-	case "list", "ls":
-		return scheduleList()
-	case "create":
-		return scheduleCreate(args[1:])
-	case "get":
-		if len(args) < 2 {
-			return errors.New("schedule get ID")
-		}
-		return scheduleGet(args[1])
-	case "pause":
-		if len(args) < 2 {
-			return errors.New("schedule pause ID")
-		}
-		return scheduleSetPaused(args[1], true)
-	case "resume":
-		if len(args) < 2 {
-			return errors.New("schedule resume ID")
-		}
-		return scheduleSetPaused(args[1], false)
-	case "trigger":
-		if len(args) < 2 {
-			return errors.New("schedule trigger ID")
-		}
-		return scheduleTrigger(args[1])
-	case "delete", "rm":
-		if len(args) < 2 {
-			return errors.New("schedule delete ID")
-		}
-		return scheduleDelete(args[1])
-	default:
-		return fmt.Errorf("unknown schedule subcommand: %s", args[0])
-	}
-}
-
-func scheduleList() error {
-	body, err := apiGET("/v1/schedules")
-	if err != nil {
-		return err
-	}
-	var list []map[string]any
-	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(list)
-	}
-	if len(list) == 0 {
-		fmt.Println("no schedules")
-		return nil
-	}
-	fmt.Printf("%-38s %-24s %-38s %-16s %-8s %-20s %s\n", "ID", "NAME", "FUNCTION", "CRON", "STATUS", "LAST RUN", "NEXT RUN")
-	for _, sch := range list {
-		status := "active"
-		if paused, _ := sch["paused"].(bool); paused {
-			status = "paused"
-		}
-		fmt.Printf("%-38v %-24v %-38v %-16v %-8s %-20v %v\n", sch["id"], sch["name"], sch["function_id"], sch["cron"], status, sch["last_run_at"], sch["next_run_at"])
-	}
-	return nil
-}
-
-func scheduleCreate(args []string) error {
-	fs := flag.NewFlagSet("schedule create", flag.ExitOnError)
-	name := fs.String("name", "", "schedule name (required)")
-	functionID := fs.String("function-id", "", "function ID (required)")
-	cron := fs.String("cron", "", "cron expression (required)")
-	_ = fs.Parse(args)
-	if *name == "" || *functionID == "" || *cron == "" {
-		return errors.New("schedule create --name NAME --function-id ID --cron SPEC")
-	}
-	body, err := apiPOST("/v1/schedules", map[string]any{"name": *name, "function_id": *functionID, "cron": *cron, "paused": false})
-	if err != nil {
-		return err
-	}
-	var sch any
-	if err := json.Unmarshal(body, &sch); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(sch)
-	}
-	fmt.Printf("created schedule %s for function %s\n", *name, *functionID)
-	return printJSON(sch)
-}
-
-func scheduleGet(id string) error {
-	body, err := apiGET("/v1/schedules/" + url.PathEscape(id))
-	if err != nil {
-		return err
-	}
-	var sch any
-	if err := json.Unmarshal(body, &sch); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	return printJSON(sch)
-}
-
-func scheduleSetPaused(id string, paused bool) error {
-	body, err := apiDo("PATCH", "/v1/schedules/"+url.PathEscape(id), map[string]any{"paused": paused})
-	if err != nil {
-		return err
-	}
-	var sch any
-	if err := json.Unmarshal(body, &sch); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(sch)
-	}
-	if paused {
-		fmt.Printf("paused schedule %s\n", id)
-	} else {
-		fmt.Printf("resumed schedule %s\n", id)
-	}
-	return nil
-}
-
-func scheduleTrigger(id string) error {
-	body, err := apiPOST("/v1/schedules/"+url.PathEscape(id)+"/trigger", map[string]any{})
-	if err != nil {
-		return err
-	}
-	var run any
-	if err := json.Unmarshal(body, &run); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if outputJSON {
-		return printJSON(run)
-	}
-	fmt.Printf("triggered schedule %s\n", id)
-	return printJSON(run)
-}
-
-func scheduleDelete(id string) error {
-	if err := apiDELETE("/v1/schedules/" + url.PathEscape(id)); err != nil {
-		return err
-	}
-	fmt.Printf("deleted schedule %s\n", id)
-	return nil
-}
-
-func inferFunctionRuntime(path string) (string, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".py":
-		return "python", nil
-	case ".js", ".mjs", ".cjs", ".ts":
-		return "nodejs", nil
-	default:
-		return "", fmt.Errorf("could not infer runtime from %q; pass --runtime python|nodejs", path)
-	}
-}
-
-func functionEndpoint(fn map[string]any) any {
-	if endpoint, ok := fn["endpoint"]; ok {
-		return endpoint
-	}
-	if endpoint, ok := fn["url"]; ok {
-		return endpoint
-	}
-	return ""
 }

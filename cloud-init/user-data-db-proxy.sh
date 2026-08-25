@@ -1,12 +1,14 @@
 #!/bin/bash
 # cloud-init for pandastack-db-proxy node.
 # Runs the TLS SNI postgres proxy: listens on :5432, routes by sandbox ID
-# embedded in the SNI hostname (*.db.pandastack.ai → sandbox postgres).
+# embedded in the SNI hostname (*.db.<your-zone> → sandbox postgres).
 #
 # Reads identity + secrets via the GCP metadata server and Secret Manager.
 # The TF db-proxy resource supplies the following instance metadata:
 #   pandastack-binary-url      - HTTPS URL or gs:// path to db-proxy binary
-#   pandastack-sni-suffix      - SNI suffix (default .db.pandastack.ai)
+#   pandastack-sni-suffix      - SNI suffix, e.g. .db.example.com (REQUIRED)
+#   pandastack-acme-email      - contact address for the Let's Encrypt account
+#                                (REQUIRED; receives expiry warnings for this cert)
 #   secret-node-token          - Secret Manager ID for the X-Node-Token
 #   secret-database-url        - Secret Manager ID for control-plane Postgres DSN
 #   secret-cloudflare-token    - Secret Manager ID for Cloudflare API token (certbot DNS-01)
@@ -49,6 +51,7 @@ SNI_SUFFIX="$(md instance/attributes/pandastack-sni-suffix)"
 SECRET_TOKEN="$(md instance/attributes/secret-node-token)"
 SECRET_DB="$(md instance/attributes/secret-database-url)"
 SECRET_CF="$(md instance/attributes/secret-cloudflare-token)"
+ACME_EMAIL="$(md instance/attributes/pandastack-acme-email)"
 
 fetch_secret() {
   local name="$1"
@@ -59,8 +62,12 @@ NODE_TOKEN="$(fetch_secret "$SECRET_TOKEN")"
 DATABASE_URL="$(fetch_secret "$SECRET_DB")"
 CLOUDFLARE_API_TOKEN="$(fetch_secret "$SECRET_CF")"
 
-SNI_SUFFIX="${SNI_SUFFIX:-.db.pandastack.ai}"
-DOMAIN="${SNI_SUFFIX#.}"   # strip leading dot → db.pandastack.ai
+# No defaults for these two. A default SNI suffix would make this node request a
+# certificate for someone else's domain, and a default ACME email would register
+# the Let's Encrypt account — and its expiry warnings — to someone else.
+: "${SNI_SUFFIX:?pandastack-sni-suffix metadata is required (e.g. .db.example.com)}"
+: "${ACME_EMAIL:?pandastack-acme-email metadata is required}"
+DOMAIN="${SNI_SUFFIX#.}"   # strip leading dot → db.example.com
 CERT_DIR="/etc/letsencrypt/live/${DOMAIN}"
 
 # ── Cloudflare credentials ────────────────────────────────────────────────────
@@ -73,7 +80,7 @@ if [ ! -f "${CERT_DIR}/fullchain.pem" ]; then
   certbot certonly \
     --non-interactive \
     --agree-tos \
-    --email "ops@pandastack.ai" \
+    --email "$ACME_EMAIL" \
     --dns-cloudflare \
     --dns-cloudflare-credentials "$CF_CREDS" \
     --dns-cloudflare-propagation-seconds 30 \

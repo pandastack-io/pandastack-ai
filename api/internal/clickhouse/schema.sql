@@ -108,3 +108,12 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (workspace_id, ts)
 TTL toDateTime(ts) + INTERVAL 30 DAY;
+
+-- Per-request byte counts and caller country. Added via ALTER so existing
+-- deployments pick them up on boot (EnsureSchema runs each statement;
+-- ADD COLUMN IF NOT EXISTS is a no-op once applied). These are best-effort
+-- telemetry that the dashboard's bandwidth view reads; nothing depends on
+-- this table being complete.
+ALTER TABLE pandastack.http_requests ADD COLUMN IF NOT EXISTS bytes_out UInt64 DEFAULT 0;
+ALTER TABLE pandastack.http_requests ADD COLUMN IF NOT EXISTS bytes_in UInt64 DEFAULT 0;
+ALTER TABLE pandastack.http_requests ADD COLUMN IF NOT EXISTS country LowCardinality(String) DEFAULT '';

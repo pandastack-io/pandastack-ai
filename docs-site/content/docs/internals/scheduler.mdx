@@ -14,7 +14,7 @@ score(agent) =
   + 5.0 × (stream_restore_enabled ? 1 : 0)
 ```
 
-Whichever agent scores highest wins the create. Agents that fail the resource floor (requested CPU/RAM doesn't fit in free capacity) are excluded before scoring.
+Whichever agent scores highest wins the create. Agents that fail the resource floor (the request doesn't fit in free capacity) are excluded before scoring — with one asymmetry: **memory is a hard gate** (a sandbox's committed RAM must genuinely fit), while vCPUs are admitted at up to **4× the host's physical cores**. CPU is burstable capacity, arbitrated at runtime by cgroup weights, so `free_cpu` is measured against that 4× envelope rather than raw core count.
 
 Every create takes the same snapshot-restore fast path on any agent that has the template's seed, so placement is purely a **load-spreading** decision: prefer the host with the most free CPU (memory as a secondary term). The `+5.0` streaming bonus is a tiebreaker — an agent with UFFD streaming restore boots a template it has never seen without first downloading the whole `vm.mem`, so among otherwise-equal hosts it wins.
 
@@ -54,17 +54,17 @@ No labels, no taints, no node selectors. Either the volume is here, or it isn't.
 
 ## Walked example
 
-A `code-interpreter` create (2 vCPU / 2 GiB) lands on the API gateway. The scheduler lists fresh agents:
+A `code-interpreter` create (8 vCPU / 2 GiB) lands on the API gateway. The scheduler lists fresh agents (`free_cpu` is against the 4× burst envelope):
 
 | agent_id  | free_cpu | free_mem_gb | streaming |
 | --------- | -------- | ----------- | --------- |
-| `pz20`    | 2        | 6           | yes       |
-| `n1v2`    | 14       | 24          | yes       |
+| `pz20`    | 10       | 6           | yes       |
+| `n1v2`    | 40       | 24          | yes       |
 
 Scores:
 
-- `pz20`: `0.6×2  + 0.3×6  + 5 = 1.2 + 1.8 + 5 = 8.0`
-- `n1v2`: `0.6×14 + 0.3×24 + 5 = 8.4 + 7.2 + 5 = 20.6`
+- `pz20`: `0.6×10 + 0.3×6  + 5 = 6.0  + 1.8 + 5 = 12.8`
+- `n1v2`: `0.6×40 + 0.3×24 + 5 = 24.0 + 7.2 + 5 = 36.2`
 
 Pick `n1v2`. POST `/v1/sandboxes` is forwarded to its admin endpoint. Done — ~1 ms of scheduling, then the snapshot restore runs inside the agent.
 

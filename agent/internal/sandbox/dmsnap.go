@@ -32,6 +32,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pandastack/agent/internal/diskstream"
+	"github.com/pandastack/agent/internal/nbdstream"
+	"github.com/pandastack/agent/internal/obs"
 )
 
 const (
@@ -49,12 +53,17 @@ const (
 	dmNamePrefix = "pdssnap-"
 )
 
-// baseRef tracks the shared read-only loop device for one template.
+// baseRef tracks the shared read-only block device that is the dm-snapshot
+// ORIGIN for one template. Normally loopDev is a losetup loop over a local
+// clone.ext4; for a streaming base it is an NBD device served by nbdOrigin,
+// demand-paged from GCS. Everything downstream (CreateSnap's dm-snapshot table,
+// CoW, teardown) is identical regardless of which it is.
 type baseRef struct {
-	loopDev string
-	path    string    // rootfs file this loop was attached from
-	mtime   time.Time // modtime at attach — detect stale after rebake
-	refs    int        // number of live sandboxes using this base
+	loopDev   string
+	path      string    // rootfs file this loop was attached from ("" when streaming)
+	mtime     time.Time // modtime at attach — detect stale after rebake
+	refs      int       // number of live sandboxes using this base
+	nbdOrigin *nbdstream.Origin // non-nil when loopDev is a streamed NBD device
 }
 
 // snapEntry records what we created for one sandbox so RemoveSnap can tear it down.
@@ -153,6 +162,197 @@ func (d *DMSnapManager) InitBase(template, rootfsPath string) error {
 	d.mu.Unlock()
 	d.log("dmsnap: base loop attached", "template", template, "loop", loopDev)
 	return nil
+}
+
+// EnsureBase establishes the dm-snapshot ORIGIN for a template, choosing the
+// streaming or local path automatically. It is the single dispatcher the
+// create/restore flow should call instead of InitBase/InitStreamingBase
+// directly: when disk streaming is enabled AND a rootfs.gcs sidecar exists in
+// snapDir (a thin schema-v4 seed installed without a local clone.ext4), it
+// streams the rootfs over NBD; otherwise it falls back to the local loop over
+// rootfsPath, exactly as before. Both paths are idempotent per template.
+//
+// snapDir is the installed seed directory (template-snaps/<tpl>); rootfsPath is
+// the local rootfs file for the non-streaming path. gen identifies the seed
+// generation for streaming-base reuse/refresh.
+func (d *DMSnapManager) EnsureBase(template, snapDir, rootfsPath, gen string) error {
+	if !d.enabled {
+		return nil
+	}
+	if diskStreamEnabled() {
+		if _, err := os.Stat(filepath.Join(snapDir, diskstream.DiskRefFile)); err == nil {
+			if serr := d.InitStreamingBase(template, snapDir, gen); serr == nil {
+				return nil
+			} else if rootfsPath != "" {
+				// Never-fail: streaming setup failed (no /dev/nbd free, GCS auth,
+				// header drift, …) but a local rootfs exists → fall back to the
+				// local loop rather than strand the template. A thin v4 seed has
+				// only a sparse placeholder clone.ext4 (rootfsPath==""), so this
+				// branch is taken only when a real local image is present.
+				d.log("dmsnap: streaming base setup failed, falling back to local loop",
+					"template", template, "err", serr)
+			} else {
+				return fmt.Errorf("dmsnap EnsureBase %s: streaming failed and no local rootfs: %w", template, serr)
+			}
+		}
+	}
+	return d.InitBase(template, rootfsPath)
+}
+
+// nbdOriginConfig builds the OriginConfig from the agent's env knobs.
+func nbdOriginConfig(template string, logf func(string, string, ...any)) nbdstream.OriginConfig {
+	ioTimeout, fetchBudget := nbdTimeouts()
+	return nbdstream.OriginConfig{
+		CacheRoot:             diskcacheRoot(),
+		CacheMaxBytes:         diskcacheMaxBytes(),
+		Template:              template,
+		IOTimeout:             ioTimeout,
+		FetchBudget:           fetchBudget,
+		EgressRateBytesPerSec: egressRateBps(),
+		EgressCapMultiplier:   egressCapMultiplier(),
+		Logf:                  logf,
+	}
+}
+
+// egressRateBps is the per-(template,gen)-per-host GCS fetch rate ceiling in
+// bytes/sec (PANDASTACK_NBD_EGRESS_MBPS, 0 = unlimited).
+func egressRateBps() float64 {
+	if v := os.Getenv("PANDASTACK_NBD_EGRESS_MBPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return float64(int64(n) << 20)
+		}
+	}
+	return 0
+}
+
+// egressCapMultiplier k: lifetime hard cap = k × working-set. Default 4 (design
+// §13 F13); PANDASTACK_NBD_EGRESS_CAP_K, 0 disables the cap.
+func egressCapMultiplier() float64 {
+	if v := os.Getenv("PANDASTACK_NBD_EGRESS_CAP_K"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 4
+}
+
+// diskStreamEnabled gates the disk-streaming origin path (separate from the
+// memory-streaming gate so disk can roll out independently).
+func diskStreamEnabled() bool { return os.Getenv("PANDASTACK_STREAM_DISK") == "1" }
+
+// nbdTimeouts resolves the NBD device's kernel io_timeout and the server-side
+// per-read fetch breaker. io_timeout is the no-wedge backstop (must clear GCS
+// p99); the breaker is tighter and keeps the guest moving on a stuck fetch.
+func nbdTimeouts() (ioTimeout, fetchBudget time.Duration) {
+	ioTimeout = nbdstream.DefaultIOTimeout
+	if v := os.Getenv("PANDASTACK_NBD_IO_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ioTimeout = time.Duration(n) * time.Second
+		}
+	}
+	fetchBudget = 45 * time.Second // < io_timeout; a stuck Range-GET → EIO, not a wedge
+	if v := os.Getenv("PANDASTACK_NBD_FETCH_BUDGET_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			fetchBudget = time.Duration(n) * time.Second
+		}
+	}
+	return
+}
+
+// diskcacheRoot/diskcacheMaxBytes configure the shared disk-chunk cache. It
+// shares the memcache root directory (PANDASTACK_MEMCACHE_DIR) but has its OWN
+// budget knob (PANDASTACK_DISK_CACHE_MAX_GB, default 20 GiB) because rootfs
+// working sets and image counts differ from memory; the diskstream SharedCache
+// keys are "disk-" prefixed so the two caches evict independently.
+func diskcacheRoot() string {
+	if os.Getenv("PANDASTACK_MEMCACHE") == "0" {
+		return ""
+	}
+	if dir := os.Getenv("PANDASTACK_MEMCACHE_DIR"); dir != "" {
+		return dir
+	}
+	return "/var/lib/pandastack/memcache"
+}
+
+func diskcacheMaxBytes() int64 {
+	const defaultGB = 20
+	gb := defaultGB
+	if v := os.Getenv("PANDASTACK_DISK_CACHE_MAX_GB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			gb = n
+		}
+	}
+	return int64(gb) << 30
+}
+
+// InitStreamingBase establishes the dm-snapshot ORIGIN for a template from a
+// streamed (GCS-backed, demand-paged) rootfs instead of a local clone.ext4. It
+// reads the rootfs.gcs sidecar + clone.ext4.header in snapDir, starts an
+// nbdstream Origin serving /dev/nbdN, and registers that device as the base.
+// CreateSnap, RemoveSnap, and the CoW path are all unchanged — they just layer
+// over an NBD origin instead of a loop origin.
+//
+// It is idempotent per template: a second call with a live base is a no-op
+// (the NBD device + its shared cache are reused across every restore). gen, when
+// non-empty, identifies the seed generation so a re-baked template (new gen)
+// re-establishes the device; an unchanged gen reuses the existing one.
+func (d *DMSnapManager) InitStreamingBase(template, snapDir, gen string) error {
+	if !d.enabled {
+		return fmt.Errorf("dmsnap: dm_snapshot disabled, cannot stream base")
+	}
+
+	d.mu.Lock()
+	if existing, ok := d.bases[template]; ok {
+		// Same generation (encoded in path for streaming bases) → reuse.
+		if existing.nbdOrigin != nil && existing.path == gen {
+			d.mu.Unlock()
+			return nil
+		}
+		if existing.refs > 0 {
+			d.mu.Unlock()
+			d.log("dmsnap: streaming base rebaked with live snapshots, skipping refresh",
+				"template", template, "refs", existing.refs)
+			return nil
+		}
+		old := existing
+		delete(d.bases, template)
+		d.mu.Unlock()
+		d.detachBase(template, old)
+		d.mu.Lock()
+	}
+	d.mu.Unlock()
+
+	origin, err := nbdstream.OpenOrigin(snapDir, nbdOriginConfig(template,
+		func(level, msg string, kv ...any) { d.log(msg, kv...) }))
+	if err != nil {
+		return fmt.Errorf("dmsnap InitStreamingBase %s: open origin: %w", template, err)
+	}
+
+	d.mu.Lock()
+	// path stores the generation for streaming bases (no local rootfs file).
+	d.bases[template] = &baseRef{loopDev: origin.Device, path: gen, mtime: time.Now(), refs: 0, nbdOrigin: origin}
+	d.mu.Unlock()
+	d.log("dmsnap: streaming base attached", "template", template, "device", origin.Device, "gen", gen)
+	return nil
+}
+
+// detachBase tears down a base's ORIGIN: an NBD origin is Closed (which
+// disconnects the device + stops the daemon), otherwise the loop is detached.
+func (d *DMSnapManager) detachBase(template string, b *baseRef) {
+	if b == nil {
+		return
+	}
+	if b.nbdOrigin != nil {
+		if err := b.nbdOrigin.Close(); err != nil {
+			d.log("dmsnap: streaming base origin close failed (non-fatal)", "template", template, "err", err)
+		}
+		return
+	}
+	if b.loopDev != "" {
+		if err := loopDetach(b.loopDev); err != nil {
+			d.log("dmsnap: base loop detach failed (non-fatal)", "template", template, "loop", b.loopDev, "err", err)
+		}
+	}
 }
 
 // CreateSnap creates a dm-snapshot CoW device for a new sandbox.
@@ -325,6 +525,66 @@ func (d *DMSnapManager) CleanupStale() {
 	}
 }
 
+// RunWatchdog polls every live streaming base every 5s and force-recovers any
+// whose NBD device is wedged — a request accepted but neither completed nor
+// errored for the stall window (default 60s, env PANDASTACK_NBD_WATCHDOG_STALL_SEC).
+// This is the F5 backstop for a failure the per-read breaker (45s) and the
+// in-kernel io_timeout (90s) don't catch: a daemon stuck in a way that produces
+// no completion at all (deadlocked serve goroutine, stuck syscall). The stall
+// window MUST exceed the breaker so a legitimately slow fetch — which the
+// breaker answers with EIO, stamping progress — never looks wedged.
+//
+// Recovery = detach the stalled base (Close the origin, which NBD_DISCONNECTs
+// and unblocks any pending reader) and drop it from the map. The next create
+// re-establishes it via EnsureBase (idempotent) — or, if streaming keeps
+// failing, the never-fail layer falls back to a local download. Blocks until ctx
+// is cancelled; run it in a goroutine.
+func (d *DMSnapManager) RunWatchdog(ctx context.Context) {
+	if d == nil || !d.enabled {
+		return
+	}
+	stall := 60 * time.Second
+	if v := os.Getenv("PANDASTACK_NBD_WATCHDOG_STALL_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			stall = time.Duration(n) * time.Second
+		}
+	}
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			d.reapStalledBases(stall)
+		}
+	}
+}
+
+// reapStalledBases force-recovers any streaming base wedged longer than stall.
+func (d *DMSnapManager) reapStalledBases(stall time.Duration) {
+	// Snapshot the stalled set under the lock; detach outside it (Close blocks).
+	type victim struct {
+		tpl string
+		b   *baseRef
+	}
+	var victims []victim
+	d.mu.Lock()
+	for tpl, b := range d.bases {
+		if b.nbdOrigin != nil && b.nbdOrigin.StalledFor(stall) {
+			victims = append(victims, victim{tpl, b})
+			delete(d.bases, tpl)
+		}
+	}
+	d.mu.Unlock()
+	for _, v := range victims {
+		d.log("dmsnap: WATCHDOG force-recovering wedged streaming base",
+			"template", v.tpl, "device", v.b.loopDev, "stall", stall.String(), "refs", v.b.refs)
+		obs.DiskWatchdogRecoveriesTotal.Inc()
+		d.detachBase(v.tpl, v.b)
+	}
+}
+
 // Shutdown detaches all base loop devices. Called when the agent exits.
 func (d *DMSnapManager) Shutdown() {
 	if d == nil || !d.enabled {
@@ -333,9 +593,7 @@ func (d *DMSnapManager) Shutdown() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for tpl, base := range d.bases {
-		if err := loopDetach(base.loopDev); err != nil {
-			d.log("dmsnap: shutdown loop detach failed", "template", tpl, "loop", base.loopDev, "err", err)
-		}
+		d.detachBase(tpl, base)
 	}
 	d.bases = map[string]*baseRef{}
 }

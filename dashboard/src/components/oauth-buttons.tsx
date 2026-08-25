@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { createClient } from "@/lib/supabase/client";
 
@@ -26,11 +26,17 @@ function GoogleIcon() {
 
 type Provider = "github" | "google";
 
-export function OAuthButtons({ disabled = false }: { disabled?: boolean }) {
+// `consented` lets the parent (e.g. a signup form whose Terms box is already
+// ticked) skip the modal entirely. When false, the first SSO click opens the
+// consent modal and only proceeds to OAuth after explicit acceptance.
+export function OAuthButtons({ consented = false }: { consented?: boolean }) {
   const [loading, setLoading] = useState<Provider | null>(null);
+  // The provider whose button was clicked while consent was still pending.
+  // Non-null = the consent modal is open and remembers where to continue.
+  const [pending, setPending] = useState<Provider | null>(null);
+  const [accepted, setAccepted] = useState(false);
 
-  const signIn = async (provider: Provider) => {
-    if (disabled) return;
+  const startOAuth = async (provider: Provider) => {
     setLoading(provider);
     try {
       const supabase = createClient();
@@ -40,11 +46,41 @@ export function OAuthButtons({ disabled = false }: { disabled?: boolean }) {
         options: { redirectTo },
       });
       if (error) throw error;
+      // On success the browser is redirected to the provider, so we don't reset.
     } catch (err) {
       toast.error(err instanceof Error ? err.message : `${provider} sign-in failed`);
       setLoading(null);
     }
   };
+
+  const onClick = (provider: Provider) => {
+    if (loading) return;
+    // Already consented (parent says so, or accepted in a prior click) → go.
+    if (consented || accepted) {
+      void startOAuth(provider);
+      return;
+    }
+    // Otherwise open the consent modal, remembering which provider to continue.
+    setPending(provider);
+  };
+
+  const confirmConsent = () => {
+    if (!pending) return;
+    setAccepted(true);
+    const provider = pending;
+    setPending(null);
+    void startOAuth(provider);
+  };
+
+  // Close the modal on Escape, mirroring the dashboard's confirm dialog.
+  useEffect(() => {
+    if (!pending) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPending(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pending]);
 
   const btnStyle = {
     display: "flex",
@@ -63,33 +99,90 @@ export function OAuthButtons({ disabled = false }: { disabled?: boolean }) {
     transition: "background 0.15s",
   } satisfies React.CSSProperties;
 
-  const disabledStyle = {
-    opacity: 0.5,
-    cursor: "not-allowed",
-  } satisfies React.CSSProperties;
+  const renderBtn = (provider: Provider, icon: React.ReactNode, label: string) => (
+    <button
+      style={btnStyle}
+      disabled={loading !== null}
+      onClick={() => onClick(provider)}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-overlay)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-elevated)"; }}
+    >
+      {icon}
+      {loading === provider ? "Redirecting…" : label}
+    </button>
+  );
 
   return (
     <div className="flex flex-col gap-2">
-      <button
-        style={{ ...btnStyle, ...(disabled ? disabledStyle : {}) }}
-        disabled={disabled || loading !== null}
-        onClick={() => signIn("github")}
-        onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-overlay)"; }}
-        onMouseLeave={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-elevated)"; }}
-      >
-        <GitHubIcon />
-        {loading === "github" ? "Redirecting…" : "Continue with GitHub"}
-      </button>
-      <button
-        style={{ ...btnStyle, ...(disabled ? disabledStyle : {}) }}
-        disabled={disabled || loading !== null}
-        onClick={() => signIn("google")}
-        onMouseEnter={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-overlay)"; }}
-        onMouseLeave={(e) => { if (!disabled) e.currentTarget.style.background = "var(--bg-elevated)"; }}
-      >
-        <GoogleIcon />
-        {loading === "google" ? "Redirecting…" : "Continue with Google"}
-      </button>
+      {renderBtn("github", <GitHubIcon />, "Continue with GitHub")}
+      {renderBtn("google", <GoogleIcon />, "Continue with Google")}
+
+      {pending && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Accept terms to continue"
+          onClick={() => setPending(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl shadow-2xl"
+            style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 pt-4 pb-3">
+              <div className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                Before you continue
+              </div>
+              <div className="mt-1.5 text-[13px] leading-5" style={{ color: "var(--text-secondary)" }}>
+                Accept PandaStack&apos;s terms to sign up with{" "}
+                {pending === "github" ? "GitHub" : "Google"}.
+              </div>
+              <label className="mt-3 flex items-start gap-2 text-[12px] leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                <input
+                  type="checkbox"
+                  checked={accepted}
+                  onChange={(e) => setAccepted(e.target.checked)}
+                  className="mt-0.5 size-3.5 shrink-0"
+                  style={{ accentColor: "var(--brand)" }}
+                />
+                <span>
+                  I agree to PandaStack&apos;s{" "}
+                  <a href="https://pandastack.ai/terms" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:text-emerald-300">Terms of Service</a>{" "}
+                  and{" "}
+                  <a href="https://pandastack.ai/privacy" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:text-emerald-300">Privacy Policy</a>.
+                </span>
+              </label>
+            </div>
+            <div
+              className="flex items-center justify-end gap-2 px-5 py-3"
+              style={{ borderTop: "1px solid var(--border-subtle)" }}
+            >
+              <button
+                style={{ ...btnStyle, width: "auto", padding: "6px 12px", background: "transparent", border: "none", color: "var(--text-secondary)" }}
+                onClick={() => setPending(null)}
+              >
+                Cancel
+              </button>
+              <button
+                style={{
+                  ...btnStyle,
+                  width: "auto",
+                  padding: "6px 14px",
+                  background: accepted ? "var(--brand)" : "var(--bg-overlay)",
+                  borderColor: accepted ? "var(--brand)" : "var(--border-default)",
+                  color: accepted ? "var(--bg-base)" : "var(--text-muted)",
+                  cursor: accepted ? "pointer" : "not-allowed",
+                }}
+                disabled={!accepted}
+                onClick={confirmConsent}
+              >
+                Accept &amp; continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

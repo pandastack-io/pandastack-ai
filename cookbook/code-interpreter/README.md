@@ -7,5 +7,7 @@ Pre-installed: `python3`, `numpy`, `pandas`, `matplotlib`, `scipy`,
 python main.py
 ```
 
-For headless web extraction and scraping see [`../browser`](../browser/) — it
-reuses the same sandbox across multiple `sb.exec()` calls.
+The `code-interpreter` template also ships Playwright, so light browser work
+runs here directly. For a heavier headless-Chromium stack, bake a custom
+template — see
+[Bake your own](../../docs-site/content/docs/concepts/templates.mdx#bake-your-own).

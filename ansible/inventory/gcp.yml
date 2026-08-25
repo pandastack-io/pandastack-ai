@@ -11,7 +11,7 @@
 plugin: google.cloud.gcp_compute
 
 projects:
-  - 
+  - REPLACE_WITH_YOUR_GCP_PROJECT_ID
 
 zones:
   - us-central1-a

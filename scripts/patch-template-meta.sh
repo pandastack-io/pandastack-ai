@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # patch-template-meta.sh — Push correct cpu/memory_mb into every template's
-# meta.json on both prod agent VMs without a full rootfs rebake.
+# meta.json on your agent VMs without a full rootfs rebake.
 #
 # The agent reads <dataDir>/templates/<name>/meta.json at sandbox-create time.
 # If cpu or memory_mb are missing it falls back to 1/512 (wrong). This script
@@ -8,30 +8,32 @@
 # rebakes it on next use (automatic — no manual rebake needed).
 #
 # Usage:
-#   ./scripts/patch-template-meta.sh          # patch both VMs
-#   ./scripts/patch-template-meta.sh x1bm     # patch x1bm only
-#   ./scripts/patch-template-meta.sh pn4q     # patch pn4q only
+#   GCP_PROJECT=my-project ./scripts/patch-template-meta.sh        # all VMs
+#   GCP_PROJECT=my-project ./scripts/patch-template-meta.sh node-a # one VM
+#
+# Configure your own fleet via GCP_PROJECT + AGENT_VMS (a space-separated list
+# of "vm-name:zone" pairs).
 
 set -euo pipefail
 
 PROJECT="${GCP_PROJECT:-}"
+: "${PROJECT:?set GCP_PROJECT to your GCP project id}"
 DATA_DIR="${DATA_DIR:-/var/lib/pandastack}"
 
-# ---- template specs (must match pandastack.ai/templates/) ------------------
-# Format: "name:cpu:mem_mb"
+# ---- template specs --------------------------------------------------------
+# Format: "name:cpu:mem_mb". Keep in sync with CPU_COUNT/MEMORY_MB in
+# scripts/bake-templates.sh and the catalog in api/cmd/api/templates.go.
 TEMPLATE_SPECS=(
-  "base:2:2048"
-  "code-interpreter:2:2048"
-  "agent:2:2048"
-  "browser:4:4096"
-  "postgres-16:2:1024"
+  "base:8:4096"
+  "code-interpreter:8:2048"
+  "agent:8:2048"
+  "postgres-16:8:1024"
 )
 
 # ---- VM list (name:zone) ---------------------------------------------------
-ALL_VMS=(
-  "pandastack-agent-x1bm:us-central1-a"
-  "pandastack-agent-pn4q:us-central1-b"
-)
+# Override for your own fleet, e.g.
+#   AGENT_VMS="agent-a:us-central1-a agent-b:us-central1-b"
+read -r -a ALL_VMS <<< "${AGENT_VMS:-agent-a:us-central1-a agent-b:us-central1-b}"
 
 # Apply suffix filter if requested.
 target_suffix="${1:-}"
@@ -112,4 +114,4 @@ for entry in "${ALL_VMS[@]}"; do
 done
 
 log "All done."
-log "Verify: gcloud compute ssh pandastack-agent-x1bm --tunnel-through-iap --zone=us-central1-a --project=$PROJECT -- sudo cat /var/lib/pandastack/templates/agent/meta.json"
+log "Verify: gcloud compute ssh <vm> --tunnel-through-iap --zone=<zone> --project=$PROJECT -- sudo cat $DATA_DIR/templates/agent/meta.json"

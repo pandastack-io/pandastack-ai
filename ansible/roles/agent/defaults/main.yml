@@ -8,3 +8,8 @@ agent_restart_on_change: true
 # Sanity floor: a real agent binary is tens of MB. Guards against pushing a
 # truncated/empty object.
 agent_min_bytes: 5000000
+
+# Swap backing for the memory pressure ladder's squeeze rung. zswap keeps the
+# common case in compressed RAM; the file is the overflow.
+agent_swapfile_size: 16G
+agent_zswap_max_pool_percent: 25

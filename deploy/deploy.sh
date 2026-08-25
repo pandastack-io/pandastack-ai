@@ -52,8 +52,10 @@ BUILD_DIR="$SCRIPT_DIR/.build"
 REMOTE="ubuntu@$HOST"
 REMOTE_STAGE="/home/ubuntu/pandastack-deploy"
 ENV_FILE="$REPO_ROOT/.env.local"
-APP_FQDN="dev.pandastack.dev"
-API_FQDN="api.dev.pandastack.dev"
+# Your own FQDNs. No defaults: a default would point the deploy's DNS, TLS and
+# health checks at someone else's hostnames.
+: "${APP_FQDN:?set APP_FQDN to your dashboard FQDN, e.g. app.example.com}"
+: "${API_FQDN:?set API_FQDN to your API FQDN, e.g. api.example.com}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

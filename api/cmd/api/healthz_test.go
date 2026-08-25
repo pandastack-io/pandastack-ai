@@ -2,7 +2,9 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -14,15 +16,29 @@ func TestHealthzStatusOK(t *testing.T) {
 		t.Fatalf("expected ok/200, got %s/%d", resp.Status, code)
 	}
 }
+func TestHealthzResponseHidesInternals(t *testing.T) {
+	t.Setenv("PANDASTACK_DB_DSN", "postgres://example")
+
+	_, resp := healthzStatus()
+	body, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal healthz response: %v", err)
+	}
+	got := string(body)
+	if got != `{"status":"ok"}` {
+		t.Fatalf("healthz payload must be status-only, got %s", got)
+	}
+	for _, leak := range []string{"DB", "DSN", "checks", "PANDASTACK"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("healthz payload leaks internal detail %q: %s", leak, got)
+		}
+	}
+}
 
 func TestHealthzStatusUnhealthyWhenDBMissing(t *testing.T) {
-	t.Setenv("PANDASTACK_DB_DSN", "")
 
 	code, resp := healthzStatus()
 	if code != http.StatusServiceUnavailable || resp.Status != "unhealthy" {
 		t.Fatalf("expected unhealthy/503, got %s/%d", resp.Status, code)
-	}
-	if resp.Checks["PANDASTACK_DB_DSN"] != "missing" {
-		t.Fatalf("expected missing db check, got %q", resp.Checks["PANDASTACK_DB_DSN"])
 	}
 }

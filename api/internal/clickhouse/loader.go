@@ -3,12 +3,20 @@ package clickhouse
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 )
+
+// SchemaDDL is the ClickHouse analytics DDL, embedded into the binary so it
+// travels with the api and works on the edge VM (which has no schema.sql on
+// disk). Mirrors the agent's embed. Pass to EnsureSchema at startup.
+//
+//go:embed schema.sql
+var SchemaDDL string
 
 // FromURL parses a clickhouse URL of the form
 //

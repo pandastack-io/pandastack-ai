@@ -64,6 +64,25 @@ var (
 		Help:      "Total sandbox create attempts, partitioned by result and boot mode.",
 	}, []string{"result", "boot_mode"})
 
+	// SandboxCPUSeconds is the active-CPU counter: cumulative CPU
+	// seconds actually consumed by each sandbox's Firecracker process (from its
+	// cgroup's cpu.stat usage_usec). This is the utilization signal behind
+	// GET /sandboxes/{id}/util and the scale-out trigger.
+	SandboxCPUSeconds = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "pandastack",
+		Name:      "sandbox_cpu_usage_seconds_total",
+		Help:      "Cumulative active CPU seconds consumed per sandbox (cgroup cpu.stat).",
+	}, []string{"sandbox"})
+
+	// SandboxResidentBytes is the working-set gauge: measured
+	// resident memory per sandbox (Rss + hugetlb from smaps_rollup). The
+	// shadow-admission signal; becomes the admission input when T2.1 enforces.
+	SandboxResidentBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "pandastack",
+		Name:      "sandbox_resident_bytes",
+		Help:      "Measured resident memory per sandbox incl. hugetlb (bytes).",
+	}, []string{"sandbox"})
+
 	BootDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "pandastack",
 		Name:      "sandbox_boot_duration_seconds",
@@ -73,6 +92,16 @@ var (
 
 	// HibernationTotal counts lifecycle transitions for persistent sandboxes.
 	// result=hibernated/woken/wake_failed/hibernate_failed.
+	// Pressure-ladder actions + current host pressure level.
+	PressureActionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pandastack_pressure_actions_total",
+		Help: "Pressure-ladder actions taken (squeeze, unsqueeze, freeze).",
+	}, []string{"action"})
+	MemPressureLevel = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "pandastack_host_mem_pressure_level",
+		Help: "Host memory pressure ladder level (0 ok, 1 elevated, 2 critical).",
+	})
+
 	HibernationTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "pandastack",
 		Name:      "hibernation_total",
@@ -113,6 +142,72 @@ var (
 		Name:      "uffd_zero_fill_total",
 		Help:      "Total UFFD faults served as zero pages (no I/O).",
 	})
+
+	// UffdFaultRetriesTotal counts resolve retries the handler made to keep
+	// faults alive through a transient memory-backend (GCS) blip. Nonzero means
+	// the streaming path hit turbulence; a sharp rise precedes a stall.
+	UffdFaultRetriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack",
+		Name:      "uffd_fault_retries_total",
+		Help:      "Total UFFD resolve retries across all streamed restores (transient-blip recovery).",
+	})
+
+	// UffdHandlerFatalTotal counts handlers that exited with a fatal error
+	// (fault-retry budget exhausted on a sustained outage) — the loud failure
+	// signal that replaces the previous silent guest hang. Alert on any increase.
+	UffdHandlerFatalTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack",
+		Name:      "uffd_handler_fatal_total",
+		Help:      "UFFD handlers that died on a sustained memory-stream outage (was: silent VM hang).",
+	})
+
+	// ---- streaming disk (NBD) metrics, design §6.3 ----
+	// Incremented at the moment each event occurs (push), so a closed/recovered
+	// device's counts are never lost — important for fetch_bytes (egress).
+
+	// DiskFetchesTotal: 1-MiB chunks actually pulled from GCS into the cache.
+	DiskFetchesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_fetches_total",
+		Help: "Total rootfs chunks fetched from GCS into the streaming-disk cache.",
+	})
+	// DiskZeroFillTotal: device reads served from absent/zero chunks (no I/O).
+	DiskZeroFillTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_zerofill_total",
+		Help: "Total streaming-disk reads served as zeros (absent chunks, no I/O).",
+	})
+	// DiskFetchBytesTotal: bytes that actually left for GCS, labeled by
+	// (template, generation) for per-tenant egress accounting. Cache hits,
+	// zero-fill, and overlay reads contribute ZERO by construction (charged at
+	// the governor, which sits below the shared cache).
+	DiskFetchBytesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_fetch_bytes_total",
+		Help: "Bytes fetched from GCS for streaming-disk, by template+generation.",
+	}, []string{"template", "generation"})
+	// DiskBreakerOpenTotal: reads short-circuited to EIO by the per-read budget.
+	DiskBreakerOpenTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_breaker_open_total",
+		Help: "Streaming-disk reads short-circuited to EIO by the fetch breaker.",
+	})
+	// DiskVerifyErrorsTotal: chunks rejected for SHA-256 mismatch (integrity).
+	DiskVerifyErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_verify_errors_total",
+		Help: "Streaming-disk chunks rejected for SHA-256 integrity-check failure.",
+	})
+	// DiskGCSRetriesTotal: transient GCS fetch errors retried.
+	DiskGCSRetriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_gcs_retries_total",
+		Help: "Streaming-disk GCS Range-GET retries on transient errors.",
+	})
+	// DiskCapHitsTotal: reads rejected by the lifetime egress hard cap (F13).
+	DiskCapHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_egress_cap_hits_total",
+		Help: "Streaming-disk reads rejected by the lifetime egress hard cap.",
+	})
+	// DiskWatchdogRecoveriesTotal: wedged NBD devices force-recovered (F5).
+	DiskWatchdogRecoveriesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pandastack", Name: "disk_watchdog_recoveries_total",
+		Help: "Streaming-disk NBD devices force-recovered by the stall watchdog.",
+	})
 )
 
 var registered bool
@@ -125,16 +220,30 @@ func RegisterCollectors() {
 	}
 	registered = true
 	Reg.MustRegister(
+		PressureActionsTotal,
+		MemPressureLevel,
 		HTTPRequestsTotal,
 		HTTPRequestDuration,
 		SandboxesGauge,
 		SandboxCreatesTotal,
+		SandboxCPUSeconds,
+		SandboxResidentBytes,
 		BootDuration,
 		HibernationTotal,
 		UffdRestoreTotal,
 		UffdPageFaultsTotal,
 		UffdChunkFetchesTotal,
 		UffdZeroFillTotal,
+		UffdFaultRetriesTotal,
+		UffdHandlerFatalTotal,
+		DiskFetchesTotal,
+		DiskZeroFillTotal,
+		DiskFetchBytesTotal,
+		DiskBreakerOpenTotal,
+		DiskVerifyErrorsTotal,
+		DiskGCSRetriesTotal,
+		DiskCapHitsTotal,
+		DiskWatchdogRecoveriesTotal,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

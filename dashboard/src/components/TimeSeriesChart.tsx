@@ -39,7 +39,8 @@ type Props = {
 
 type Range = { fromMs: number; toMs: number; stepMs: number };
 
-const PALETTE = ["#a78bfa", "#34d399", "#fbbf24", "#60a5fa", "#f87171", "#22d3ee"];
+import { PALETTE } from "./chart-theme";
+export { CHART_PALETTE, type Series as ThemeSeries } from "./chart-theme";
 
 /*
  * Recharts sets stroke/fill as SVG presentation attributes, which (per SVG2)
@@ -65,8 +66,20 @@ function lineColor(c: string, light: boolean): string {
   return light ? LIGHT_LINE[c] ?? c : c;
 }
 
+// UTC bucket-string regex: "YYYY-MM-DD HH:MM:SS[.fff]" — the exact shape the
+// analytics store's toStartOfInterval hands back (no TZ marker). See toMs.
+const naiveBucketRe = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
+
 function toMs(t: string | number): number {
   if (typeof t === "number") return t;
+  // Bucket strings arrive without a timezone marker. Plain `new Date(str)`
+  // parses those as LOCAL, which then silently shifts EVERY point by the
+  // viewer's tz offset — plotting real data at one epoch and the zero-fill grid
+  // (built via fmtBucketUTC → toMs round-trip) at a completely different one so
+  // they never collide and the merged chart ends up with real values buried
+  // under zero-fill needles. Force UTC.
+  const m = naiveBucketRe.exec(t);
+  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6], m[7] ? +m[7] : 0);
   return new Date(t).getTime();
 }
 
@@ -294,7 +307,6 @@ export default function TimeSeriesChart({
 }
 
 // re-exported so consumers can pick a stable color
-export const CHART_PALETTE = PALETTE;
 // Kept for backward-compat with any consumer that imported these types.
 export type LineData = never;
 export const CandlestickSeries = undefined;

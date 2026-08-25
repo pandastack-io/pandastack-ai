@@ -10,30 +10,30 @@ A **volume** is a named ext4 image that lives on the host independently of any s
 ```bash
 # Create
 curl -X POST https://api.pandastack.ai/v1/volumes \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name":"shared-models","size_mb":4096}'
 # {"name":"shared-models","size_mb":4096,"created_at":"2026-06-01T15:30:18Z"}
 
 # List
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" https://api.pandastack.ai/v1/volumes
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" https://api.pandastack.ai/v1/volumes
 
 # Get one
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   https://api.pandastack.ai/v1/volumes/shared-models
 
 # Delete (data gone, irreversible)
-curl -X DELETE -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -X DELETE -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   https://api.pandastack.ai/v1/volumes/shared-models
 ```
 
-Backing layout: one file per volume at `<data-dir>/volumes/ws/<workspace>/<name>.ext4`. Maximum size **65,536 MB** (64 GiB) per volume on every plan. Names are workspace-scoped.
+Backing layout: one file per volume at `<data-dir>/volumes/ws/<workspace>/<name>.ext4`. Maximum size **65,536 MB** (64 GiB) per volume. Names are workspace-scoped.
 
 ## Attach to a sandbox
 
 ```bash
 curl -X POST https://api.pandastack.ai/v1/sandboxes \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "template": "code-interpreter",
@@ -96,7 +96,7 @@ This is intentional: the platform doesn't know what path your application expect
 
 ## Use cases
 
-**Shared model weights for an LLM workspace.** Mount a 30 GB volume of `huggingface/transformers` weights read-only across every inference sandbox. Cold-boot a sandbox in 180 ms; `transformers` finds the cache on `/mnt/models`, skips re-download, runs in seconds.
+**Shared model weights for an LLM workspace.** Mount a 30 GB volume of `huggingface/transformers` weights read-only across every inference sandbox. Cold-boot a sandbox in ~50 ms; `transformers` finds the cache on `/mnt/models`, skips re-download, runs in seconds.
 
 **Per-user persistent workspace.** One volume per dashboard user, attached rw to whichever sandbox they currently have running. Close the sandbox, come back tomorrow, attach the volume to a fresh one — your `node_modules`, `~/.cache`, `~/.bashrc` are still there.
 
@@ -113,37 +113,23 @@ This is intentional: the platform doesn't know what path your application expect
 
 The tradeoff: volumes are **host-local**. A sandbox restored on a different agent host can't see a volume that exists only on the original host. The roadmap item to make volumes "follow" cross-host moves uses GCS-backed staging on attach, same mechanism as cross-host snapshot restore — but as of v1, schedule sandboxes that need a specific volume to the host that has it (the scheduler honors this hint automatically when `volumes` is set on create).
 
-## Plan quotas
+## How many you can create
 
-Volume quotas come from your subscription tier. Every plan's quota is included at no extra charge:
+There is **no volume count or storage quota** in the open-source edition — it
+ships unmetered and uncapped. The only limits are physical:
 
-| Plan       | Max volumes | Max size / volume | Total provisioned storage |
-| ---------- | ----------- | ----------------- | ------------------------- |
-| Free       | 1           | 1 GiB             | 1 GiB                     |
-| Pro        | 10          | 10 GiB            | 100 GiB                   |
-| Team       | 50          | 50 GiB            | 2.5 TiB                   |
-| Enterprise | Unlimited   | 64 GiB            | Unlimited                 |
+- A hard ceiling of **64 GiB per volume**. Requests above it are rejected.
+- If the target host has no free space left for the requested size, create returns **HTTP 507** — retry (the scheduler picks again) or ask for a smaller size.
+- A single VM can carry **14** volumes (24 virtio slots minus the rootfs and reserved devices).
 
-- A hard ceiling of **64 GiB per volume** applies on every plan.
-- Creating a volume that would exceed any quota returns **HTTP 429** with the limit details.
-- If the target host has no headroom left for the requested size, create returns **HTTP 507** — retry or pick a smaller size.
-- The live quota catalog is served at `GET /v1/pricing` (`tiers[].max_volumes`, `tiers[].max_volume_size_gib`, `tiers[].max_volume_total_gib`).
-
-## Pricing
-
-Storage **within your plan's quota is free**. Provisioned storage beyond the quota bills at **$0.15 per GiB-month**, metered continuously (per-second granularity, same pipeline as compute) and drawn from the same monthly usage credit.
-
-- Billing is on **provisioned** size (what you asked for at create), not bytes written — sparse files don't reduce your bill.
-- **Managed database volumes count against the same workspace storage meter** — there is no separate database storage rate.
-- The live rate is exposed at `GET /v1/pricing` as `rates.volume_usd_per_gib_month`.
-- Month-to-date storage spend appears in `GET /v1/orgs/{id}/billing` as `mtd_storage_gib_seconds` and `mtd_storage_cost_usd` (a subset of `mtd_cost_usd`).
+Beyond that, you are bounded only by the disk on your agent hosts.
 
 ## Limits
 
 | Limit               | Value                                          |
 | ------------------- | ---------------------------------------------- |
-| Max size per volume | 64 GiB (hard ceiling; plan quota may be lower) |
+| Max size per volume | 64 GiB (hard ceiling)                          |
 | Max volumes / sandbox | 14 (24 minus rootfs minus reserved slots)    |
-| Max volumes / workspace | plan quota (see table above)                |
+| Max volumes / workspace | Unlimited — bounded by host disk            |
 | Filesystem          | ext4 only in v1                                |
 | Cross-host          | Host-local in v1 (use scheduler affinity)      |

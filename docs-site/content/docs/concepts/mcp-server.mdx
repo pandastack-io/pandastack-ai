@@ -1,9 +1,9 @@
 ---
-title: Hosted MCP Server
-description: A workspace-level MCP endpoint at api.pandastack.ai/mcp — connect Claude, Cursor, or any MCP client once and manage sandboxes, databases, and apps with 13 tools.
+title: Workspace MCP Server
+description: A workspace-level MCP endpoint at /mcp — connect Claude, Cursor, or any MCP client once and manage sandboxes, databases, and templates with 11 tools.
 ---
 
-PandaStack ships a **hosted, workspace-level MCP server**. Where the [per-sandbox MCP endpoint](/docs/concepts/mcp) turns one sandbox into a tool, this endpoint turns your **whole workspace** into one: the model can create and destroy sandboxes, run commands, read/write files, provision Postgres databases, and trigger app deploys — all through a single URL and your existing API token.
+PandaStack ships a **workspace-level MCP server**. Where the [per-sandbox MCP endpoint](/docs/concepts/mcp) turns one sandbox into a tool, this endpoint turns your **whole workspace** into one: the model can create and destroy sandboxes, run commands, read/write files, and provision Postgres databases — all through a single URL and your existing API token.
 
 ```
 POST https://api.pandastack.ai/mcp
@@ -13,13 +13,9 @@ Authorization: Bearer pds_...
 
 `POST /v1/mcp` is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works with every MCP client that supports remote HTTP servers.
 
-<Callout title="Paid plans only">
-The hosted MCP server is available on **Pro, Team, and Enterprise** plans. Requests from free workspaces get HTTP `402` with an upgrade message. Enterprise gets a 10× higher tool-call rate limit. See [pricing](https://pandastack.ai/pricing).
-</Callout>
-
 ## Tools
 
-13 tools, mirroring the REST API. Every call is scoped to the workspace your token belongs to and counts against the same quotas and billing as the equivalent REST call.
+11 tools, mirroring the REST API. Every call is scoped to the workspace your token belongs to and runs exactly the same control-plane path as the equivalent REST call.
 
 ### Sandboxes
 
@@ -45,12 +41,10 @@ The hosted MCP server is available on **Pro, Team, and Enterprise** plans. Reque
 
 `create_database` blocks until PostgreSQL is ready (30–90s) and returns the connection URL.
 
-### Apps & templates
+### Templates
 
 | Tool             | Arguments              | Equivalent REST call             |
 | ---------------- | ---------------------- | -------------------------------- |
-| `list_apps`      | `{}`                   | `GET /v1/apps`                   |
-| `deploy_app`     | `{app_id, git_ref?}`   | `POST /v1/apps/{id}/deploys`     |
 | `list_templates` | `{}`                   | `GET /v1/templates`              |
 
 ## Quick test with curl
@@ -58,26 +52,26 @@ The hosted MCP server is available on **Pro, Team, and Enterprise** plans. Reque
 ```bash
 # Handshake
 curl -s -X POST https://api.pandastack.ai/mcp \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
        "params":{"protocolVersion":"2025-03-26"}}'
 
 # Discover tools
 curl -s -X POST https://api.pandastack.ai/mcp \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 
 # Spin up a sandbox and run a command
 curl -s -X POST https://api.pandastack.ai/mcp \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"create_sandbox","arguments":{"template":"code-interpreter"}}}'
 
 curl -s -X POST https://api.pandastack.ai/mcp \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":4,"method":"tools/call",
        "params":{"name":"run_command",
@@ -130,24 +124,21 @@ Use the standard remote bridge:
 }
 ```
 
-After connecting, ask the model things like *"create a sandbox and benchmark this script"*, *"spin up a Postgres database for this project"*, or *"redeploy my app from main"* — the tools do the rest.
+After connecting, ask the model things like *"create a sandbox and benchmark this script"* or *"spin up a Postgres database for this project"* — the tools do the rest.
 
 ## Auth, limits, and behavior
 
 - **Auth**: the same `Bearer pds_...` workspace token as the REST API. `401` without one.
-- **Plan gate**: paid plans only — free workspaces get `402 Payment Required`.
-- **Rate limits**: tool calls are limited per workspace per minute — 60/min on Pro/Team, 600/min on Enterprise. Exceeding returns JSON-RPC error `-32000`; `initialize` and `tools/list` are never rate-limited.
+- **Abuse guard**: `tools/call` is rate-limited per workspace per minute — **60/min by default**, configurable with `PANDASTACK_MCP_RATE_PER_MIN` on the API. Exceeding returns JSON-RPC error `-32000`; `initialize` and `tools/list` are never rate-limited. This is a runaway-loop guard, not a usage quota.
 - **Stateless**: no sessions to manage; safe to use from many clients concurrently.
 - **Request body cap**: 1 MiB. JSON-RPC batch arrays are not supported (`-32600`).
-- **Billing**: tool calls execute the same control-plane paths as REST, so sandbox runtime, database storage, and deploys are metered identically.
 
-## Hosted vs per-sandbox MCP
+## Workspace vs per-sandbox MCP
 
-| | Hosted (`/mcp`) | Per-sandbox (`/v1/sandboxes/{id}/mcp`) |
+| | Workspace (`/mcp`) | Per-sandbox (`/v1/sandboxes/{id}/mcp`) |
 | --- | --- | --- |
 | Scope | whole workspace | one sandbox |
-| Lifecycle tools | create/delete sandboxes, DBs, deploys | none — sandbox must already exist |
-| Plan | paid plans | all plans |
+| Lifecycle tools | create/delete sandboxes and databases | none — sandbox must already exist |
 | Best for | agents that manage infrastructure | giving a model one disposable Linux box |
 
-They compose: use the hosted server to `create_sandbox`, then hand the per-sandbox MCP URL to a narrower-scoped agent that should only touch that box.
+They compose: use the workspace server to `create_sandbox`, then hand the per-sandbox MCP URL to a narrower-scoped agent that should only touch that box.

@@ -25,7 +25,7 @@ Most editor/LSP-client libraries (`vscode-jsonrpc`, `monaco-languageclient`, `to
 ## Supported languages
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   https://api.pandastack.ai/v1/lsp/languages
 # {"languages":["python","py"]}
 ```
@@ -81,7 +81,7 @@ You can connect a native editor by tunneling the WS to a local Unix socket:
 ```bash
 websocat \
   --binary \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   unix-listen:/tmp/pds-pylsp.sock \
   wss://api.pandastack.ai/v1/sandboxes/$SID/lsp/python
 ```

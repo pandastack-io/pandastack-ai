@@ -97,8 +97,13 @@ func TestStore_SandboxLifecycle(t *testing.T) {
 	}
 
 	// Persist persistent=true + ttl, then read back (simulates rehydrate after restart).
-	if err := s.SetSandboxLifecycle(ctx, "lc1", true, 3600); err != nil {
-		t.Fatalf("SetSandboxLifecycle: %v", err)
+	if rows, err := s.SetSandboxLifecycle(ctx, "lc1", true, 3600); err != nil || rows != 1 {
+		t.Fatalf("SetSandboxLifecycle: rows=%d err=%v", rows, err)
+	}
+	// The race the retry wrapper guards against: an UPDATE for a row that
+	// doesn't exist yet must report 0 rows, not an error.
+	if rows, err := s.SetSandboxLifecycle(ctx, "does-not-exist", true, 60); err != nil || rows != 0 {
+		t.Fatalf("missing-row UPDATE must be (0,nil); got (%d,%v)", rows, err)
 	}
 	persistent, ttl, found, err = s.GetSandboxLifecycle(ctx, "lc1")
 	if err != nil || !found {
@@ -128,7 +133,7 @@ func TestStore_BootEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	events, err := s.ListBootEvents(ctx, "", 0)
+	events, err := s.ListBootEvents(ctx, "", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,5 +165,135 @@ func TestStore_Audit(t *testing.T) {
 	}
 	if len(entries) != 3 {
 		t.Fatalf("audit: got %d, want 3", len(entries))
+	}
+
+}
+
+// ListSandboxesForAgent is the query-side of the cross-agent ownership fix: on
+// the shared multi-node Postgres it must return ONLY this agent's rows plus
+// legacy unclaimed rows (agent_id=”), never a peer's rows — so no agent
+// full-scans every tenant's rows on its housekeeping timers. It must be a strict
+// superset of what ownsRow admits (mine + legacy) so callers see identical
+// results to the old fleet-wide-list + ownsRow filter.
+func TestStore_ListSandboxesForAgent_Scoping(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// InsertSandbox stamps s.agentID onto each row, so flip identity between
+	// inserts to fabricate rows owned by different agents.
+	mk := func(id, owner string) {
+		s.SetAgentID(owner)
+		sb := map[string]any{
+			"id": id, "template": "base", "cpu": 1, "memory_mb": 512,
+			"status": "running", "created_at": time.Now().Format(time.RFC3339Nano),
+		}
+		if err := s.InsertSandbox(ctx, sb); err != nil {
+			t.Fatalf("Insert %s: %v", id, err)
+		}
+	}
+	mk("mine-1", "agent-A")
+	mk("mine-2", "agent-A")
+	mk("peer-1", "agent-B")
+	mk("peer-2", "agent-B")
+	mk("legacy-1", "") // pre-ownership-column row
+
+	ids := func(rows []any) map[string]bool {
+		out := map[string]bool{}
+		for _, r := range rows {
+			out[r.(map[string]any)["id"].(string)] = true
+		}
+		return out
+	}
+
+	// agent-A sees its two rows + the legacy row, and NEVER agent-B's rows.
+	got, err := s.ListSandboxesForAgent(ctx, "agent-A")
+	if err != nil {
+		t.Fatalf("ListSandboxesForAgent(A): %v", err)
+	}
+	set := ids(got)
+	if len(got) != 3 || !set["mine-1"] || !set["mine-2"] || !set["legacy-1"] {
+		t.Fatalf("agent-A scope wrong: %v", set)
+	}
+	if set["peer-1"] || set["peer-2"] {
+		t.Fatalf("agent-A leaked a peer's rows: %v", set)
+	}
+
+	// agent-B sees its own two + the legacy row, none of agent-A's.
+	got, _ = s.ListSandboxesForAgent(ctx, "agent-B")
+	set = ids(got)
+	if len(got) != 3 || !set["peer-1"] || !set["peer-2"] || !set["legacy-1"] || set["mine-1"] {
+		t.Fatalf("agent-B scope wrong: %v", set)
+	}
+
+	// A never-seen agent still gets the legacy row (so Recover can claim it).
+	got, _ = s.ListSandboxesForAgent(ctx, "agent-C")
+	set = ids(got)
+	if len(got) != 1 || !set["legacy-1"] {
+		t.Fatalf("agent-C should see only the legacy row: %v", set)
+	}
+
+	// Fleet-wide List still returns everything (public API + fork-tree path).
+	all, _ := s.ListSandboxes(ctx)
+	if len(all) != 5 {
+		t.Fatalf("fleet-wide ListSandboxes should see all 5, got %d", len(all))
+	}
+}
+
+// SetSandboxNetwork is used by the wake netns-recovery path: when a hibernated
+// NATID sandbox's netns was torn down across an agent restart and we re-allocate
+// a fresh one, the proxy dial target (guest_ip) + netns name (host_tap) + mac
+// change and must be persisted so the pg-tunnel/SSH paths reach the new netns.
+// It must update ONLY those three columns and leave everything else intact.
+func TestStore_SetSandboxNetwork_ScopedUpdate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	sb := map[string]any{
+		"id":         "nrec1",
+		"template":   "postgres-16",
+		"cpu":        2,
+		"memory_mb":  1024,
+		"status":     "hibernated",
+		"guest_ip":   "10.200.0.2",
+		"host_tap":   "ns-p0000008f",
+		"mac":        "AA:BB:CC:DD:EE:01",
+		"vsock_cid":  0,
+		"boot_ms":    42,
+		"boot_mode":  "snapshot-natid",
+		"created_at": time.Now().Format(time.RFC3339Nano),
+		"metadata":   map[string]string{"workspace": "alpha"},
+	}
+	if err := s.InsertSandbox(ctx, sb); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Simulate a netns re-allocation handing back a NEW proxy IP + netns name.
+	if err := s.SetSandboxNetwork(ctx, "nrec1", "10.200.7.42", "ns-p000000a6", "AA:BB:CC:DD:EE:99"); err != nil {
+		t.Fatalf("SetSandboxNetwork: %v", err)
+	}
+
+	got, err := s.GetSandbox(ctx, "nrec1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	row := got.(map[string]any)
+	// The three network columns must be updated...
+	if row["guest_ip"] != "10.200.7.42" {
+		t.Fatalf("guest_ip not updated: %v", row["guest_ip"])
+	}
+	if row["host_tap"] != "ns-p000000a6" {
+		t.Fatalf("host_tap not updated: %v", row["host_tap"])
+	}
+	if row["mac"] != "AA:BB:CC:DD:EE:99" {
+		t.Fatalf("mac not updated: %v", row["mac"])
+	}
+	// ...and nothing else may be clobbered.
+	if row["template"] != "postgres-16" {
+		t.Fatalf("template clobbered: %v", row["template"])
+	}
+	if row["status"] != "hibernated" {
+		t.Fatalf("status clobbered: %v", row["status"])
+	}
+	if int(row["boot_ms"].(int64)) != 42 {
+		t.Fatalf("boot_ms clobbered: %v", row["boot_ms"])
 	}
 }

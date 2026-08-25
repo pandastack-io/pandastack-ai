@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ReactNode, createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { clsx } from "clsx";
+import { Copy, Eye, EyeOff } from "lucide-react";
+import { toast } from "sonner";
 
 // ─── Page Header ───────────────────────────────────────────────────────────────
 export function PageHeader({
@@ -320,6 +322,32 @@ export function Kv({ k, v }: { k: string; v: string }) {
     <div>
       <div className="text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{k}</div>
       <div className="mt-0.5 font-mono text-[13px]" style={{ color: "var(--text-primary)" }}>{v || "—"}</div>
+    </div>
+  );
+}
+
+// ─── Copy Row ────────────────────────────────────────────────────────────────
+// A labelled value with a one-click copy button. When `secret` is set the value
+// is masked by default with a Show/Hide toggle (used for DB passwords + broker
+// tokens, so a credentials card shown right after create — peak screenshare
+// moment — never exposes the secret). `masked` overrides the hidden-state text
+// (e.g. a connection URL that blanks only its embedded password); it defaults to
+// a full dot-mask. Copy always writes the real `value`. Shared by the database
+// list + detail pages so they can't drift (the list used to print cleartext).
+export function CopyRow({ label, value, secret = false, masked }: { label: string; value: string; secret?: boolean; masked?: string }) {
+  const [revealed, setRevealed] = useState(false);
+  const isHidden = secret && !revealed;
+  const shown = isHidden ? (masked ?? "••••••••••••") : value;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-28 shrink-0 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</span>
+      <code className="flex-1 truncate rounded px-2 py-1 font-mono text-[12px]" style={{ background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}>{shown}</code>
+      {secret && (
+        <Btn size="sm" variant="ghost" icon={revealed ? <EyeOff size={12} /> : <Eye size={12} />} onClick={() => setRevealed((v) => !v)}>
+          {revealed ? "Hide" : "Show"}
+        </Btn>
+      )}
+      <Btn size="sm" variant="ghost" icon={<Copy size={12} />} onClick={() => void navigator.clipboard?.writeText(value).then(() => toast.success("Copied")).catch(() => toast.error("Copy failed"))}>Copy</Btn>
     </div>
   );
 }

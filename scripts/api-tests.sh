@@ -27,8 +27,11 @@ c "$API/healthz" >/dev/null && ok "control-plane up"
 section "templates"
 TPLS=$(c "$API/v1/templates")
 echo "$TPLS" | jq -e 'length > 0' >/dev/null && ok "at least 1 template"
-TPL_NAME=$(echo "$TPLS" | jq -r '.[0].name')
-ok "first template: $TPL_NAME"
+# TEMPLATE=<name> overrides the default (first listed) — useful on local
+# stacks that only seed a subset of templates (mac-local-e2e bakes base +
+# postgres-16; the registry still lists the full catalog).
+TPL_NAME=${TEMPLATE:-$(echo "$TPLS" | jq -r '.[0].name')}
+ok "template under test: $TPL_NAME"
 c "$API/v1/templates/$TPL_NAME" | jq -e .name >/dev/null && ok "GET /templates/$TPL_NAME"
 
 section "create sandbox"

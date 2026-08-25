@@ -5,7 +5,7 @@ description: A built-in JSON-RPC endpoint that lets Claude Desktop, Cursor, mcp-
 
 PandaStack speaks [MCP](https://modelcontextprotocol.io) natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the `mcp` CLI, or your own agent at it and the model gets `shell`, `read_file`, `write_file`, and `list_dir` tools wired to a real Linux microVM.
 
-Looking for workspace-level tools (create/delete sandboxes, databases, app deploys) behind a single URL? That's the [hosted MCP server](/docs/concepts/mcp-server) at `https://api.pandastack.ai/mcp` — this page covers the per-sandbox endpoint.
+Looking for workspace-level tools (create/delete sandboxes, databases) behind a single URL? That's the [workspace MCP server](/docs/concepts/mcp-server) at `/mcp` — this page covers the per-sandbox endpoint.
 
 ```
 POST /v1/sandboxes/{id}/mcp
@@ -93,7 +93,7 @@ Restart Claude Desktop. The sandbox shows up as a server in the 🔌 menu; tools
 ```bash
 mcp call \
   --url https://api.pandastack.ai/v1/sandboxes/$SID/mcp \
-  --header "Authorization: Bearer $PANDASTACK_TOKEN" \
+  --header "Authorization: Bearer $PANDASTACK_API_KEY" \
   tools/call shell '{"cmd":"ls -la /workspace"}'
 ```
 
@@ -101,7 +101,7 @@ mcp call \
 
 ```bash
 curl -s -X POST https://api.pandastack.ai/v1/sandboxes/$SID/mcp \
-  -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+  -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
        "params":{"name":"write_file","arguments":{"path":"/workspace/hello.py","content":"print(\"hi\")"}}}'
@@ -123,10 +123,10 @@ curl -s -X POST https://api.pandastack.ai/v1/sandboxes/$SID/mcp \
 
 **Long-running notebook companion.** Open a REPL session (state preserved across `tools/call shell`s by living inside a tmux/jupyter process the agent launches in the sandbox), let the LLM drive it.
 
-## Auth, multi-tenancy, and quotas
+## Auth and multi-tenancy
 
 - Same `Bearer` token system as the REST API. The token's workspace scopes the sandbox lookup; you can't MCP into someone else's sandbox.
-- Counts against your `exec` quota — every `tools/call shell` is one exec call.
+- Every `tools/call shell` is one exec call, and shows up in the audit log as one.
 - 30-second per-tool timeout default. Override with `timeout_seconds` in `arguments` (`shell` only).
 
 ## Limits

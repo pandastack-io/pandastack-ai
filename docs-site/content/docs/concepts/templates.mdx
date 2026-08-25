@@ -1,27 +1,26 @@
 ---
 title: Templates
-description: Pre-baked rootfs images used to boot sandboxes — from a universal apps runtime to a 4 GB browser-automation stack.
+description: Pre-baked rootfs images used to boot sandboxes — four first-party templates, plus a build pipeline for your own.
 ---
 
-A **template** is a snapshot-ready root filesystem with a pinned kernel. When you `Sandbox.create({ template: "..." })`, the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at [~179 ms](/docs/concepts/performance) instead of "boot a kernel from scratch".
+A **template** is a snapshot-ready root filesystem with a pinned kernel. When you `Sandbox.create({ template: "..." })`, the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at [~49 ms](/docs/concepts/performance) instead of "boot a kernel from scratch".
 
 Templates are immutable and content-addressed: once a snapshot exists for `code-interpreter@v3`, every sandbox boots from the same bytes.
 
 ## Official catalog
 
-PandaStack ships 5 production templates. All names are stable and accepted by `template:` in the SDKs and `--template` in the CLI.
+PandaStack ships **four** first-party templates. All names are stable and accepted by `template:` in the SDKs and `--template` in the CLI.
 
 CPU and memory are **baked into each template** at build time — they are a property of the snapshot, not a per-launch knob. Pick a template that matches the size you want, or [bake your own](#bake-your-own) with `--cpu` and `--memory-mb`.
 
 | Template            | Base                          | vCPU | Memory | Size   | What's inside                                                                                       |
 | ------------------- | ----------------------------- | ---- | ------ | ------ | --------------------------------------------------------------------------------------------------- |
-| `base`              | Ubuntu 24.04 + mise           | 2    | 2 GB   | 2 GB   | Universal apps runtime — Node 22, Python 3.12, Go, Bun via mise. The default for apps & general use. |
-| `code-interpreter`  | Python 3.11 + Node 22         | 2    | 2 GB   | 2 GB   | pandas, numpy, matplotlib, scipy, scikit-learn, jupyter, playwright, openai-agents. LLM tool-use, data analysis, Functions, agents. |
+| `base`              | Ubuntu 24.04 + mise           | 2    | 2 GB   | 2 GB   | Universal language runtime — Node 22, Python 3.12, Go, Bun via mise. The default for general use.    |
+| `code-interpreter`  | Python 3.11 + Node 22         | 2    | 2 GB   | 2 GB   | pandas, numpy, matplotlib, scipy, scikit-learn, jupyter, playwright, openai-agents. LLM tool-use and data analysis. |
 | `agent`             | Ubuntu 24.04 + Node 22        | 2    | 2 GB   | 2 GB   | Every public coding-agent CLI in one image: `claude-code`, `codex`, `opencode`. Pick one via its API key. |
-| `browser`           | Ubuntu 24.04 + Chromium       | 4    | 4 GB   | 4 GB   | Headless Chromium + Playwright + crawl4ai. Scraping, RPA, screenshots, LLM-friendly web extraction.  |
-| `postgres-16`       | Ubuntu 24.04 + PGDG           | 2    | 1 GB   | 2 GB   | Managed PostgreSQL 16 + pgvector + pgbouncer on a durable volume.                                    |
+| `postgres-16`       | Ubuntu 24.04 + PGDG           | 2    | 1 GB   | 2 GB   | Managed PostgreSQL 16 + pgvector on a durable volume. Backs the [Databases](/docs/concepts/databases) API. |
 
-Every template autostarts `sshd` and the `pandastack-agent` systemd unit. When you deploy an app on the `base` runtime, its dev/start command runs via `pandastack-autostart.service`, so the [preview URL](/docs/concepts/preview-urls) works the instant the sandbox is `running`.
+Every template autostarts `sshd` and the `pandastack-agent` systemd unit, so [exec](/docs/concepts/exec), the [terminal](/docs/concepts/terminal), and [preview URLs](/docs/concepts/preview-urls) work the instant the sandbox is `running`.
 
 <Callout type="warn">
   Older SDKs accepted `cpu` and `memory_mb` arguments on `Sandbox.create(...)`. Those arguments are now **deprecated and ignored** — the server always uses the template's baked size. Pass them and you'll get a deprecation warning; the sandbox will still launch at the template's size. To run at a different size, bake a new template.
@@ -31,34 +30,45 @@ Every template autostarts `sshd` and the `pandastack-agent` systemd unit. When y
 
 | If you're doing…                                  | Use…                  |
 | ------------------------------------------------- | --------------------- |
-| Running apps — Node / Python / Go / Bun            | `base`                |
+| General-purpose Node / Python / Go / Bun work      | `base`                |
 | LLM tool calling, data analysis, Jupyter-style    | `code-interpreter`    |
 | Running Claude Code / Codex / OpenCode as an agent | `agent`              |
-| Browser automation, scraping, screenshots, crawling | `browser`           |
 | Managed PostgreSQL 16 with pgvector               | `postgres-16`         |
-| Anything custom                                    | bake your own (below) |
+| Anything custom — browser automation, extra system packages, pinned toolchains | bake your own (below) |
 
 ## Bake your own
 
-Templates are just Dockerfiles plus a CPU/memory spec and a size limit. Start from any Dockerfile (e.g. fork `templates/base/Dockerfile`), edit, and run:
+A custom template is an **OCI image plus a CPU/memory spec and a size limit**.
+Build the image however you already build images — `docker build`, your CI,
+whatever — push it to the registry your deployment trusts, then point
+PandaStack at it by reference. The build request stays tiny: PandaStack pulls
+the image server-side, flattens it, and bakes the snapshot.
+
+<Callout type="warn">
+  **Debian-based images only.** Your final image must be Debian or a Debian derivative — `debian`, `ubuntu`, `python`, `node`, `golang`, etc. The bake step guarantees the microVM's init + SSH contract by `apt`-installing `systemd-sysv` and `openssh-server` into the rootfs, which needs a Debian userland. Alpine, RedHat-based, and distroless images will not boot.
+</Callout>
+
+### Build from an image reference
 
 ```bash
 pandastack template build \
-  -f Dockerfile \
-  -n my-template \
+  --name my-template \
+  --image-ref <registry>/<project>/<repo>/my-template:v1 \
   --cpu 4 \
   --memory-mb 4096 \
   --size-mb 2048
 ```
 
-`--cpu` and `--memory-mb` are baked into the snapshot and will be the size of every sandbox launched from this template. To change them later, rebuild with `--replace`.
+`--cpu` and `--memory-mb` are baked into the snapshot and become the size of
+every sandbox launched from this template. To change them later, rebuild with
+`--replace`. If you omit `--cpu`, custom templates default to **8 vCPU**.
 
 ```python
 from pandastack import Client
 client = Client()
 build = client.templates.build(
     name="my-template",
-    rootfs=open("Dockerfile.tar", "rb"),
+    image_ref="<registry>/<project>/<repo>/my-template:v1",
     cpu=4,
     memory_mb=4096,
     size_mb=2048,
@@ -69,22 +79,68 @@ print(build.id, build.status)
 ```ts
 const build = await client.templates.build({
   name: "my-template",
-  rootfs: "/path/to/Dockerfile.tar",
+  imageRef: "<registry>/<project>/<repo>/my-template:v1",
   cpu: 4,
   memoryMb: 4096,
   sizeMb: 2048,
 });
 ```
 
-The build pipeline:
+<Callout type="info">
+  **Which registry?** The agent pulls only from the single trusted registry its deployment is configured for — set `PANDASTACK_REGISTRY_REGION`, `PANDASTACK_REGISTRY_PROJECT`, and `PANDASTACK_REGISTRY_REPO` on the agent host. A reference outside that host/project/repo is refused before any bytes are pulled. Self-hosters point these at their own registry.
+</Callout>
 
-1. Snapshots your Dockerfile context.
-2. Runs the build inside a privileged sandbox (Buildah).
-3. Exports the rootfs to a sparse ext4 image of `size_mb` MB.
-4. Boots the image once under Firecracker, takes a memory + disk snapshot.
-5. Registers the snapshot under `my-template` — instantly available for `Sandbox.create`.
+A `rootfs` tarball upload is still accepted for local development and
+back-compat, but it sends the whole filesystem through the API — prefer
+`image_ref` for anything real.
 
-Track progress:
+### The build pipeline
+
+1. The agent pulls the image from the trusted registry and **flattens its layers** into a single rootfs tar — layers applied in order with whiteouts and opaque dirs resolved (equivalent to `docker export`).
+2. It writes that tar into a sparse ext4 image of `size_mb` MB and injects working guest DNS.
+3. It guarantees the **guest contract**: if the image has no `/sbin/init` or no `sshd`, the bake `apt`-installs `systemd`, `systemd-sysv`, `openssh-server`, and `sudo` into the rootfs. You do not add them to your Dockerfile, and any `CMD`/`ENTRYPOINT` you set is not used for boot.
+4. It boots the image once under Firecracker and takes a memory + disk snapshot.
+5. It registers the snapshot under `my-template` — instantly available for `Sandbox.create`.
+
+### Example Dockerfiles
+
+**Add a few system packages.** The simplest custom template:
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg imagemagick poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**Pin a language runtime and its dependencies.** Bake them in so every sandbox
+starts ready — no install step at create time:
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install --no-cache-dir \
+      pandas numpy scikit-learn duckdb pyarrow
+COPY ./pipeline /opt/pipeline
+```
+
+**Browser automation.** Headless Chromium is no longer a first-party template —
+bake exactly the version you want instead:
+
+```dockerfile
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      chromium-browser xvfb fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g playwright && playwright install --with-deps chromium
+```
+
+<Callout type="info">
+  Sizing tip: `--size-mb` is the **ext4 rootfs** size — make it comfortably larger than the image's unpacked size (a 1.5 GB image → `--size-mb 3072`) so there is headroom for runtime writes. `--memory-mb` is the RAM baked into the snapshot; every sandbox from this template gets exactly that.
+</Callout>
+
+### Track progress
+
+Builds return `202` with a build id. Poll it:
 
 ```bash
 pandastack template build-status <build_id>
@@ -93,6 +149,11 @@ pandastack template build-status <build_id>
 ```python
 client.templates.get_build(build_id)
 ```
+
+The agent also streams timestamped build progress (`pulling`, `flattening`,
+`installing guest contract`, `baking`, …) as Server-Sent Events at
+`GET /templates/builds/{id}/logs` on the agent that ran the build — useful when
+a bake fails and you want the failing step rather than a status string.
 
 A typical 2 GB template takes 60–90 s end-to-end; a 4 GB one takes 2–3 min.
 
@@ -111,7 +172,7 @@ Useful for reproducibility: tie a release of your agent to a known template snap
 ```bash
 pandastack template list
 pandastack template get code-interpreter
-pandastack template build -f Dockerfile -n my-template --size-mb 2048
+pandastack template build --name my-template --image-ref <ref> --size-mb 2048
 pandastack template delete my-template
 pandastack template builds                 # all recent build jobs
 pandastack template build-status <id>      # poll a single one
@@ -124,8 +185,11 @@ pandastack sandbox create --template code-interpreter --ttl 1h
 ```http
 GET    /v1/templates
 GET    /v1/templates/{name}
-POST   /v1/templates/build               (multipart: name, size_mb, cpu, memory_mb, kernel?, rootfs; ?replace=true to overwrite)
+POST   /v1/templates/build               (multipart: name, size_mb, cpu, memory_mb, kernel?, and exactly ONE of image_ref or a rootfs file; ?replace=true to overwrite)
 DELETE /v1/templates/{name}              (also clears the cached snapshot)
 GET    /v1/templates/builds
 GET    /v1/templates/builds/{id}
 ```
+
+The `image_ref` form field is the registry path (recommended); the legacy
+`rootfs` tarball field still works for small templates and local development.

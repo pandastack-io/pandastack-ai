@@ -22,6 +22,12 @@ func natidPrewarmTarget() int {
 	return 4
 }
 
+// StartNATIDPrewarmer starts the background NATID slot prewarmer. It MUST be
+// called only AFTER the startup slot-Reconcile has completed (see main.go), so
+// the prewarmer's "prebuilt:<idx>" slot sentinels can't race the one-shot
+// reconcile that would otherwise reclaim a slot whose netns is mid-build.
+func (m *Manager) StartNATIDPrewarmer() { m.startNATIDPrewarmer() }
+
 // startNATIDPrewarmer pre-builds netns + veth + tap + iptables slots for each
 // ready template snapshot. After every Claim the pool refills itself in the
 // background so subsequent boots stay O(1).

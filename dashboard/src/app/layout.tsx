@@ -2,7 +2,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { PostHogProvider } from "@/components/posthog-provider";
 import { ThemeProvider, ThemedToaster } from "@/components/theme";
 
 const geistSans = Geist({
@@ -34,7 +33,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col" style={{ background: "var(--bg-base)", color: "var(--text-primary)" }}>
         <ThemeProvider>
-          <PostHogProvider>{children}</PostHogProvider>
+          {children}
           <ThemedToaster />
         </ThemeProvider>
       </body>

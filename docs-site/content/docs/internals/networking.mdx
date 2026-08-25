@@ -1,20 +1,24 @@
 ---
 title: Networking
-description: Per-sandbox Linux netns, veth /30 pairs from a /16 pool, baked guest identity, and the DNAT/SNAT rules behind preview URLs.
+description: Per-sandbox Linux netns, veth /30 pairs from a /16 pool, baked guest identity, the wildcard DNAT behind preview URLs, and the root FORWARD rules that keep tenants apart.
 ---
 
-Every sandbox lives in its own Linux network namespace, with its own MAC and its own private IP. The host doesn't share an IP space with the guest, the guests don't share an IP space with each other, and yet every guest can reach the internet and be reached on whatever ports it exposes. This page is how.
+Every sandbox lives in its own Linux network namespace with a tap device carrying the template's **baked** guest IP and MAC. That baked identity is a per-template constant, so two sandboxes of the same template genuinely have the *same* guest IP — the namespace is what stops them colliding. Each sandbox also gets a unique /30 on a veth pair, which is the address the host actually dials.
+
+Guests reaching each other is prevented by an **explicit firewall rule**, not by the namespacing. If you self-host, read [cross-tenant isolation and egress guards](#cross-tenant-isolation-and-egress-guards) before you touch the host's `FORWARD` chain.
 
 ## The per-sandbox netns
 
-For sandbox `s7abc…`:
+Names come from the **/30 slot index**, not from the sandbox ID, whenever the slot was pre-built. For slot `0x0000002a`:
 
 ```
-netns:        ns-s7abc
-veth host:    vh-s7abc   (in root netns)
-veth guest:   vg-s7abc   (in ns-s7abc)
-tap0:         (in ns-s7abc, owned by Firecracker)
+netns:        ns-p0000002a
+veth host:    vh-p0000002a   (in root netns)
+veth guest:   vg-p0000002a   (in ns-p0000002a)
+tap0:         (in ns-p0000002a, owned by Firecracker)
 ```
+
+A slot built on demand instead (empty free list) is named from the sandbox ID — dashes stripped, first 10 hex characters — so `ns-6be92de4dd`. Both schemes coexist on a live host. Because the two naming schemes are not interchangeable, the agent never derives a netns name from a slot index at teardown; it reads the persisted allocation payload, which is the only record of the name.
 
 Inside the netns lives one tap device (`tap0`) that Firecracker plumbs into the VM's `eth0`. The veth pair shuttles packets between the netns and the root namespace where they meet the outside world via SNAT.
 
@@ -23,24 +27,24 @@ Inside the netns lives one tap device (`tap0`) that Firecracker plumbs into the 
 The host owns `10.200.0.0/16`. We carve it into /30s (4 IPs each: net / host / peer / broadcast):
 
 ```
-10.200.0.0/30  → vh-…/vg-…  (sandbox 0)
-10.200.0.4/30  → vh-…/vg-…  (sandbox 1)
-10.200.0.8/30  → vh-…/vg-…  (sandbox 2)
+10.200.0.0/30  → vh-…/vg-…  (slot 0)
+10.200.0.4/30  → vh-…/vg-…  (slot 1)
+10.200.0.8/30  → vh-…/vg-…  (slot 2)
 …
-10.200.255.252/30           (sandbox 16383)
+10.200.255.252/30           (slot 16383)
 ```
 
-That's **16,384 sandboxes per agent** before address exhaustion. With `n2-standard-4` agents capping at 20–40 *running* slots and 64 NATID slots reserved (most idle), exhaustion is not a real concern at production scale; we still alarm at 80 %.
+That's **16,384 sandboxes per agent** before address exhaustion. Address space is not the binding constraint — fleet memory is, and the pre-warmed slot depth is a small multiple of the template count. Slot indices are handed out by a local SQLite slot store (lowest free index, atomic claim), so a crashed agent cannot leak an index permanently: a startup reconcile reclaims any slot whose namespace is gone.
 
 ## Baked guest identity
 
-Per [snapshot & restore](/docs/internals/snapshot-restore), the guest's notion of "my IP, my MAC, my gateway" is **frozen at template-bake time** and recorded in `meta.json`:
+Per [snapshot & restore](/docs/internals/snapshot-restore), the guest's notion of "my IP, my MAC, my gateway" is **frozen at template-bake time** and written next to the snapshot as `identity.json`:
 
-```json
+```json title="identity.json"
 {
-  "baked_tap_host_ip": "172.20.6.1",
-  "baked_guest_ip":    "172.20.6.118",
-  "baked_mac":         "06:00:AC:14:06:76"
+  "tap_host_ip": "172.20.6.117",
+  "guest_ip":    "172.20.6.118",
+  "mac":         "06:00:AC:14:06:76"
 }
 ```
 
@@ -48,51 +52,152 @@ Per [snapshot & restore](/docs/internals/snapshot-restore), the guest's notion o
 
 On restore, the agent:
 
-1. Sets `tap0`'s MAC to the baked MAC.
-2. Configures `tap0` with the baked tap-host IP.
-3. Adds a route on the host side for the baked guest IP, pointing through `tap0`.
+1. Creates `tap0` inside the netns and gives it the baked tap-host IP with a /30 mask. That /30 also covers the baked guest IP, so the connected route into the VM comes for free — no extra host route is added.
+2. Passes the baked MAC to Firecracker as the guest interface's MAC. The tap's own MAC is never patched; nothing in the netns layer touches it.
+3. Enables `net.ipv4.ip_forward` and `net.ipv4.conf.all.route_localnet` **inside the netns** so the DNAT below can route.
 
 The guest's kernel sees the same MAC, same IP, same gateway as when it was snapshotted — ARP succeeds, packets flow, no kernel reconfiguration needed.
 
+<Callout type="warn">
+The baked identity is a **per-template constant**. Every sandbox restored from the same template has the same `guest_ip` and `mac`. That is safe only because each one is confined to its own netns and its packets are rewritten to a unique source address before they reach the root namespace. Do not assume a guest IP identifies a tenant.
+</Callout>
+
 ## DNAT for preview URLs
 
-When a user exposes a port via `POST /sandboxes/{id}/ports`, we add an iptables DNAT rule **inside the sandbox's netns**:
+The DNAT rules are written **once, at netns creation time** — not per request and not when a user registers a port. Inside each sandbox's netns:
 
-```
-iptables -t nat -A PREROUTING -d <baked_guest_ip> -p tcp --dport <port> \
-  -j DNAT --to <guest_ip>:<port>
+```bash title="rules created inside ns-p<idx>"
+# One explicit rule per pre-declared port (the agent passes 22:22).
+iptables -t nat -A PREROUTING -d <veth_guest_ip> -p tcp --dport 22 \
+  -j DNAT --to-destination <guest_ip>:22
+
+# Then a WILDCARD rule: every other TCP port on the veth-guest IP.
+iptables -t nat -A PREROUTING -d <veth_guest_ip> -p tcp \
+  -j DNAT --to-destination <guest_ip>
+
+# Replies leave via tap0 sourced from the baked gateway the guest expects.
+iptables -t nat -A POSTROUTING -o tap0 -j SNAT --to-source <tap_host_ip>
 ```
 
-…where `<guest_ip>` is the VM's actual IP. Result: traffic for `8080-<sandbox>.pandastack.ai`, after the edge has rewritten the URL to `/v1/sandboxes/{id}/proxy/{port}/…`, arrives at the host, gets routed into the netns, hits the DNAT and lands on the VM at the right port.
+The destination the host dials is the **veth-guest IP** (the unique `10.200.x.2` for this slot), not the baked guest IP. `PREROUTING` is ordered, so the explicit port-22 rule is matched before the wildcard.
+
+`POST /v1/sandboxes/{id}/ports` does **not** add a rule. It stores a label in the sandbox's metadata (`port.<n>`) so the port shows up in listings; port 22 is rejected as reserved. Reachability was already there — the wildcard rule is what lets the agent's `/proxy/{port}/` handler reach an arbitrary user port without mutating iptables on every request.
+
+<Callout type="warn">
+The wildcard DNAT means **every TCP port the guest listens on is reachable from that slot's veth-guest IP**, whether or not the user declared it. Nothing inside the guest is "closed by default" at the host layer. What stops a neighbouring sandbox from using this is the explicit `FORWARD` drop described below.
+</Callout>
 
 See [preview URLs](/docs/concepts/preview-urls) for the user-facing side.
 
 ## SNAT for egress
 
-The guest's outbound packets exit `tap0`, cross the veth into the root netns, and hit the SNAT rule:
+Egress takes **two** source rewrites, because the baked guest IP is shared across every sandbox of a template and would otherwise collide in the host's conntrack table.
 
-```
-iptables -t nat -A POSTROUTING -o <wan-iface> \
-  -j MASQUERADE
+Inside the netns, a default route plus an SNAT to the slot's unique veth-guest IP:
+
+```bash title="inside ns-p<idx>"
+ip -n <ns> route replace default via <veth_host_ip> dev <veth_guest>
+iptables -t nat -A POSTROUTING -s <tap_/30> -o <veth_guest> \
+  -j SNAT --to-source <veth_guest_ip>
 ```
 
-Standard NAT — guest gets internet, host doesn't expose internal IPs.
+In the root netns, one shared set of rules for the **whole pool**, not per sandbox:
+
+```bash title="root netns"
+iptables -t nat -A POSTROUTING -s 10.200.0.0/16 -o <wan-iface> -j MASQUERADE
+iptables -A FORWARD -s 10.200.0.0/16 -o <wan-iface> -j ACCEPT
+iptables -A FORWARD -d 10.200.0.0/16 -i <wan-iface> -j ACCEPT
+```
+
+These root rules are added with a `-C` existence check first, so re-running them on every sandbox create is a no-op — and there is nothing per-sandbox to remove at teardown. The WAN interface is detected at runtime (the interface used to reach `1.1.1.1`, falling back to the default route, then to `eth0`); it is not hardcoded, because GCP's primary NIC is `ens4` rather than `eth0`.
+
+Egress wiring is skipped entirely when the agent does not supply both a WAN interface and a pool CIDR. **The security rules below live in the same code path**, so a deployment with egress wiring off also has no pool-wide firewall rules.
 
 DNS resolution inside the guest goes to `/etc/resolv.conf`, which the template bakes with `1.1.1.1` and `8.8.8.8`. We don't run an in-host resolver.
+
+## Cross-tenant isolation and egress guards
+
+Three `DROP` rules in the root `FORWARD` chain carry the isolation and abuse-prevention properties of the whole platform. They are not incidental — remove any of them and the corresponding attack works.
+
+### Why isolation is not free
+
+It is tempting to assume separate namespaces mean guests cannot reach each other. They can. Every ingredient for cross-tenant reachability is present by default:
+
+- The `/30`s are all carved from one `10.200.0.0/16`, and the host holds a **connected route** to every one of them through the per-slot host veth.
+- `net.ipv4.ip_forward=1` is set both inside each netns and on the host.
+- The **wildcard DNAT** inside every netns forwards any TCP port on that slot's veth-guest IP to the baked guest IP.
+- The egress `ACCEPT` rules above are appended to `FORWARD`.
+
+So a tenant that scans `10.200.0.0/16` from inside its own VM would reach neighbours' SSH on 22, their app ports, and a managed database's 5432 — with no credential in between. What prevents it is one rule:
+
+```bash title="root netns"
+iptables -I FORWARD 1 -s 10.200.0.0/16 -d 10.200.0.0/16 -j DROP
+```
+
+Note the `-I … 1`. It is **inserted at the top** of the chain, not appended, so it is evaluated before those egress `ACCEPT`s. Ordering is the whole rule — appended, it would never match. That ordering is pinned by a unit test that asserts the exact argv (`TestIptablesInsertArgs_CrossTenantDrop`).
+
+Legitimate traffic is unaffected: WAN egress does not transit pool-to-pool, and host-mediated database access goes through the db-proxy in the root namespace.
+
+### Cloud metadata (SSRF)
+
+```bash title="root netns"
+iptables -I FORWARD 1 -s 10.200.0.0/16 -d 169.254.0.0/16 -j DROP
+```
+
+Without this, a guest can `curl` the cloud metadata service at `169.254.169.254`. On GCP that endpoint hands out the **host VM's** service-account OAuth token, which would expose every tenant's seeds and snapshots in object storage and, depending on the service account's IAM, more of the project. NATID mode wires no Firecracker MMDS, and `ip_forward` plus the WAN `MASQUERADE` would otherwise route guest packets straight there. The entire link-local `169.254.0.0/16` range is dropped — a guest never legitimately routes link-local off-host. Also inserted first, also pinned by a test (`TestIptablesInsertArgs_MetadataDrop`).
+
+### Crypto-mining egress
+
+```bash title="root netns"
+iptables -I FORWARD 1 -s 10.200.0.0/16 -o <wan-iface> -p tcp --dport <port> -j DROP
+```
+
+…applied once per port in the built-in Stratum denylist: `3333`, `4444`, `5555`, `7777`, `8333`, `9999`, `14444`, `45700`. Blocking the pool control ports kills the Stratum handshake before a miner can hash. This is a denylist, not a guarantee — a miner can use a custom port or tunnel over 443 — but it stops the default configuration of essentially every off-the-shelf miner, which is the abuse that actually shows up on a platform running untrusted code.
+
+Override with `PANDASTACK_BLOCKED_EGRESS_PORTS`, a comma-separated list of TCP ports:
+
+```bash
+# Replace the denylist.
+PANDASTACK_BLOCKED_EGRESS_PORTS=3333,4444,19999
+
+# Explicitly disable the block (single-tenant / trusted deployments only).
+PANDASTACK_BLOCKED_EGRESS_PORTS=
+```
+
+Leaving the variable unset keeps the built-in list. Setting it to an empty string is a deliberate opt-out and removes the block entirely.
+
+### Operating them safely
+
+<Callout type="warn">
+All three rules live in the **root netns** `FORWARD` chain, shared with everything else on the host. Any tool that flushes `FORWARD` — a Docker restart, a firewall manager, a `iptables -F FORWARD` in a provisioning script — removes them, and cross-tenant reachability is restored until the next sandbox create re-inserts them. If you self-host, treat `FORWARD` as owned by the agent, and verify the drops are present and at the top after any change to host networking.
+</Callout>
+
+Each rule is re-asserted on **every** netns create, guarded by an `iptables -C` existence check so duplicates never stack. Because re-insertion uses `-I … 1`, a rule that was removed comes back at the top of the chain and still precedes any `ACCEPT` added in the meantime. To check a running host:
+
+```bash
+sudo iptables -S FORWARD | head -20
+```
+
+The pool-to-pool drop, the link-local drop, and the mining-port drops should all appear before the `-A FORWARD … -j ACCEPT` egress rules.
 
 ## NATID pool — the speed trick
 
 Doing all the above (`ip netns add`, `ip link add veth`, set MAC, set IP, add tap, add iptables rules) takes ~100 ms cold. That's a huge chunk of the boot budget.
 
-The trick: do it ahead of time. The agent boots, pre-allocates 24 NATID "slots" — each slot is a (ns-X, vh-X, vg-X, tap0, /30) tuple already configured. On sandbox create, we just need to:
+The trick: do it ahead of time. When `PANDASTACK_NATID=1`, a background prewarmer builds slots — each a (`ns-p<idx>`, `vh-p<idx>`, `vg-p<idx>`, `tap0`, /30) tuple with all the iptables rules already in place. `PANDASTACK_NATID_POOL_SIZE` sets the target free-list **depth per template identity** (agent default `4`; the production cloud-init sets `24`). It is a warm depth, not a concurrency cap.
 
-1. Pop a slot (O(1)).
-2. Patch the tap's MAC to match the snapshot's baked identity (~2 ms).
-3. Hand the slot to Firecracker.
+A pre-built slot is keyed by the baked identity — `tap_host_ip`, `guest_ip`, `mac`, and the port map — because those values are wired into the namespace's `ip` and `iptables` commands at prebuild time. **A slot can only be claimed by a sandbox restoring a snapshot with the same baked identity.** Slots are not generic and not reusable across templates.
 
-That's why netns+tap show up as **~9 ms** in the [snapshot & restore](/docs/internals/snapshot-restore) timeline instead of 100 ms.
+On create, the fast path (~5 ms) is:
 
-On `Delete`, the slot's MAC/IP are reset to default and it goes back in the pool. NATID slots are reusable across sandboxes and across templates (the tap is generic — only the MAC needs to match the snapshot at use-time).
+1. Pop a slot from that identity's free list.
+2. Atomically reassign the slot index from its `prebuilt:<idx>` sentinel to the sandbox ID in the slot store.
+3. Persist the allocation payload synchronously — it is the only record of the netns *name*, so an async write plus a crash would orphan the namespace.
+4. Hand the slot to Firecracker, passing the baked MAC as the guest interface's MAC.
+
+If the free list is empty, the agent builds a slot from scratch (~500 ms) rather than failing the create — this is why a drained pool degrades in latency instead of returning an error.
+
+On release, the slot is **destroyed, not recycled**: the agent tears down the netns and the root-side veth *first*, then drops the payload row, then frees the /30 index last. That ordering matters. Freeing the index before destroying the namespace let a crash in between leave the index reusable while the dead namespace still answered ARP for the guest IP, so the next sandbox to adopt that index routed into a dead namespace and failed in a loop. Destroy-first, free-last means a crash leaves an owned-but-dead slot, which a startup reconcile reclaims, rather than a freed-but-poisoned one.
 
 ## Preview-URL host routing
 
@@ -113,22 +218,26 @@ This is what makes `https://3000-abc.pandastack.ai/` work zero-config without a 
 
 We could share a netns across sandboxes and partition by IP. We don't, because:
 
-- **iptables rules grow O(sandboxes).** In a shared netns, every port-exposure rule is in the global iptables table, and rule lookup is O(n). With per-sandbox netns, each netns has ≤2 NAT rules, lookup is O(1).
-- **Network policy is free.** Want to forbid two sandboxes from seeing each other? Default already done — they're in different netnses with no route between them.
-- **Cleanup is atomic.** `ip netns delete ns-X` removes the netns *and* every interface in it. No leaked tap, no leaked rule.
+- **The baked identity would collide.** Every sandbox from a template restores with the same guest IP and MAC. A shared namespace cannot hold two of them; a separate namespace per sandbox is what makes the snapshot reusable at all.
+- **iptables rules stay small and constant.** Each netns holds four NAT rules — an explicit DNAT for port 22, the wildcard DNAT, the reply SNAT out `tap0`, and the egress SNAT out the veth — regardless of how many sandboxes the host runs. In a shared namespace, per-port rules would accumulate in one table and lookup would grow with tenant count.
+- **Cleanup is atomic.** `ip netns delete ns-X` removes the netns *and* every interface and rule in it. No leaked tap, no leaked in-netns rule. The pool-wide root rules are shared and deliberately left in place.
+
+Note what this does **not** buy you. Network policy between sandboxes is not free: the namespaces sit on connected routes in one routable `/16` with forwarding enabled, so isolation is the [explicit `FORWARD` drop](#cross-tenant-isolation-and-egress-guards), not a property of namespacing.
 
 The cost is "one netns per sandbox" — but Linux netnses are cheap (a few KB each), and we share the rest of the kernel.
 
 ## Files
 
-- `agent/internal/netns/netns.go` — netns + veth lifecycle.
-- `agent/internal/network/natid.go` — pre-allocated slot pool.
-- `agent/internal/api/ports.go` — `POST /ports` handler, adds the DNAT rule.
+- `agent/internal/netns/netns.go` — netns + veth lifecycle, the in-netns DNAT/SNAT rules, and the three root `FORWARD` drops (`setupEgress`).
+- `agent/internal/netns/netns_test.go` — pins the exact iptables argv, including that the cross-tenant and metadata drops are inserted at position 1.
+- `agent/internal/network/natid.go` — slot pool: prebuild, identity-keyed claim, destroy-first release, orphan-netns sweep.
+- `agent/internal/api/ports.go` — `POST /ports` handler. Stores a port label in sandbox metadata; adds no iptables rule.
 - `api/cmd/api/preview_host.go` — the edge `previewHostRouter` middleware (5 unit tests in `preview_host_test.go`).
 
 ## Limits & notes
 
-- **One IP per sandbox.** Multi-IP-per-VM is not implemented; if you need it, expose a second port via DNAT.
+- **One IP per sandbox.** Multi-IP-per-VM is not implemented. Every TCP port the guest listens on is already reachable through the wildcard DNAT on the slot's veth-guest IP.
+- **Egress is otherwise open.** Apart from the pool-to-pool drop, the link-local drop, and the mining-port denylist, a guest can reach any host and port on the internet. There is no outbound allowlist.
 - **IPv6.** Currently disabled in the guest (kernel `ipv6.disable=1` boot param) for simplicity. On the roadmap.
 - **MTU.** 1450 inside the VM to leave room for the veth + any tunnels in the host's path. Override per-template if you have hosts with jumbo frames.
 - **Outbound rate-limit.** No traffic shaping by default. Easy to add per-netns via `tc` if you need per-sandbox bandwidth caps.

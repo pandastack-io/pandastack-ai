@@ -132,7 +132,16 @@ func (d *MultiNodeDirector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	target, err := d.resolveTarget(r)
 	if err != nil {
 		d.log.Warn("multinode: routing failed", "path", r.URL.Path, "err", err)
-		writeMultinodeJSON(w, http.StatusBadGateway, map[string]string{"error": "no available compute node"})
+		// 503 + Retry-After, not 502. "No compute node right now" is a
+		// transient availability condition (agent heartbeats stale, control-
+		// plane DB blip, fleet scaling) that a client SHOULD retry — and every
+		// HTTP client, SDK and proxy already treats 503 as retryable while
+		// treating 502 as a hard upstream fault worth surfacing to the user.
+		w.Header().Set("Retry-After", "5")
+		writeMultinodeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error":  "no compute capacity available",
+			"detail": "No compute node could be assigned right now. This is usually transient — retry in a few seconds.",
+		})
 		return
 	}
 	tgtURL, err := url.Parse(target.Endpoint)
@@ -183,10 +192,6 @@ func isLeaseRelevant(r *http.Request) bool {
 	}
 	return false
 }
-
-// maybeUpdateLeaseCache parses the proxied agent response and either remembers
-// or forgets the sandbox→agent mapping. Errors are logged and swallowed —
-// the in-memory cache is a perf optimization, never a correctness oracle.
 func (d *MultiNodeDirector) maybeUpdateLeaseCache(req *http.Request, resp *http.Response, target scheduler.Agent) {
 	if req.Method == http.MethodDelete {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -325,11 +330,65 @@ func (d *MultiNodeDirector) resolveTarget(r *http.Request) (*scheduler.Agent, er
 	if r.Method == http.MethodPost && r.URL.Path == "/v1/volumes" {
 		req.DiskBytes = peekVolumeCreateBytes(r)
 	}
+	// Sized admission (W0): sandbox creates carry their real CPU/RAM ask so
+	// Pick's capacity filters actually engage. Before this, the Request went
+	// out with CPU:0/MemoryMB:0 — the freeCPU/freeMem checks in Pick were
+	// dead code and the fleet over-packed into guest OOM. The template
+	// registry is the source of truth for size (the agent force-overrides
+	// any per-request cpu/memory to template meta anyway — manager.go
+	// "template owns size"), so we resolve the peeked template name against
+	// it and fall back to the body's own cpu/memory_mb only for
+	// template-less creates. Unknown → zeros → old behavior (agent-side
+	// gate still refuses; see agent admission).
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes" {
+		req.CPU, req.MemoryMB = d.peekSandboxCreateSize(ctx, r)
+	}
 	ag, err := d.sched.Pick(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	return ag, nil
+}
+
+// peekSandboxCreateSize reads up to 8 KiB of a POST /v1/sandboxes body to
+// extract the template name (and any explicit cpu/memory_mb), then splices the
+// consumed prefix back so the reverse proxy forwards the request unchanged —
+// same idiom as peekVolumeCreateBytes. Returns (0,0) when nothing is
+// resolvable, which preserves the pre-W0 pick behavior for that request.
+func (d *MultiNodeDirector) peekSandboxCreateSize(ctx context.Context, r *http.Request) (cpu, memMB int) {
+	if r.Body == nil {
+		return 0, 0
+	}
+	head, _ := io.ReadAll(io.LimitReader(r.Body, 8192))
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(head), r.Body), r.Body}
+	var req struct {
+		Template string `json:"template"`
+		CPU      int    `json:"cpu"`
+		MemoryMB int    `json:"memory_mb"`
+	}
+	if err := json.Unmarshal(head, &req); err != nil {
+		return 0, 0
+	}
+	if t := strings.TrimSpace(req.Template); t != "" && d.db != nil {
+		var tcpu, tmem int
+		err := d.db.QueryRowContext(ctx,
+			`SELECT cpu, memory_mb FROM templates WHERE name = $1 LIMIT 1`, t).Scan(&tcpu, &tmem)
+		if err == nil && (tcpu > 0 || tmem > 0) {
+			return tcpu, tmem
+		}
+		// Template not in the registry (e.g. internal app-image boots via the
+		// director): fall through to the body's own numbers.
+	}
+	if req.CPU < 0 {
+		req.CPU = 0
+	}
+	if req.MemoryMB < 0 {
+		req.MemoryMB = 0
+	}
+	return req.CPU, req.MemoryMB
 }
 
 // peekVolumeCreateBytes reads up to 4 KiB of the POST /v1/volumes body to
@@ -359,17 +418,18 @@ func peekVolumeCreateBytes(r *http.Request) int64 {
 func writeMultinodeJSON(w http.ResponseWriter, status int, body map[string]string) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w, `{"error":%q}`, body["error"])
+	// Marshal the full map so callers can attach extra fields (e.g. "detail")
+	// without each one needing a bespoke writer. Falls back to a minimal
+	// error envelope if marshalling ever fails.
+	enc, err := json.Marshal(body)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, `{"error":%q}`, body["error"])
+		return
+	}
+	_, _ = w.Write(enc)
 }
 
 func getenv(k string) string { return strings.TrimSpace(os.Getenv(k)) }
-
-func envOr(key, def string) string {
-	if v := getenv(key); v != "" {
-		return v
-	}
-	return def
-}
 
 // appendSimpleProtocol adds simple-protocol mode for PgBouncer-backed DSNs
 // (Supabase pooler, port 6543). PgBouncer transaction pooling doesn't support
@@ -389,4 +449,13 @@ func appendSimpleProtocol(dsn string) string {
 		sep = "&"
 	}
 	return dsn + sep + "default_query_exec_mode=simple_protocol&statement_cache_capacity=0"
+}
+
+// envOr reads an environment variable, falling back to def when unset or blank.
+func envOr(key, def string) string {
+	v := strings.TrimSpace(getenv(key))
+	if v == "" {
+		return def
+	}
+	return v
 }

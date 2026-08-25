@@ -36,6 +36,13 @@ func NewRouter(mgr *sandbox.Manager, log *slog.Logger) http.Handler {
 		sb, err := mgr.Create(r.Context(), req)
 		if err != nil {
 			RecordBoot(false, "unknown", 0)
+			// Memory admission refusal → 507, mirroring the volume headroom
+			// gate: the control plane reads 507 as "place elsewhere / add
+			// capacity", not as a sandbox failure.
+			if errors.Is(err, sandbox.ErrInsufficientMemory) {
+				writeErr(w, 507, err)
+				return
+			}
 			writeErr(w, 500, err)
 			return
 		}
@@ -50,6 +57,14 @@ func NewRouter(mgr *sandbox.Manager, log *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /db/{id}/restore", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Metadata map[string]string `json:"metadata,omitempty"`
+			// Template preserves the database's RAM tier across failover
+			// (defaults to the stale row's template, then postgres-16).
+			Template string `json:"template,omitempty"`
+			// InPlace overwrites the live db (pre-backup + rebuild);
+			// PreserveCreds keeps the connection string unchanged. Absent = the
+			// failover path (rebuild-latest, rotate credentials).
+			InPlace       bool             `json:"in_place,omitempty"`
+			PreserveCreds *sandbox.DBCreds `json:"preserve_creds,omitempty"`
 		}
 		if r.Body != nil {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -57,12 +72,56 @@ func NewRouter(mgr *sandbox.Manager, log *slog.Logger) http.Handler {
 				return
 			}
 		}
-		sb, err := mgr.RestoreDatabase(r.Context(), r.PathValue("id"), req.Metadata)
+		sb, err := mgr.RestoreDatabase(r.Context(), r.PathValue("id"), req.Template, req.Metadata,
+			&sandbox.RestoreOptions{InPlace: req.InPlace, PreserveCreds: req.PreserveCreds})
 		if err != nil {
 			writeErr(w, 500, err)
 			return
 		}
 		writeJSON(w, 201, sb)
+	})
+
+	// Credential rotation for a RUNNING managed database (password reset).
+	// Synchronous: success means the new credentials are installed AND
+	// verified; the control plane re-reads ready.json for the values.
+	mux.HandleFunc("POST /db/{id}/rotate-creds", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.RotateDBCredentials(r.Context(), r.PathValue("id")); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"rotated": true})
+	})
+
+	// Config patch for a managed database. Currently only the always_on
+	// auto-suspend opt-out. Sets/clears metadata db.always_on so the agent's
+	// idle sweep (db_idle.go) never hibernates the database. Body:
+	// {"always_on": true|false}. Node-token protected like every /db route.
+	mux.HandleFunc("PATCH /db/{id}/config", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			AlwaysOn *bool `json:"always_on,omitempty"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				writeErr(w, 400, err)
+				return
+			}
+		}
+		if req.AlwaysOn == nil {
+			writeJSON(w, 200, map[string]bool{"updated": false})
+			return
+		}
+		patch := map[string]*string{}
+		if *req.AlwaysOn {
+			v := "true"
+			patch["db.always_on"] = &v
+		} else {
+			patch["db.always_on"] = nil // clear
+		}
+		if _, err := mgr.UpdateMetadata(r.Context(), r.PathValue("id"), patch); err != nil {
+			writeErr(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"updated": true, "always_on": *req.AlwaysOn})
 	})
 
 	mux.HandleFunc("GET /sandboxes", func(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +189,15 @@ func NewRouter(mgr *sandbox.Manager, log *slog.Logger) http.Handler {
 			return
 		}
 		writeJSON(w, 200, info)
+	})
+
+	mux.HandleFunc("GET /sandboxes/{id}/util", func(w http.ResponseWriter, r *http.Request) {
+		u, err := mgr.Util(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeErr(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, u)
 	})
 
 	mux.HandleFunc("PATCH /sandboxes/{id}/lifecycle", func(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +337,7 @@ func workspaceScope(mgr *sandbox.Manager, next http.Handler) http.Handler {
 					writeErr(w, code, errString(msg))
 					return
 				}
-				body = stampWorkspaceMeta(body, ws)
+				body = stampWorkspaceMeta(body, ws, platformOrigin(r))
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				r.ContentLength = int64(len(body))
 			}
@@ -327,7 +395,37 @@ func checkCreateOwnership(dataDir string, body []byte, ws string) (int, string) 
 // stampWorkspaceMeta force-sets metadata.workspace to the trusted workspace.
 // Unlike a best-effort inject, this OVERWRITES any client-supplied value so a
 // non-admin caller cannot spoof ownership of another tenant's namespace.
-func stampWorkspaceMeta(body []byte, ws string) []byte {
+// reservedMeta are metadata keys the PLATFORM owns. They must never survive
+// from a client body, because platform code trusts them:
+//
+//   - "kind" / "app.id" select the workload class (workloadClass), which the
+//     memory-pressure ladder uses as a scope guard — a tenant that set these
+//     could exempt an ordinary sandbox from being frozen under pressure, and
+//     make it invisible to sweeps that skip those rows.
+//   - "workspace" is the tenancy boundary itself.
+//
+// Stripping beats validating: a key the platform sets later is unaffected,
+// while anything a client sends is dropped before it can be believed.
+var reservedMeta = []string{"workspace", "kind", "app.id"}
+
+// platformAuthMethods are the X-Pandastack-Auth-Method values that only the
+// control plane's own in-process callers set (apps deploy, template build).
+// A tenant CANNOT forge these: the control-plane auth middleware overwrites
+// this header with the caller's real auth method on every authenticated
+// request, and deletes it outright on its one bypass path — the header is
+// trustworthy for exactly that reason (see api/cmd/api/auth.go).
+var platformAuthMethods = map[string]bool{
+	"apps-api":      true,
+	"templates-api": true,
+}
+
+// platformOrigin reports whether this request came from the platform itself
+// rather than from a tenant, and may therefore set reserved metadata.
+func platformOrigin(r *http.Request) bool {
+	return platformAuthMethods[strings.TrimSpace(r.Header.Get("X-Pandastack-Auth-Method"))]
+}
+
+func stampWorkspaceMeta(body []byte, ws string, platform bool) []byte {
 	var m map[string]any
 	if json.Unmarshal(body, &m) != nil {
 		return body
@@ -335,6 +433,14 @@ func stampWorkspaceMeta(body []byte, ws string) []byte {
 	md, _ := m["metadata"].(map[string]any)
 	if md == nil {
 		md = map[string]any{}
+	}
+	// Reserved keys are stripped from TENANT bodies only; platform-origin
+	// callers are legitimate setters of kind/app.id. workspace is forced for
+	// everyone, platform included: it is the tenancy boundary, not a hint.
+	if !platform {
+		for _, k := range reservedMeta {
+			delete(md, k)
+		}
 	}
 	md["workspace"] = ws
 	m["metadata"] = md
@@ -388,10 +494,78 @@ func (f *listFilter) flushFiltered() {
 	_, _ = f.ResponseWriter.Write(b)
 }
 
-// activityTracker bumps the per-sandbox lastActivity timestamp on every
-// sandbox-scoped request, so the idle sweeper knows when to hibernate.
-// It also transparently wakes hibernated sandboxes so SDK callers never
-// need to issue an explicit /wake.
+// readOnlyInspectionGETs are GET sub-paths that only *observe* a sandbox's
+// metadata/observability state — they do not touch the guest's running
+// userspace — so they must never auto-wake a hibernated sandbox. Waking on
+// these defeats scale-to-zero: the idle/health monitor polls GET /sandboxes/{id}
+// every ~30s, and a dashboard tab polls /logs, /metrics, /events, /ports while
+// open. (Genuine *use* of the guest — reading a file's bytes via /fs, opening a
+// shell via /exec/pty|/exec/ws|/ssh, a DB tunnel, or an LSP — still wakes.)
+//
+//	tail == ""                       — sandbox status row
+//	/lifecycle, /metrics, /ports     — config + observability
+//	/logs, /events                   — host-side log/event streams
+//	/fs/stat, /fs/dir                — filesystem *metadata* (not file bytes)
+//	/postgres-info, /repl/sessions   — managed-DB info + the session LIST (not /run)
+var readOnlyInspectionGETs = map[string]bool{
+	"":               true,
+	"/lifecycle":     true,
+	"/metrics":       true,
+	"/logs":          true,
+	"/events":        true,
+	"/ports":         true,
+	"/fs/stat":       true,
+	"/fs/dir":        true,
+	"/postgres-info": true,
+	"/repl/sessions": true,
+}
+
+// shouldAutoWake decides whether a sandbox-scoped request should transparently
+// wake a hibernated sandbox, given the HTTP method and the path tail after
+// /sandboxes/{id} (e.g. "", "/exec", "/lifecycle", "/hibernate"). A request
+// auto-wakes only if it intends to *use* the sandbox. We must NOT wake on:
+//   - lifecycle control endpoints (/hibernate|/wake|/stop|/start) — avoids
+//     wake→hibernate ping-pong;
+//   - DELETE — tearing a sandbox down must not first wake it;
+//   - read-only inspection GETs (see readOnlyInspectionGETs) — observing a
+//     sandbox must not resurrect it, or scale-to-zero never sticks and app
+//     status desyncs.
+func shouldAutoWake(method, tail string) bool {
+	switch tail {
+	case "/hibernate", "/wake", "/stop", "/start":
+		return false
+	}
+	if method == http.MethodDelete {
+		return false
+	}
+	if method == http.MethodGet && readOnlyInspectionGETs[tail] {
+		return false
+	}
+	return true
+}
+
+// activityTracker bumps the per-sandbox lastActivity timestamp on requests that
+// actually *use* the guest, so the idle sweeper knows when to hibernate/reap. It
+// also transparently wakes hibernated sandboxes so SDK callers never need an
+// explicit /wake.
+//
+// CRITICAL: both the activity bump AND the auto-wake are gated on the SAME
+// predicate (shouldAutoWake = "this request uses the guest"). A read-only
+// inspection GET (status, /lifecycle, /metrics, /logs, /events, /ports,
+// /fs/stat, /fs/dir, …) must do NEITHER — observing a sandbox must not keep it
+// alive. Without this gate the idle TTL silently never fires: the dashboard
+// polls GET /sandboxes/{id} every ~30s while a tab is open and the health
+// monitor polls too, so MarkActivity-on-every-request reset the idle clock
+// faster than the TTL could ever elapse (measured: idle_seconds stuck at 0,
+// never reaped). Genuine use — /exec, /fs byte reads, PTY/ws/ssh, DB tunnel,
+// LSP, fork, snapshot — still bumps and still wakes.
+// workspaceOf reads the tenancy header the control plane stamps on every
+// proxied request. Empty for unauthenticated/internal calls, which are not
+// quota-gated.
+func workspaceOf(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Fcs-Workspace"))
+}
+
 func activityTracker(mgr *sandbox.Manager, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// match /sandboxes/<id>(/anything)?
@@ -403,16 +577,11 @@ func activityTracker(mgr *sandbox.Manager, h http.Handler) http.Handler {
 				id = rest[:i]
 				tail = rest[i:]
 			}
-			if id != "" {
+			if id != "" && shouldAutoWake(r.Method, tail) {
 				mgr.MarkActivity(id)
-				// Auto-wake: any request that intends to *use* the sandbox
-				// wakes it. Skip the lifecycle control endpoints themselves
-				// to avoid pointless wake→hibernate ping-pong.
-				if tail != "/hibernate" && tail != "/wake" && tail != "/stop" && tail != "/start" && r.Method != http.MethodDelete {
-					if err := mgr.EnsureRunning(r.Context(), id); err != nil {
-						writeErr(w, 503, fmt.Errorf("auto-wake: %w", err))
-						return
-					}
+				if err := mgr.EnsureRunning(r.Context(), id); err != nil {
+					writeErr(w, 503, fmt.Errorf("auto-wake: %w", err))
+					return
 				}
 			}
 		}

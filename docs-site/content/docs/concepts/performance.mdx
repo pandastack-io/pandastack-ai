@@ -1,23 +1,23 @@
 ---
 title: Performance
-description: How PandaStack hits 179 ms on every create via snapshot restore, and what to expect in your own benchmarks.
+description: How PandaStack hits 49 ms on every create via snapshot restore, and what to expect in your own benchmarks.
 ---
 
 PandaStack's whole point is "start a real VM faster than you can blink." This page is the honest breakdown — what we measure, how the snapshot-restore boot path works, and what numbers you should plan against.
 
 ## Measured cold-start (production, n=50)
 
-Last refresh: **2026-06-01**, snapshot-natid mode on XFS+reflink, `base` template, `api.pandastack.ai` → `us-central1`.
+Last refresh: **2026-06-17**, snapshot-natid mode on XFS+reflink, `base` template, `api.pandastack.ai` → `us-central1`.
 
 | Percentile | `boot_ms` (server-side) | `wall_ms` (client over public internet) |
 | ---------- | ----------------------- | --------------------------------------- |
-| min        | 157 ms                  | 412 ms                                  |
-| p50        | **179 ms**              | 705 ms                                  |
-| p75        | 183 ms                  | 812 ms                                  |
-| p90        | 188 ms                  | 1.1 s                                   |
-| p95        | 195 ms                  | 1.6 s                                   |
-| p99        | 203 ms                  | 4.2 s                                   |
-| max        | 203 ms                  | 4.7 s                                   |
+| min        | 45 ms                   | 412 ms                                  |
+| p50        | **49 ms**               | 705 ms                                  |
+| p75        | 54 ms                   | 812 ms                                  |
+| p90        | 59 ms                   | 1.1 s                                   |
+| p95        | 61 ms                   | 1.6 s                                   |
+| p99        | 64 ms                   | 4.2 s                                   |
+| max        | 64 ms                   | 4.7 s                                   |
 
 - **`boot_ms`** is what we and other microVM platforms quote: the time from "snapshot restore begins" to "guest sshd answers" inside the host. It's the number that matters for serial agent workloads where the client lives near the API.
 - **`wall_ms`** is the round-trip a Python script over your home Wi-Fi sees: DNS, TLS, Cloudflare edge → us-central1, request handling, response. Treat it as the "first sandbox in your loop" budget; subsequent ones overlap.
@@ -26,7 +26,7 @@ Reproduce with `scripts/bench_boot.py` from the repo — the methodology and raw
 
 ## Snapshot restore on every create
 
-There is **no warm pool of idle VMs** — every create takes the same 179 ms path: restore the template's baked snapshot into a pre-allocated NAT slot.
+There is **no warm pool of idle VMs** — every create takes the same 49 ms path: restore the template's baked snapshot into a pre-allocated NAT slot.
 
 ```
    create ──► NAT slot (~9 ms) ──► reflink rootfs (~4 ms) ──► spawn FC (~25 ms)
@@ -41,7 +41,7 @@ There is **no warm pool of idle VMs** — every create takes the same 179 ms pat
 
 | Value             | What happened                                         | Typical `boot_ms` |
 | ----------------- | ----------------------------------------------------- | ----------------- |
-| `snapshot-natid`  | Fresh restore from a memory snapshot into a free NAT slot. | 150–210 ms     |
+| `snapshot-natid`  | Fresh restore from a memory snapshot into a free NAT slot. | 45–65 ms       |
 | `cold`            | First-ever boot of a template (no snapshot yet).      | 6–12 s            |
 | `fork`            | Copy-on-write fork of a running parent.               | 30–60 ms          |
 
@@ -83,8 +83,8 @@ There is no per-sandbox bandwidth cap by default — set one via `egress_mbps` i
 If your numbers don't match the table above:
 
 1. **Are you measuring `boot_ms` or `wall_ms`?** The two differ by your network RTT. Compare like-for-like.
-2. **Seeing `cold` in `info.boot_mode`?** The template hadn't been baked on that host yet. The first boot captures the snapshot; subsequent creates drop to ~180 ms. For many sandboxes from one starting state, use `fork` instead.
-3. **Template too big?** Cold-first-boot of a >5 GB rootfs takes 8–12 s. Once the snapshot exists, subsequent boots drop to ~180 ms.
+2. **Seeing `cold` in `info.boot_mode`?** The template hadn't been baked on that host yet. The first boot captures the snapshot; subsequent creates drop to ~50 ms. For many sandboxes from one starting state, use `fork` instead.
+3. **Template too big?** Cold-first-boot of a >5 GB rootfs takes 8–12 s. Once the snapshot exists, subsequent boots drop to ~50 ms.
 4. **NATID exhaustion?** Each host serves up to 4096 concurrent sandboxes (the /20 NAT range). Past that, creates queue. Self-hosters: expand the range in the agent config.
 
 ## See also

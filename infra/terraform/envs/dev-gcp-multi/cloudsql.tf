@@ -1,16 +1,24 @@
-// cloudsql.tf — Cloud SQL Postgres (smallest tier, private IP only).
+// cloudsql.tf — Cloud SQL Postgres for the control plane. Private IP only.
 //
-// MIGRATION PLAN:
-//   1. terraform apply → provisions instance + stores URL in secret
-//   2. Dump Supabase: pg_dump <supabase_url> | gzip > schema_data.sql.gz
-//   3. Restore: gunzip | psql <cloudsql_url>
+// This instance holds sandbox + managed-database records, node registration and
+// heartbeats, and network-slot allocation. Every agent heartbeat and every
+// scheduling decision writes here, so load scales with fleet size rather than
+// with user traffic. See var.cloudsql_tier / var.cloudsql_availability_type for
+// why it is sized and replicated the way it is.
+//
+// The secret written below is deliberately SEPARATE from the live
+// <project_tag>-database-url secret: cut over manually after validating the
+// data so the switch is not tied to an apply.
+//
+// MIGRATION (from an existing control-plane database):
+//   1. terraform apply → provisions the instance + stores its URL in a secret
+//   2. Dump:    pg_dump <old_url> | gzip > schema_data.sql.gz
+//   3. Restore: gunzip -c schema_data.sql.gz | psql <cloudsql_url>
 //   4. Verify row counts match
-//   5. Cut over: gcloud secrets versions add pandastack-database-url --data-file=<(terraform output -raw cloudsql_url)
+//   5. Cut over: gcloud secrets versions add <project_tag>-database-url \
+//                  --data-file=<(terraform output -raw cloudsql_url)
 //   6. Rolling restart: gcloud compute instance-groups managed rolling-action replace ...
-//   7. Update terraform.tfvars database_url to point to Cloud SQL URL
-//
-// The existing pandastack-database-url secret is NOT touched here — we
-// cut over manually after data validation to avoid downtime.
+//   7. Point terraform.tfvars database_url at the Cloud SQL URL
 
 # ── Private services access (VPC peering required for Cloud SQL private IP) ──
 
@@ -43,9 +51,9 @@ resource "google_sql_database_instance" "main" {
   deletion_protection = true
 
   settings {
-    tier              = "db-f1-micro"
-    availability_type = "ZONAL"
-    disk_size         = 10
+    tier              = var.cloudsql_tier
+    availability_type = var.cloudsql_availability_type
+    disk_size         = var.cloudsql_disk_size_gb
     disk_type         = "PD_SSD"
     disk_autoresize   = true
 
@@ -56,13 +64,17 @@ resource "google_sql_database_instance" "main" {
     }
 
     backup_configuration {
-      enabled    = true
-      start_time = "03:00"
+      enabled                        = true
+      start_time                     = "03:00"
+      point_in_time_recovery_enabled = false
     }
 
+    # Every edge VM keeps a pgx pool open, and every agent holds connections for
+    # heartbeat + slot allocation. 100 is the shared-core default and is reached
+    # by a handful of edge VMs alone, after which new agents fail to register.
     database_flags {
       name  = "max_connections"
-      value = "100"
+      value = "500"
     }
   }
 

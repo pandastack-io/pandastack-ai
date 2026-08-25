@@ -110,7 +110,11 @@ func main() {
 			log.Info("jwt auth enabled", "jwks_url", os.Getenv("SUPABASE_JWKS_URL"))
 		}
 	}
-	skipPrefixes := append(authSkipPrefixes(), "/v1/internal/natid")
+	// NOTE: these are the ONLY paths that bypass bearer auth, and each is listed
+	// as an exact path rather than a prefix on purpose. A broad prefix here
+	// would expose whatever later gets registered underneath it unauthenticated,
+	// with a caller-forgeable X-Fcs-Workspace header.
+	skipPrefixes := append(authSkipPrefixes(), "/openapi.json", "/v1/openapi.json", "/v1/internal/natid")
 	authn := newUnifiedAuth(ts, jwtValidator, skipPrefixes)
 
 	var transport http.RoundTripper
@@ -159,6 +163,21 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthzHandler)
+	// Readiness (see readyz.go): unlike /healthz this actually reaches the
+	// control-plane DB and checks for a live compute node, so status pages and
+	// the dashboard pill stop reporting green through a total create outage.
+	{
+		deps := readinessDeps{db: pgDB}
+		if multiNode != nil {
+			sched := multiNode.sched
+			deps.agents = func(ctx context.Context) (int, error) {
+				ags, err := sched.List(ctx)
+				return len(ags), err
+			}
+		}
+		mux.HandleFunc("GET /readyz", readyzHandler(deps))
+	}
+	registerOpenAPIRoute(mux)
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_ = json.NewEncoder(w).Encode(version())
@@ -174,8 +193,12 @@ func main() {
 	// Orgs / tenancy control plane. DB-backed handlers run when shared Postgres
 	// is configured; otherwise reserve the gateway-owned routes so they never
 	// fall through to the agent proxy as 404s.
+	//
+	// Each subsystem owns an idempotent SetupSchema it runs here at boot; the
+	// control plane has no separate migration step.
 	var orgs *orgsAPI
 	var resolver *orgResolver
+	var dbs *databasesAPI
 	if pgDB != nil {
 		orgs = newOrgsAPI(pgDB, log)
 		if err := orgs.SetupSchema(context.Background()); err != nil {
@@ -183,10 +206,26 @@ func main() {
 			os.Exit(1)
 		}
 		orgs.Register(mux)
-		dbs := newDatabasesAPI(log, v1Handler, pgDB, multiNode)
+		dbs = newDatabasesAPI(log, v1Handler, pgDB, multiNode).WithClickHouse(chs)
 		dbs.Register(mux)
+		if err := dbs.SetupArchiveSchema(context.Background()); err != nil {
+			// Non-fatal: the janitor skips its claim and fencing degrades —
+			// never crash-loop the control plane over it.
+			log.Error("archive schema setup failed", "err", err)
+		}
+		dbs.StartArchiveJanitor(context.Background())
 		log.Info("databases endpoints registered")
-		tpls := newTemplatesAPI(pgDB, log, v1Handler)
+		snaps := newSnapshotsAPI(pgDB, log, v1Handler)
+		// Non-fatal: a snapshots-registry schema hiccup must NOT crash the whole
+		// control plane (it once crash-looped the edge fleet on a legacy table).
+		// Log and continue — routes still register; create-recording degrades
+		// gracefully and listing returns whatever the table can answer.
+		if err := snaps.SetupSchema(context.Background()); err != nil {
+			log.Error("snapshots schema setup failed (continuing; snapshot listing may be degraded)", "err", err)
+		}
+		snaps.Register(mux)
+		log.Info("snapshots endpoints registered")
+		tpls := newTemplatesAPI(pgDB, log, v1Handler).WithDirector(multiNode)
 		if err := tpls.SetupSchema(context.Background()); err != nil {
 			log.Error("templates schema setup failed", "err", err)
 			os.Exit(1)
@@ -209,7 +248,7 @@ func main() {
 	// pointer; by serve time every /v1 route it loops back into is registered.
 	mcp := newMCPAPI(pgDB, log, mux)
 	mcp.Register(mux)
-	log.Info("workspace MCP endpoint registered", "rate_per_min", mcp.ratePerMin)
+	log.Info("workspace MCP endpoint registered")
 
 	mux.Handle("/v1/", v1Handler)
 
@@ -230,7 +269,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
 
 	go func() {
 		log.Info("control-plane listening",
@@ -283,7 +321,7 @@ func main() {
 func authSkipPrefixes() []string {
 	raw := strings.TrimSpace(os.Getenv("PANDASTACK_AUTH_SKIP_PREFIXES"))
 	if raw == "" {
-		return []string{"/healthz", "/version", "/metrics"}
+		return []string{"/healthz", "/readyz", "/version", "/metrics"}
 	}
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
@@ -328,4 +366,3 @@ func cors(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

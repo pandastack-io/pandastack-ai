@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/pandastack/agent/migrations"
 
@@ -39,6 +40,15 @@ func openPostgresDB(dsn string) (*sql.DB, error) {
 		return nil, err
 	}
 	db := sql.OpenDB(rewriteConnector{connector: stdlib.GetConnector(*cfg)})
+	// Cap the pool. The agent shares one Supabase/pgbouncer instance with the
+	// API replicas and every other agent; an uncapped pool lets a fleet of
+	// agents each open dozens of connections and exhaust the shared pooler.
+	// The agent's DB access is periodic housekeeping (5s capacity pump, meters,
+	// janitor), not a request-per-connection hot path, so a small ceiling is
+	// ample and mirrors the API pool (SetMaxOpenConns(4)).
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 	return db, nil
 }
 

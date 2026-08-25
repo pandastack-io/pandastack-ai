@@ -15,9 +15,8 @@
 #
 # Tear down: docker compose -f docker-compose.dev.yml down -v
 #
-# Self-hosters: copy .env.dev.example to .env.dev and edit. Stripe and
-# Supabase are intentionally optional — leave them blank to use the
-# file-token auth path with no billing.
+# Self-hosters: copy .env.local.example to .env.local and edit. Supabase is
+# intentionally optional — leave it blank to use the file-token auth path.
 
 name: pandastack-dev
 

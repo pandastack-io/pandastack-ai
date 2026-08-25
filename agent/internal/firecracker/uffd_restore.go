@@ -20,8 +20,8 @@ type uffdRestore struct {
 	handler  *uffd.Handler
 	resolver *memstream.Resolver
 	cancel   context.CancelFunc
-	sock     string         // handoff UDS path FC connects to during /snapshot/load
-	cache    string         // sparse chunk-cache file backing the resolver
+	sock     string              // handoff UDS path FC connects to during /snapshot/load
+	cache    string              // sparse chunk-cache file backing the resolver
 	prefetch *memstream.Prefetch // hot-set replay list (nil if none recorded)
 }
 
@@ -198,8 +198,18 @@ func (d *Driver) serveUffd() {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.uffd.cancel = cancel
 	go func() {
-		if err := d.uffd.handler.Serve(ctx); err != nil && d.log != nil {
-			d.log.Warn("uffd serve exited", "id", d.spec.ID, "err", err)
+		err := d.uffd.handler.Serve(ctx)
+		if err == nil || ctx.Err() != nil {
+			return // clean stop (Close/cancel), not a fault-path death
+		}
+		// The handler died with a live context: its fault-retry budget was
+		// exhausted on a sustained memory-stream outage. This is the loud
+		// failure that replaces the old silent guest hang — the guest's memory
+		// backing is now gone and it must be treated as failed, not left wedged.
+		obs.UffdHandlerFatalTotal.Inc()
+		if d.log != nil {
+			d.log.Error("uffd handler died (memory-stream outage exhausted fault-retry budget); VM memory unbacked",
+				"id", d.spec.ID, "err", err)
 		}
 	}()
 
@@ -240,6 +250,9 @@ func (d *Driver) closeUffd() {
 		obs.UffdChunkFetchesTotal.Add(float64(st.Fetches))
 		obs.UffdZeroFillTotal.Add(float64(st.ZeroFill))
 		obs.UffdRestoreTotal.WithLabelValues("served").Inc()
+		if h := d.uffd.handler; h != nil {
+			obs.UffdFaultRetriesTotal.Add(float64(h.FaultRetries()))
+		}
 
 		// Self-learning recorder: persist the working set this restore
 		// actually faulted in, so the NEXT restore of the same snapshot can

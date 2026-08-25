@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ import (
 
 	mrand "math/rand"
 
+	"github.com/pandastack/agent/internal/diskstream"
 	"github.com/pandastack/agent/internal/firecracker"
 	"github.com/pandastack/agent/internal/guest"
 	"github.com/pandastack/agent/internal/guest/vsockwire"
@@ -210,6 +212,7 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 
 	spec := firecracker.Spec{
 		ID:          buildID,
+		Template:    template, // PANDASTACK_NOHUGE_TEMPLATES gates the BAKE boot too — the snapshot inherits its backing
 		KernelPath:  kernelPath,
 		RootfsPath:  buildRootfs,
 		SocketPath:  filepath.Join("/tmp", fmt.Sprintf("fc-build-%s.socket", template)),
@@ -232,12 +235,33 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 			Name: "pgdata", HostPath: placeholder, ReadOnly: false,
 		}}
 	}
+	// MMDS must be configured on the BUILD VM, in BOTH modes. The MMDS data
+	// store is part of the microVM's device state: if the build VM has no MMDS,
+	// the snapshot carries none, and every restore from it fails
+	// `PUT /mmds` with 400 "The MMDS data store is not initialized" — killing
+	// the one identity-delivery channel that is INDEPENDENT of vsock.
+	//
+	// That independence is the whole point. startFromTemplateSnap races three
+	// channels to hand the restored guest its network identity: vsock-dial,
+	// vsock-poll, and MMDS-over-virtio-net (proved by an ipprobe TCP connect).
+	// The two vsock paths share a failure mode (the known post-restore vsock
+	// wedge), so when MMDS is dead the "three" channels collapse to one, and a
+	// single vsock hiccup makes the restore unrecoverable. That is exactly the
+	// 2026-07-28 managed-DB failure: FC restored + resumed the VM fine (204s
+	// all the way through), then all of dial/poll/ipprobe timed out because
+	// MMDS had 400'd and could not configure the guest.
+	//
+	// Previously this was set only in the !natidMode branch, so production
+	// (NATID mode) baked every template WITHOUT MMDS. Setting it here fixes
+	// the whole class — but only for templates baked after this ships: an
+	// existing snapshot's device state is frozen, so each template must be
+	// RE-BAKED to gain a working MMDS store.
+	spec.MMDS = firecracker.MMDSSpec{Enabled: true, Address: "169.254.169.254"}
 	if !natidMode {
 		spec.Vsock = firecracker.VsockSpec{
 			UDSPath: restoreSock,
 			CID:     alloc.VsockCID,
 		}
-		spec.MMDS = firecracker.MMDSSpec{Enabled: true, Address: "169.254.169.254"}
 	} else {
 		// NATID mode (Phase 2): bake a vsock device at the FIXED, well-known
 		// BakedVsockPath. The path is frozen into vm.state; every restore
@@ -324,6 +348,19 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 		}
 	}
 
+	// Settle the guest to a STEADY state before snapshotting. WaitReady above
+	// returns the instant the FIRST ssh dial succeeds — which can happen while
+	// systemd is still bringing services up and the network stack is still
+	// churning. Snapshotting that not-yet-settled moment freezes an unstable
+	// guest; on restore (esp. NATID, which re-IPs eth0) the guest can end up
+	// with unreachable sshd. This bit us when a larger base rootfs (railpack
+	// bake, 2026-07-23) shifted boot timing and every restored sandbox failed
+	// SSH. The fix: prove boot actually FINISHED (systemctl is-system-running
+	// reaches a terminal state) + a brief settle, so the snapshot always
+	// captures a steady guest regardless of rootfs size. Best-effort: on a
+	// template without systemd-target semantics it degrades to the settle delay.
+	settleGuestForSnapshot(ctx, gc, template, m.log)
+
 	// For phased-boot templates (e.g. postgres-16): wait for
 	// /run/pandastack/snapshot-ready, written by autostart.sh once the OS is
 	// booted (Phase 1). In the durable-volume model postgres is STOPPED at
@@ -391,6 +428,29 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 		}
 	}
 
+	// Emit the chunked diskstream header (PSD1) for clone.ext4 — the disk analog
+	// of the vm.mem header above. This zero-eliding, per-chunk-SHA256 index is
+	// what lets a cold host STREAM the rootfs on demand over NBD (schema-v4 seed)
+	// instead of downloading the whole image. Purely additive: a non-streaming
+	// restore (or a download-fallback) ignores it, so a failure here is non-fatal
+	// — the bake proceeds and the seed simply ships without the streaming option.
+	// Build the header AFTER fallocate -d so the bitmap reflects the punched
+	// (zero) holes and the present-chunk count is the true working-set upper bound.
+	if h, herr := diskstream.BuildHeader(cloneRootfs, diskstream.DefaultChunkSize); herr != nil {
+		m.log.Warn("diskstream header build failed (non-fatal; disk-streaming disabled for this bake)",
+			"template", template, "err", herr)
+	} else if werr := h.WriteFile(cloneRootfs + ".header"); werr != nil {
+		m.log.Warn("diskstream header write failed (non-fatal)", "template", template, "err", werr)
+	} else {
+		m.log.Info("diskstream header emitted",
+			"template", template,
+			"total_chunks", h.NumChunks(),
+			"present_chunks", h.PresentChunks(),
+			"present_mib", h.PresentChunks(), // 1 MiB chunks ⇒ count == MiB
+			"chunk_bytes", diskstream.DefaultChunkSize,
+		)
+	}
+
 	// Persist the baked identity so NATID restores can re-create matching
 	// in-netns TAP host IPs without re-discovery.
 	idBlob, _ := json.Marshal(map[string]string{
@@ -431,9 +491,14 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 	// is stuck on the slow copy path until the agent restarts and the startup
 	// sweep attaches the base — the dominant cold-start cost we measured.
 	if m.dmsnap.Enabled() {
-		if base := dmsnapBaseRootfs(m.cfg.DataDir, template); base != "" {
-			if err := m.dmsnap.InitBase(template, base); err != nil {
-				m.log.Warn("dmsnap InitBase after bake failed (non-fatal)",
+		// A freshly-baked template has a real local clone.ext4 (no rootfs.gcs
+		// sidecar), so EnsureBase takes the local-loop path here; the streaming
+		// branch only fires for seed-synced thin installs. Routing through
+		// EnsureBase keeps a single base-init entry point.
+		snapDir := templateSnapDir(m.cfg.DataDir, template)
+		if base := dmsnapBaseRootfs(m.cfg.DataDir, template); base != "" || diskStreamEnabled() {
+			if err := m.dmsnap.EnsureBase(template, snapDir, base, readSeedGen(snapDir)); err != nil {
+				m.log.Warn("dmsnap EnsureBase after bake failed (non-fatal)",
 					"template", template, "err", err)
 			}
 		}
@@ -581,8 +646,13 @@ func (m *Manager) preseedPublicTemplates() {
 			cancel()
 			if serr == nil && templateSnapReady(m.cfg.DataDir, t, fp) {
 				if m.dmsnap != nil && m.dmsnap.Enabled() {
-					if rp := dmsnapBaseRootfs(m.cfg.DataDir, t); rp != "" {
-						_ = m.dmsnap.InitBase(t, rp)
+					// EnsureBase streams over NBD when a rootfs.gcs sidecar is
+					// present (thin schema-v4 seed) — critical here: a thin seed's
+					// local clone.ext4 is a ZERO sparse placeholder, so looping
+					// over it (the old InitBase path) gave an all-zero rootfs.
+					sd := templateSnapDir(m.cfg.DataDir, t)
+					if rp := dmsnapBaseRootfs(m.cfg.DataDir, t); rp != "" || diskStreamEnabled() {
+						_ = m.dmsnap.EnsureBase(t, sd, rp, readSeedGen(sd))
 					}
 				}
 				m.log.Info("preseed: pulled published seed", "template", t)
@@ -783,7 +853,18 @@ func (m *Manager) startFromTemplateSnap(
 	}
 	tMmds := time.Now()
 	if err := drv.PutMMDS(context.Background(), map[string]any{"identity": cfg}); err != nil {
-		m.log.Warn("mmds put identity failed; relying on vsock paths", "err", err)
+		// LOUD, not a routine warn: MMDS is the only identity channel that is
+		// independent of vsock. The two vsock paths (dial + poll) share the
+		// post-restore wedge failure mode, so with MMDS dead this restore has
+		// effectively ONE channel and a single vsock hiccup makes it
+		// unrecoverable (the 2026-07-28 managed-DB create failure). A 400
+		// "data store is not initialized" means the TEMPLATE WAS BAKED WITHOUT
+		// MMDS and must be re-baked — it will fail on every restore of that
+		// template until then, so it must be visible, not buried.
+		m.log.Error("MMDS identity delivery UNAVAILABLE — restore is one vsock hiccup from failing; RE-BAKE this template",
+			"template", template, "sandbox", id, "err", err,
+			"impact", "identity delivery falls back to vsock-only (dial+poll share a failure mode)",
+			"fix", "re-bake the template so its snapshot carries an initialized MMDS data store")
 	}
 	mark("mmds_put_ms", tMmds)
 
@@ -947,7 +1028,7 @@ func deliverConfigRace(sockPath string, port uint32, wakeLn net.Listener, guestI
 		deadline := time.Now().Add(timeout)
 		var lastErr error
 		attempts := 0
-		addr := fmt.Sprintf("%s:%d", guestIP, guestPort)
+		addr := net.JoinHostPort(guestIP, strconv.Itoa(guestPort))
 		// 5ms cadence (was 50ms): a failed dial inside the host is a cheap
 		// immediate RST/route error, and this probe gates readiness when
 		// the MMDS path applied identity before vsock came up.
@@ -1215,12 +1296,38 @@ type rootfsResult struct {
 }
 tRootfs := time.Now()
 rootfsCh := make(chan rootfsResult, 1)
+// A thin schema-v4 streaming seed has a rootfs.gcs sidecar and only a ZERO
+// sparse placeholder for clone.ext4 — the real rootfs is served over /dev/nbdN
+// by the dm-snapshot base that EnsureBase/InitStreamingBase set up. For such a
+// seed we MUST build the per-sandbox rootfs as a dm-snapshot over that NBD
+// base (dmsnap.CreateSnap); reflinking or copying the local clone.ext4 would
+// hand the guest an all-zero disk (corrupt ext4 → sshd/exec dies with 254).
+streamingSeed := false
+if _, serr := os.Stat(filepath.Join(snapDir, diskstream.DiskRefFile)); serr == nil {
+	streamingSeed = true
+}
 go func() {
 	srcRootfs := cloneRootfs
 	if _, statErr := os.Stat(cloneRootfs); statErr != nil {
 		srcRootfs = filepath.Join(snapDir, "build-vm", "rootfs.ext4")
 	}
 	childRootfs := filepath.Join(vmDir, "rootfs.ext4")
+
+	// Streaming seed: the only correct source is the NBD-backed dm-snapshot
+	// base. Do NOT reflink/copy the zero placeholder.
+	if streamingSeed {
+		if m.dmsnap.Enabled() {
+			dmDev, derr := m.dmsnap.CreateSnap(template, id, vmDir)
+			if derr == nil {
+				rootfsCh <- rootfsResult{path: dmDev, mode: "dmsnap"}
+				return
+			}
+			rootfsCh <- rootfsResult{err: fmt.Errorf("streaming seed CreateSnap: %w", derr)}
+			return
+		}
+		rootfsCh <- rootfsResult{err: fmt.Errorf("streaming seed for %s but dm_snapshot disabled — cannot reflink the zero placeholder", template)}
+		return
+	}
 
 	// 1. Fastest path: pure reflink (no copy fallback). On reflink-capable
 	//    filesystems this is a metadata-only CoW and beats dm-snapshot.
@@ -1423,6 +1530,62 @@ func waitSnapshotReady(ctx context.Context, gc *guest.Client, template string, t
 		time.Sleep(500 * time.Millisecond)
 	}
 	// Timed out — proceed with snapshot anyway (best-effort degradation).
+}
+
+// settleGuestForSnapshot waits until the guest's boot has actually FINISHED and
+// sshd is genuinely serving, then adds a brief settle, so the snapshot captures
+// a steady guest. Called after WaitReady (which only proves the FIRST ssh dial
+// succeeded) and before PauseAndSnapshot.
+//
+// Why it exists: a snapshot taken mid-boot freezes an unstable guest — systemd
+// still starting units, the network stack still churning. On restore (NATID
+// re-IPs eth0 from the baked identity) that unsettled state can leave sshd
+// unreachable. A larger base rootfs shifts boot timing enough to expose this
+// (railpack bake incident, 2026-07-23: every restored sandbox failed SSH).
+//
+// The gate: `systemctl is-system-running` returns a TERMINAL word (running /
+// degraded — both mean boot finished; degraded just flags a failed unit, still
+// snapshot-safe) rather than `starting` / `initializing`. Then a fixed settle.
+// Best-effort throughout: any exec error or a non-systemd guest degrades to the
+// settle delay — never blocks or fails the bake (matches waitSnapshotReady).
+func settleGuestForSnapshot(ctx context.Context, gc *guest.Client, template string, log *slog.Logger) {
+	const (
+		bootDeadline = 45 * time.Second       // generous: cold boots vary by host + rootfs size
+		pollEvery    = 500 * time.Millisecond // cheap SSH exec cadence
+		settle       = 2 * time.Second        // let sshd/network quiesce after boot completes
+	)
+	deadline := time.Now().Add(bootDeadline)
+	terminal := map[string]bool{"running": true, "degraded": true, "maintenance": true}
+	settled := false
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		// `is-system-running` exits non-zero for "degraded", so read stdout, not
+		// the exit code. Trim to the single status word.
+		res, err := gc.Exec(ctx, "systemctl is-system-running 2>/dev/null || true")
+		if err == nil {
+			state := strings.TrimSpace(res.Stdout)
+			if terminal[state] {
+				log.Info("template guest boot settled", "template", template, "state", state)
+				settled = true
+				break
+			}
+		}
+		time.Sleep(pollEvery)
+	}
+	if !settled {
+		log.Warn("template guest did not report boot-complete before deadline; snapshotting anyway after settle",
+			"template", template, "deadline", bootDeadline.String())
+	}
+	// Even once boot reports complete, give sshd + the network a moment to reach
+	// a steady accept() state before we freeze the guest.
+	select {
+	case <-ctx.Done():
+	case <-time.After(settle):
+	}
 }
 
 // waitTCP polls addr with 2ms cadence until a TCP connect succeeds or timeout.

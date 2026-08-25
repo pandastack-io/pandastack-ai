@@ -9,8 +9,21 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pandastack/agent/internal/diskstream"
 	"github.com/pandastack/agent/internal/memstream"
 )
+
+// createSparse makes (or truncates) a sparse file at path of exactly size bytes.
+// Used for size-matched placeholders whose bytes are never read (the real
+// backing is patched in or, for a streamed rootfs, served over NBD).
+func createSparse(path string, size int64) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Truncate(size)
+}
 
 // Sync is invoked once at agent boot (before the agent service starts, via the
 // `pandastack-agent seed-sync` subcommand in cloud-init). For every template
@@ -191,6 +204,49 @@ func (s *Store) syncOne(ctx context.Context, dataDir, template, sshKeyFP, flavor
 	} else {
 		if err := run(ctx, "gcloud", "storage", "cp", memGSURL, filepath.Join(staging, memObjectName)); err != nil {
 			return fmt.Errorf("download vm.mem: %w", err)
+		}
+	}
+
+	// ---- clone.ext4: stream from GCS or download locally (schema v4) -------
+	// The standalone, uncompressed clone.ext4 object lives next to the tarball
+	// at <genPrefix>/clone.ext4. When this agent opts into DISK streaming AND the
+	// PSD1 chunk header shipped in the tarball AND the manifest recorded a byte
+	// length, we DON'T download clone.ext4: we drop a rootfs.gcs sidecar pointing
+	// the restore path at the object so the rootfs is demand-paged over NBD.
+	// Otherwise we download the whole clone.ext4 into staging, exactly as a
+	// non-streaming agent expects (its dm-snapshot origin is a local loop).
+	cloneGSURL := genPrefix + "/" + cloneObjectName
+	clonePath := filepath.Join(staging, cloneObjectName)
+	_, diskHeaderErr := os.Stat(filepath.Join(staging, "clone.ext4.header"))
+	streamingDisk := streamDiskEnabled() && diskHeaderErr == nil && man.CloneBytes > 0
+	if streamingDisk {
+		obj := man.CloneObject
+		if obj == "" {
+			obj = fmt.Sprintf("seeds/%s/%s/%s", template, man.Generation, cloneObjectName)
+		}
+		ref := &diskstream.DiskRef{
+			Bucket:     s.Bucket,
+			Object:     obj,
+			Size:       man.CloneBytes,
+			ChunkSize:  diskstream.DefaultChunkSize,
+			Generation: man.Generation,
+		}
+		if err := ref.WriteFile(filepath.Join(staging, diskstream.DiskRefFile)); err != nil {
+			return fmt.Errorf("write rootfs.gcs sidecar: %w", err)
+		}
+		// Recreate a sparse placeholder at clone.ext4 of the right size: the
+		// dm-snapshot origin will be the NBD device, but other restore-side code
+		// (the build-vm hardlink below, size probes) expects the file to exist
+		// at the matching size. Sparse → zero disk cost; bytes are never read
+		// from it (the NBD device is the real origin).
+		if err := createSparse(clonePath, man.CloneBytes); err != nil {
+			return fmt.Errorf("create clone.ext4 placeholder: %w", err)
+		}
+		log.Info("seed-sync: streaming clone.ext4 (no local copy)",
+			"template", template, "object", ref.Object, "bytes", ref.Size)
+	} else {
+		if err := run(ctx, "gcloud", "storage", "cp", cloneGSURL, clonePath); err != nil {
+			return fmt.Errorf("download clone.ext4: %w", err)
 		}
 	}
 

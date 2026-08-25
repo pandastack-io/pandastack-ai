@@ -18,13 +18,19 @@ variable "min_cpu_platform" {
 }
 
 variable "machine_type" {
-  type    = string
-  default = "n2d-standard-2"
+  type = string
+  # A Firecracker host carries a fixed per-host cost — the template preseed and
+  # the shared UFFD/NBD chunk cache — that only amortises across many sandboxes.
+  # A 2-vCPU agent pays that cost for almost no capacity. See the env's
+  # var.agent_machine_type.
+  default = "n2-standard-64"
 }
 
 variable "boot_disk_size_gb" {
-  type    = number
-  default = 100
+  type = number
+  # Template preseeds + the shared streaming chunk cache + per-sandbox CoW
+  # deltas all live here. See the env's var.agent_boot_disk_size_gb.
+  default = 800
 }
 
 variable "boot_disk_type" {
@@ -33,8 +39,11 @@ variable "boot_disk_type" {
 }
 
 variable "use_preemptible" {
-  type    = bool
-  default = true
+  type = bool
+  # false. An agent holds running sandboxes and host-pinned managed-database
+  # PGDATA; preemption is a data-plane event, not a cost optimisation. Opt in
+  # deliberately for a throwaway trial.
+  default = false
 }
 
 variable "agent_count" {
@@ -98,15 +107,20 @@ variable "snapshot_bucket_name" {
 }
 
 variable "volumes_disk_size_gb" {
-  type        = number
-  default     = 200
+  type = number
+  # Customer data, not cache: running out here is a data incident. See the env's
+  # var.agent_volumes_disk_size_gb.
+  default     = 500
   description = "Size of the per-agent STATEFUL data disk mounted at /var/lib/pandastack/volumes (customer volumes + managed-DB PGDATA). Survives MIG autoheal/recreate; grow online with `gcloud compute disks resize` + resize2fs."
 }
 
 variable "volumes_disk_type" {
-  type        = string
-  default     = "pd-balanced"
-  description = "Disk type for the volumes data disk. pd-balanced: ~$0.10/GB-month, enough IOPS for sparse ext4 volume images."
+  type = string
+  # pd-ssd: managed-Postgres WAL fsyncs from every database pinned to this host
+  # land on this disk concurrently. pd-balanced's IOPS/GB is tuned for sparse
+  # image files, not for many independent WAL streams.
+  default     = "pd-ssd"
+  description = "Disk type for the volumes data disk."
 }
 
 variable "agent_binary_url" {

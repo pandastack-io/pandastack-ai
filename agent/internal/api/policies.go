@@ -77,7 +77,7 @@ func auditWriter(s *store.Store) func(http.Handler) http.Handler {
 	}
 }
 
-// --- /v1/quotas (read) + workspace policy enforcement -----------------------
+// --- workspace policy enforcement -------------------------------------------
 //
 // Defaults are tuned to be competitive: generous out of the box, with
 // per-workspace policies that admins can tighten via /admin/workspaces/{name}.

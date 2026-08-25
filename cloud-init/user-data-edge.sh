@@ -14,7 +14,7 @@
 #   secret-database-url      - Secret Manager secret ID containing the Supabase DSN
 #   secret-clickhouse-url    - Secret Manager secret ID containing the CH URL
 #   secret-jwks-url          - Secret Manager secret ID containing the Supabase JWKS URL
-#   secret-stripe-env        - JSON map of STRIPE_* env names to Secret Manager IDs
+#   pandastack-zone-name     - public DNS zone this deployment serves (e.g. example.com)
 set -euo pipefail
 exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
 
@@ -65,8 +65,10 @@ SECRET_TOKEN="$(md instance/attributes/secret-node-token)"
 SECRET_DB="$(md instance/attributes/secret-database-url)"
 SECRET_CH="$(md instance/attributes/secret-clickhouse-url)"
 SECRET_JWKS="$(md instance/attributes/secret-jwks-url)"
-SECRET_STRIPE_ENV="$(md instance/attributes/secret-stripe-env)"
-SECRET_GITHUB_ENV="$(md instance/attributes/secret-github-env)"
+# Public DNS zone for this deployment. Supplied by terraform
+# (var.cloudflare_zone_name) — there is no correct default, so fail loudly
+# rather than baking someone else's domain into the env file.
+ZONE_NAME="$(md instance/attributes/pandastack-zone-name)"
 INSTANCE_NAME="$(md instance/name)"
 INTERNAL_IP="$(md instance/network-interfaces/0/ip)"
 
@@ -110,53 +112,8 @@ SUPABASE_ISSUER=
 SUPABASE_AUDIENCE=authenticated
 CLICKHOUSE_URL=${CLICKHOUSE_URL}
 PANDASTACK_CLICKHOUSE_URL=${CLICKHOUSE_URL}
-PANDASTACK_PREVIEW_HOST_SUFFIX=pandastack.ai
-PANDASTACK_DASHBOARD_URL=https://app.pandastack.ai
+PANDASTACK_DASHBOARD_URL=https://app.${ZONE_NAME}
 EOF
-
-STRIPE_API_KEY_VALUE=""
-STRIPE_SECRET_MISSING=0
-if [ -n "$SECRET_STRIPE_ENV" ] && [ "$SECRET_STRIPE_ENV" != "{}" ]; then
-  while IFS=$'\t' read -r env_name secret_name; do
-    [ -n "$env_name" ] || continue
-    value="$(fetch_secret "$secret_name")"
-    if [ -z "$value" ]; then
-      echo "WARN: missing Secret Manager value for $env_name ($secret_name) — billing will be limited" >&2
-      STRIPE_SECRET_MISSING=1
-      continue
-    fi
-    printf '%s=%s\n' "$env_name" "$value" >> "$ENV_API_NEXT"
-    case "$env_name" in
-      STRIPE_SECRET_KEY|STRIPE_API_KEY) STRIPE_API_KEY_VALUE="$value" ;;
-    esac
-  done < <(printf '%s' "$SECRET_STRIPE_ENV" | jq -r 'to_entries[] | [.key, .value] | @tsv')
-fi
-if [ -n "$STRIPE_API_KEY_VALUE" ] && ! grep -q '^STRIPE_API_KEY=' "$ENV_API_NEXT"; then
-  printf 'STRIPE_API_KEY=%s\n' "$STRIPE_API_KEY_VALUE" >> "$ENV_API_NEXT"
-fi
-if [ "$STRIPE_SECRET_MISSING" -ne 0 ]; then
-  echo "WARN: one or more Stripe secrets missing; API will start with billing disabled." >&2
-fi
-
-# GitHub App secrets (apps feature: connect flow + auto-deploy webhook + clone
-# auth). Same metadata-JSON → fetch loop as Stripe. Blank/empty containers are
-# skipped, so the API falls back to "apps disabled" until they are populated.
-if [ -n "$SECRET_GITHUB_ENV" ] && [ "$SECRET_GITHUB_ENV" != "{}" ]; then
-  while IFS=$'\t' read -r env_name secret_name; do
-    [ -n "$env_name" ] || continue
-    value="$(fetch_secret "$secret_name")"
-    if [ -z "$value" ]; then
-      echo "WARN: missing Secret Manager value for $env_name ($secret_name) — apps/GitHub will be limited" >&2
-      continue
-    fi
-    # systemd's EnvironmentFile treats backslash as an escape character, so a
-    # one-line PEM stored with literal "\n" would reach the process as plain
-    # "n" (unparseable key). Double the backslashes: systemd collapses "\\n"
-    # back to "\n", and the API's normalizePEM expands that to real newlines.
-    value="${value//\\/\\\\}"
-    printf '%s=%s\n' "$env_name" "$value" >> "$ENV_API_NEXT"
-  done < <(printf '%s' "$SECRET_GITHUB_ENV" | jq -r 'to_entries[] | [.key, .value] | @tsv')
-fi
 
 install -m 0600 -o root -g root "$ENV_API_NEXT" /etc/pandastack/env.api
 rm -f "$ENV_API_NEXT"
@@ -164,7 +121,7 @@ rm -f "$ENV_API_NEXT"
 cat > /etc/pandastack/env.dashboard <<EOF
 NEXT_PUBLIC_SUPABASE_URL=${SUPA_URL}
 NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPA_ANON}
-NEXT_PUBLIC_API_BASE=https://api.pandastack.ai
+NEXT_PUBLIC_API_BASE=https://api.${ZONE_NAME}
 PORT=3000
 EOF
 chmod 0644 /etc/pandastack/env.dashboard

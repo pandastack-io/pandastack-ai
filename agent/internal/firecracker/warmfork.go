@@ -78,7 +78,7 @@ func (d *Driver) StartWarmFork(ctx context.Context, snapDir, childRootfs string)
 	d.proc = cmd.Process
 
 	// Wait for API socket to appear (FC creates it after a few ms).
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	waitFCSocket(hc, d.spec.SocketPath)
 
 	// PUT /snapshot/load with network_overrides. The memory backend is either
@@ -184,7 +184,7 @@ func (d *Driver) StartFromSnapNoDrive(ctx context.Context, snapDir, hostTAP stri
 	}
 	d.proc = cmd.Process
 
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	waitFCSocket(hc, d.spec.SocketPath)
 
 	loadBody := map[string]any{
@@ -286,7 +286,7 @@ func (d *Driver) PatchRootfs(ctx context.Context, childRootfs string) error {
 // template snapshot carries a placeholder "vdb" drive, and at restore we patch
 // it to point at the database's own image before resuming.
 func (d *Driver) PatchDrive(ctx context.Context, driveID, pathOnHost string) error {
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	patchDrive := map[string]any{
 		"drive_id":     driveID,
 		"path_on_host": pathOnHost,
@@ -308,7 +308,7 @@ func (d *Driver) PatchDrive(ctx context.Context, driveID, pathOnHost string) err
 // the firecracker process: the VM is healthy and serving traffic; we just
 // report the error and let the caller retry on the next sweep.
 func (d *Driver) PatchDriveLive(ctx context.Context, driveID, pathOnHost string) error {
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	body := map[string]any{
 		"drive_id":     driveID,
 		"path_on_host": pathOnHost,
@@ -386,7 +386,50 @@ func newUnixHTTP(sock string) *http.Client {
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 				return net.Dial("unix", sock)
 			},
+			// One idle conn max: FC caps concurrent API-socket connections
+			// (observed hard-refusing at ~10 with "Too many open
+			// connections"). The clients are SHARED per driver (see
+			// Driver.hc/hcLong) precisely so ops reuse one connection —
+			// the old one-client-per-op pattern leaked its idle keep-alive
+			// socket every call until paused VMs could never be resumed
+			// (found live by the 2026-08-18 E2E, task_70b3c215).
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			IdleConnTimeout:     30 * time.Second,
 		},
+	}
+}
+
+// hcShort returns the driver's shared 10s-timeout FC API client.
+func (d *Driver) hcShort() *http.Client {
+	d.hcOnce.Do(d.initHTTPClients)
+	return d.hc
+}
+
+// hcLongClient returns the driver's shared 120s-timeout FC API client
+// (snapshot create / pause of multi-GB guests).
+func (d *Driver) hcLongClient() *http.Client {
+	d.hcOnce.Do(d.initHTTPClients)
+	return d.hcLong
+}
+
+func (d *Driver) initHTTPClients() {
+	d.hc = newUnixHTTP(d.spec.SocketPath)
+	d.hcLong = newUnixHTTPLong(d.spec.SocketPath)
+}
+
+// closeHTTPClients drops the shared clients' idle connections. Called from
+// Stop so a dead VM's sockets are released immediately.
+func (d *Driver) closeHTTPClients() {
+	if d.hc != nil {
+		if t, ok := d.hc.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+	}
+	if d.hcLong != nil {
+		if t, ok := d.hcLong.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
 	}
 }
 
@@ -401,6 +444,9 @@ func newUnixHTTPLong(sock string) *http.Client {
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
 				return net.Dial("unix", sock)
 			},
+			MaxIdleConns:        1,
+			MaxIdleConnsPerHost: 1,
+			IdleConnTimeout:     30 * time.Second,
 		},
 	}
 }

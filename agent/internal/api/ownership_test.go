@@ -57,7 +57,7 @@ func TestCheckCreateOwnership(t *testing.T) {
 func TestStampWorkspaceMetaForcesOverwrite(t *testing.T) {
 	// A non-admin caller must not be able to spoof another tenant's workspace.
 	in := []byte(`{"template":"t","metadata":{"workspace":"attacker","k":"v"}}`)
-	out := stampWorkspaceMeta(in, "victim")
+	out := stampWorkspaceMeta(in, "victim", false)
 	var m map[string]any
 	if err := json.Unmarshal(out, &m); err != nil {
 		t.Fatal(err)

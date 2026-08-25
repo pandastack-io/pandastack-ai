@@ -6,7 +6,9 @@
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 # Optional:
 #   PAGES_PROJECT       (default: pandastack-dashboard)
-#   NEXT_PUBLIC_PANDASTACK_API   (default: https://api.pandastack.ai)
+# Also required:
+#   NEXT_PUBLIC_PANDASTACK_API   your API origin, e.g. https://api.example.com
+#   APP_ORIGIN                   your dashboard origin, e.g. https://app.example.com
 
 set -euo pipefail
 
@@ -21,7 +23,11 @@ fi
 : "${CLOUDFLARE_API_TOKEN:?required}"
 : "${CLOUDFLARE_ACCOUNT_ID:?required}"
 PAGES_PROJECT="${PAGES_PROJECT:-pandastack-dashboard}"
-export NEXT_PUBLIC_PANDASTACK_API="${NEXT_PUBLIC_PANDASTACK_API:-https://api.pandastack.ai}"
+# No defaults for these: a default would build the dashboard against someone
+# else's API origin and print links to someone else's deployment.
+: "${NEXT_PUBLIC_PANDASTACK_API:?set NEXT_PUBLIC_PANDASTACK_API to your API origin, e.g. https://api.example.com}"
+: "${APP_ORIGIN:?set APP_ORIGIN to your dashboard origin, e.g. https://app.example.com}"
+export NEXT_PUBLIC_PANDASTACK_API
 
 GREEN='\033[0;32m'; NC='\033[0m'
 step() { printf "\n${GREEN}┌─ %s${NC}\n" "$*"; }
@@ -52,6 +58,5 @@ CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
     --commit-dirty=true
 
 step "Done. Test pages:"
-echo "  https://app.pandastack.ai/sandboxes"
-echo "  https://app.pandastack.ai/usage"
-echo "  https://app.pandastack.ai/audit"
+echo "  ${APP_ORIGIN}/sandboxes"
+echo "  ${APP_ORIGIN}/databases"

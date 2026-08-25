@@ -22,7 +22,7 @@ Every row is tagged with `workspace_id`; the API rewrites every query to add `WH
 ## Per-sandbox metrics
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/metrics"
 ```
 
@@ -42,14 +42,14 @@ This is the live, in-the-moment view served by the agent reading `/proc/<pid>/st
 ## Workspace-wide aggregates
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/metrics/overview?range=24h"
 ```
 
 Returns time-series buckets for sandboxes-running, vCPU-hours used, memory-GB-hours, p50/p99 `boot_ms`. Backed by ClickHouse — works across all your hosts, not just one.
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/metrics/sandbox/$SID?range=1h"
 ```
 
@@ -79,7 +79,7 @@ Each lifecycle change is one row in `sandbox_events`. The full set:
 Subscribe live:
 
 ```bash
-curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -N -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/events?follow=1&tail=20"
 ```
 
@@ -87,14 +87,13 @@ Returns SSE: 20 most recent past events, then any new ones as they happen. Perfe
 
 ## Dashboard tour
 
-Three pages drive the entire UX, all backed by the above:
+Four pages drive the entire UX, all backed by the above:
 
 | Page             | What it shows                                          | Data source                                |
 | ---------------- | ------------------------------------------------------ | ------------------------------------------ |
 | `/observability` | Workspace charts: sandboxes over time, p50/p99 boot, vCPU-hours, success/fail rate. | `/v1/metrics/overview` |
 | `/sandboxes/[id]`| Per-sandbox CPU / mem / net / disk time series + lifecycle event log. | `/v1/metrics/sandbox/{id}` + `/events` |
 | `/audit`         | Full audit trail with filter by actor / action / time. | `audit_log` table                          |
-| `/usage`         | Aggregated billing-grade usage: vCPU-hours, GB-hours, count of creates per template. | rollups on `sandbox_metrics` + `boot_events` |
 | `/stats`         | Boot-time histogram with template breakdown. | `boot_events` table |
 
 The charts are pure SVG (no Chart.js / D3 monster) — one Go binary, one Next.js app, no third-party telemetry stack to babysit.
@@ -130,7 +129,7 @@ This is the same query the dashboard runs. The ClickHouse cluster doubles as you
 
 **Autoscaling agent worker pools.** Subscribe to per-sandbox metrics; when p95 CPU stays >70 % for 5 min, fork a worker. The same primitives Kubernetes HPA uses, without the YAML.
 
-**Cost attribution by team.** Tag sandboxes with `metadata.team=…` at create; group ClickHouse rollups by metadata to get a per-team vCPU-hour invoice. Already wired in the `/usage` page.
+**Capacity attribution by team.** Tag sandboxes with `metadata.team=…` at create, then group ClickHouse rollups by metadata to see which team is consuming which share of the fleet's vCPU-hours.
 
 **SLO dashboards.** Watch p99 `boot_ms` over a 28-day window. Alert when it crosses your budget.
 

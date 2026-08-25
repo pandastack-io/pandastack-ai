@@ -7,8 +7,9 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { isStubAuth, STUB_USER_EMAIL } from "@/lib/auth-mode";
-import { API_BASE, getAuthHeaders, getMe, listOrgs, setCurrentOrg, type Org } from "@/lib/api";
+import { API_BASE, getMe, listOrgs, setCurrentOrg, type Org } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
+import { clearListCache } from "@/lib/list-cache";
 import { ConfirmProvider } from "@/components/ui";
 import { ThemeToggle } from "@/components/theme";
 import {
@@ -24,7 +25,6 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
-  Zap,
   Activity,
   LineChart,
   Bell,
@@ -37,6 +37,7 @@ import {
   MessageCircle,
   Globe,
   ExternalLink,
+  Camera,
 } from "lucide-react";
 
 const NAV = [
@@ -44,6 +45,7 @@ const NAV = [
   { href: "/databases",       label: "Databases",    icon: Database,   shortcut: "" },
   { href: "/templates",       label: "Templates",    icon: LayoutGrid, shortcut: "G T" },
   { href: "/volumes",         label: "Volumes",      icon: HardDrive,  shortcut: "" },
+  { href: "/snapshots",       label: "Snapshots",    icon: Camera,     shortcut: "" },
   { href: "/audit",           label: "Audit Log",    icon: Bell,       shortcut: "" },
   { href: "/stats",           label: "Performance",  icon: Activity,   shortcut: "" },
   { href: "/observability",   label: "Observability",icon: LineChart,  shortcut: "" },
@@ -157,12 +159,6 @@ function Sidebar({
               <span className="text-[14px] font-semibold tracking-tight truncate" style={{ color: "var(--text-primary)" }}>
                 PandaStack
               </span>
-              <span
-                className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider shrink-0"
-                style={{ background: "var(--bg-overlay)", color: "var(--text-muted)" }}
-              >
-                dev
-              </span>
             </div>
           )}
         </Link>
@@ -209,7 +205,7 @@ function Sidebar({
           <div className="flex flex-col items-center gap-0.5 py-1.5">
             {[
               { href: "https://docs.pandastack.ai", icon: BookOpen, label: "Docs" },
-              { href: "https://discord.gg/C7Du7XbG", icon: MessageCircle, label: "Discord" },
+              { href: "https://discord.gg/GzxpktHpHD", icon: MessageCircle, label: "Discord" },
               { href: "https://pandastack.ai", icon: Globe, label: "Website" },
             ].map(({ href, icon: Icon, label }) => (
               <a
@@ -231,7 +227,7 @@ function Sidebar({
             <div className="flex items-center gap-0.5">
               {[
                 { href: "https://docs.pandastack.ai", icon: BookOpen, label: "Docs" },
-                { href: "https://discord.gg/C7Du7XbG", icon: MessageCircle, label: "Discord" },
+                { href: "https://discord.gg/GzxpktHpHD", icon: MessageCircle, label: "Discord" },
                 { href: "https://pandastack.ai", icon: Globe, label: "Website" },
               ].map(({ href, icon: Icon, label }) => (
                 <a
@@ -289,9 +285,8 @@ function TopBar({
   onShortcuts: () => void;
 }) {
   const router = useRouter();
-  const [health, setHealth] = useState<"ok" | "down" | "checking">("checking");
-  const [p50, setP50] = useState<number | null>(null);
-  const [_, setTick] = useState(0);
+  const [health, setHealth] = useState<"ok" | "down" | "degraded" | "checking">("checking");
+  const [degraded, setDegraded] = useState<string[]>([]);
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -301,25 +296,32 @@ function TopBar({
     const poll = async () => {
       let nextDelay = 30000;
       try {
-        const h = await fetch(`${API_BASE}/healthz`, { cache: "no-store" });
+        // /readyz, not /healthz: healthz only reports "the process is up and
+        // configured" and stays 200 through a full control-plane outage where
+        // every create fails. readyz pings the database and checks for a live
+        // compute node, so this pill tells the truth.
+        const h = await fetch(`${API_BASE}/readyz`, { cache: "no-store" });
         if (!alive) return;
-        setHealth(h.ok ? "ok" : "down");
         if (h.ok) {
-          const r = await fetch(`${API_BASE}/v1/stats/boot?limit=20`, { cache: "no-store", headers: await getAuthHeaders() });
-          if (r.ok) {
-            const j = await r.json();
-            if (alive && j?.overall?.p50_ms !== undefined) {
-              setP50(j.overall.p50_ms);
-            }
-          }
+          setHealth("ok");
         } else {
+          // 503 with a JSON body = reachable but degraded (we can name what);
+          // anything else = not reachable at all.
+          let subsystems: string[] = [];
+          try {
+            const body = await h.json();
+            if (Array.isArray(body?.degraded)) subsystems = body.degraded;
+          } catch {
+            /* non-JSON error page — treat as down */
+          }
+          setHealth(subsystems.length > 0 ? "degraded" : "down");
+          setDegraded(subsystems);
           nextDelay = 3000;
         }
       } catch {
         if (alive) setHealth("down");
         nextDelay = 3000;
       }
-      if (alive) setTick((t) => t + 1);
       if (alive) timer = setTimeout(poll, nextDelay);
     };
     poll();
@@ -355,6 +357,7 @@ function TopBar({
 
   const signOut = async () => {
     await createClient().auth.signOut();
+    clearListCache(); // drop cached list rows so a later account never sees them
     setMenuOpen(false);
     router.push(isStubAuth() ? "/sandboxes" : "/login");
     router.refresh();
@@ -393,29 +396,6 @@ function TopBar({
 
       <OrgSwitcher />
 
-      {/* Launch latency badge */}
-      {p50 !== null && p50 > 0 ? (
-        <div
-          className="glow-pulse hidden sm:flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-medium"
-          style={{
-            background: "var(--brand-dim)",
-            border: "1px solid var(--brand-border)",
-            color: "var(--brand)",
-          }}
-        >
-          <Zap size={11} />
-          {p50} ms p50
-        </div>
-      ) : (
-        <div
-          className="hidden sm:flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px]"
-          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-muted)" }}
-        >
-          <Activity size={11} />
-          no boots yet
-        </div>
-      )}
-
       {/* Health */}
       <div className="flex items-center gap-1.5">
         <span
@@ -424,11 +404,18 @@ function TopBar({
             background:
               health === "ok" ? "var(--status-running)"
               : health === "down" ? "var(--status-failed)"
+              : health === "degraded" ? "var(--status-paused)"
               : "var(--text-muted)",
           }}
         />
         <span className="hidden text-[12px] sm:block" style={{ color: "var(--text-muted)" }}>
-          {health === "ok" ? "API online" : health === "down" ? "API down" : "checking…"}
+          {health === "ok"
+            ? "API online"
+            : health === "down"
+              ? "API down"
+              : health === "degraded"
+                ? `Degraded${degraded.length ? `: ${degraded.join(", ")}` : ""}`
+                : "checking…"}
         </span>
       </div>
 
@@ -477,6 +464,14 @@ function TopBar({
               <div className="truncate text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>{email}</div>
               <div className="truncate text-[11px]" style={{ color: "var(--text-muted)" }}>{isStubAuth() ? "Local stub workspace" : "Supabase workspace"}</div>
             </div>
+            <Link
+              href="/settings/tokens"
+              onClick={() => setMenuOpen(false)}
+              className="block w-full px-3 py-2 text-left text-[13px] transition-colors hover:bg-zinc-800"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              Settings
+            </Link>
             <button
               onClick={signOut}
               className="w-full px-3 py-2 text-left text-[13px] transition-colors hover:bg-zinc-800"

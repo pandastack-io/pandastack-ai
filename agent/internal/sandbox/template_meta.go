@@ -2,19 +2,20 @@
 // template_meta.go centralises template-size resolution so that CPU and RAM
 // are a property of the *template*, not a per-launch knob. Firecracker
 // snapshot restore cannot change vCPU/RAM at restore time; if a request
-// disagrees with the baked snapshot, the guest silently keeps the baked
-// size while the API/DB/billing record the requested size — that's a
-// correctness AND billing bug. So the agent now treats the template's
-// meta.json as the single source of truth and overrides the request to
-// match before anything is persisted or billed.
+// disagrees with the baked snapshot, the guest silently keeps the baked size
+// while the API/DB record the requested size — a correctness bug: the row
+// lies about what the guest actually got. So the agent treats the template's
+// meta.json as the single source of truth and overrides the request to match
+// before anything is persisted.
 //
 // File layout:
-//   <dataDir>/templates/<name>/meta.json         — authoritative cpu/memory_mb
-//   <dataDir>/template-snaps/<name>/snap-meta.json — what the *snapshot* was
-//                                                    actually baked at (must
-//                                                    match the template meta;
-//                                                    if not, treat snapshot
-//                                                    as not-ready and rebake)
+//
+//	<dataDir>/templates/<name>/meta.json         — authoritative cpu/memory_mb
+//	<dataDir>/template-snaps/<name>/snap-meta.json — what the *snapshot* was
+//	                                                 actually baked at (must
+//	                                                 match the template meta;
+//	                                                 if not, treat snapshot
+//	                                                 as not-ready and rebake)
 package sandbox
 
 import (
@@ -31,7 +32,11 @@ import (
 // Note: all published templates have explicit cpu/memory_mb in their
 // meta.json so these constants only apply to custom/dev templates.
 const (
-	DefaultTemplateCPU      = 1
+	// Every template — first-party and custom — runs 8 burstable vCPUs:
+	// cgroup cpu.weight (100×vCPU) fair-shares cores under contention, so a
+	// smaller cpu value would only weaken the sandbox's fair-share weight
+	// without saving anything. RAM is the one per-template knob.
+	DefaultTemplateCPU      = 8
 	DefaultTemplateMemoryMB = 1024
 	DefaultTemplateDiskGB   = 10
 )
@@ -77,6 +82,24 @@ func ReadTemplateSize(dataDir, template string) TemplateSize {
 	}
 	b, err := os.ReadFile(filepath.Join(dataDir, "templates", template, "meta.json"))
 	if err != nil {
+		// No custom-template meta.json. A Thaw AppSeed (and any snapshot-only
+		// template) lives in template-snaps/<name> and has no templates/<name>
+		// dir at all — its authoritative size is the snap manifest, written by
+		// the bake (WriteSnapManifest). Fall back to it so an app-seed create
+		// sizes correctly instead of silently using the 256MiB/1vCPU defaults.
+		if cpu, mem, disk, _, ok := ReadSnapManifest(templateSnapDir(dataDir, template)); ok {
+			out := def
+			if cpu >= 1 && cpu <= 64 {
+				out.CPU = cpu
+			}
+			if mem >= 128 && mem <= 65536 {
+				out.MemoryMB = mem
+			}
+			if disk >= 1 && disk <= 1024 {
+				out.DiskGB = disk
+			}
+			return out
+		}
 		return def
 	}
 	var m map[string]any

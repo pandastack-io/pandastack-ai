@@ -21,16 +21,27 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/pandastack/agent/internal/sandbox"
 )
 
-// pgTunnelPort is the Postgres port inside every postgres-16 sandbox.
+// pgTunnelPort is the default Postgres port inside every postgres-16 sandbox.
 const pgTunnelPort = 5432
 
-// pgTunnelTemplate is the only template allowed through the pg-tunnel.
-const pgTunnelTemplate = "postgres-16"
+// resolveTunnelPort picks the guest port from an optional ?port query param.
+// The allowlist is exactly one port — Postgres (5432) — so the tunnel can
+// never be used as a generic guest-port SSRF primitive. Absent → 5432.
+func resolveTunnelPort(raw string) (int, bool) {
+	if raw == "" || raw == "5432" {
+		return pgTunnelPort, true
+	}
+	return 0, false
+}
+
+// Only managed-database templates (postgres-16 + its RAM tiers) are allowed
+// through the pg-tunnel — see sandbox.IsManagedDBTemplate.
 
 func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 	mux.HandleFunc("GET /sandboxes/{id}/pg-tunnel", func(w http.ResponseWriter, r *http.Request) {
@@ -48,8 +59,8 @@ func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 			writeErr(w, http.StatusNotFound, errString("sandbox not found"))
 			return
 		}
-		if sb.Template != pgTunnelTemplate {
-			writeErr(w, http.StatusForbidden, fmt.Errorf("pg-tunnel only available for %s sandboxes (got %q)", pgTunnelTemplate, sb.Template))
+		if !sandbox.IsManagedDBTemplate(sb.Template) {
+			writeErr(w, http.StatusForbidden, fmt.Errorf("pg-tunnel only available for managed database sandboxes (got %q)", sb.Template))
 			return
 		}
 		if sb.Status != sandbox.StatusRunning {
@@ -61,8 +72,16 @@ func registerPGTunnel(mux *http.ServeMux, mgr *sandbox.Manager) {
 			return
 		}
 
-		// Dial guest_ip:5432
-		pgAddr := fmt.Sprintf("%s:%d", sb.GuestIP, pgTunnelPort)
+		// Optional ?port, allow-listed so the tunnel can't reach arbitrary
+		// guest ports.
+		port, ok := resolveTunnelPort(r.URL.Query().Get("port"))
+		if !ok {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("unsupported tunnel port %q (allowed: 5432)", r.URL.Query().Get("port")))
+			return
+		}
+
+		// Dial guest_ip:<port>
+		pgAddr := net.JoinHostPort(sb.GuestIP, strconv.Itoa(port))
 		pgConn, err := net.DialTimeout("tcp", pgAddr, 10*time.Second)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, fmt.Errorf("dial postgres: %w", err))

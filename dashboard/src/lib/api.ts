@@ -2,8 +2,12 @@
 import { isStubAuth, STUB_USER_EMAIL, STUB_USER_ID } from "@/lib/auth-mode";
 import { createClient } from "@/lib/supabase/client";
 
+// Self-hosted by default: point at a control plane on localhost unless the
+// deployment sets NEXT_PUBLIC_PANDASTACK_API (the Dockerfile takes it as a
+// build ARG). Never default to a hosted vendor endpoint — a self-hosted
+// dashboard must not talk to someone else's control plane.
 export const API_BASE =
-  process.env.NEXT_PUBLIC_PANDASTACK_API ?? "https://api.pandastack.ai";
+  process.env.NEXT_PUBLIC_PANDASTACK_API ?? "http://localhost:8080";
 
 export async function getAuthHeaders(): Promise<Record<string, string>> {
   if (typeof window === "undefined") return {};
@@ -36,6 +40,15 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
 
   return headers;
 }
+
+export type SnapshotInfo = {
+  id: string;
+  workspace?: string;
+  sandbox_id: string;
+  template?: string;
+  size_bytes?: number;
+  created_at: string;
+};
 
 export type Sandbox = {
   id: string;
@@ -86,12 +99,18 @@ export type DatabaseInfo = {
   failover_available?: boolean;
   failover_reason?: string;
   failover_eta_seconds?: number;
+  // Backing sandbox id (today identical to the database id).
+  sandbox_id?: string;
+  // When true, the database is exempt from idle auto-suspend.
+  always_on?: boolean;
 };
 
 export type CreateDatabaseRequest = {
   cpu?: number;
   memory_mb?: number;
   label?: string;
+  // Exempt from idle auto-suspend from creation.
+  always_on?: boolean;
 };
 
 // Live stats snapshot for a managed database (GET /v1/databases/{id}/stats).
@@ -108,7 +127,28 @@ export type DatabaseStats = {
   disk_used_pct: number;
 };
 
-// Git-driven app hosting (Vercel/Render-style) on a persistent sandbox.
+// Historical CPU + memory + net + disk I/O for one database. Bucketed on the
+// server per range; the client just plots the points as returned.
+export type DatabaseMetricPoint = {
+  ts: string;              // "YYYY-MM-DD HH:MM:SS" UTC (analytics bucket start)
+  cpu_pct: number;         // 0–100 (avg over bucket)
+  mem_bytes: number;       // avg guest working-set bytes
+  net_rx_bytes: number;    // sum over bucket
+  net_tx_bytes: number;
+  disk_rd_bytes: number;
+  disk_wr_bytes: number;
+};
+
+export type DatabaseMetrics = {
+  range: "1h" | "24h" | "7d" | "30d";
+  bucket: string;          // "15s" | "1m" | "5m" | "30m" | "2h"
+  bucket_seconds: number;
+  from: string;            // RFC3339
+  to: string;
+  points: DatabaseMetricPoint[];
+  empty: boolean;          // true when the pipeline is wired but has no samples yet
+};
+
 export type Template = {
   name: string;
   rootfs_path: string;
@@ -199,9 +239,18 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
     headers.set(key, value);
   });
 
+  // Parameterless mutating requests (pause/resume/hibernate/accept-invite) have
+  // no body; some runtimes then omit Content-Length, which an edge proxy rejects
+  // with 411. Send an explicit empty body so Content-Length: 0 is always set.
+  // (Mirrors the SDK fix.)
+  const method = (init?.method ?? "GET").toUpperCase();
+  const mutating = method !== "GET" && method !== "HEAD" && method !== "DELETE";
+  const body = init?.body ?? (mutating ? "" : undefined);
+
   const r = await fetch(`${API_BASE}/v1${path}`, {
     ...init,
     headers,
+    body,
     cache: "no-store",
   });
   if (!r.ok) {
@@ -327,6 +376,12 @@ export const api = {
     call<void>(`/sandboxes/${id}/pause`, { method: "POST" }),
   resume: (id: string) =>
     call<void>(`/sandboxes/${id}/resume`, { method: "POST" }),
+  snapshots: async () => {
+    const data = await call<{ snapshots: SnapshotInfo[] } | SnapshotInfo[]>("/snapshots");
+    return Array.isArray(data) ? data : data.snapshots ?? [];
+  },
+  deleteSnapshot: (id: string) =>
+    call<void>(`/snapshots/${encodeURIComponent(id)}`, { method: "DELETE" }),
   snapshot: (id: string) =>
     call<{ id: string; sandbox_id: string; created_at: string }>(
       `/sandboxes/${id}/snapshots`,
@@ -435,10 +490,6 @@ export const api = {
   start: (id: string) =>
     call<{ status: string }>(`/sandboxes/${id}/start`, { method: "POST" }),
 
-  // Phase 3: events (snapshot; SSE handled in EventsTab)
-  events: (id: string, tail = 100) =>
-    call<{ events: SandboxEvent[] }>(`/sandboxes/${id}/events?tail=${tail}`),
-
   // Managed databases (postgres-16 sandboxes with DB ergonomics)
   databases: async () => {
     const data = await call<{ items: DatabaseInfo[]; count: number } | DatabaseInfo[]>("/databases");
@@ -455,6 +506,25 @@ export const api = {
     call<{ logs: string }>(`/databases/${encodeURIComponent(id)}/logs?lines=${lines}`),
   failoverDatabase: (id: string) =>
     call<DatabaseInfo>(`/databases/${encodeURIComponent(id)}/failover`, { method: "POST" }),
+  // Resume an idle (auto-suspended) database now instead of waiting for the
+  // next connection to wake it.
+  wakeDatabase: (id: string) =>
+    call<{ id: string; status: string; detail?: string }>(
+      `/databases/${encodeURIComponent(id)}/wake`, { method: "POST" }),
+  updateDatabase: (id: string, patch: { always_on?: boolean }) =>
+    call<DatabaseInfo>(`/databases/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(patch) }),
+  resetDatabaseCredentials: (id: string) =>
+    call<DatabaseInfo>(`/databases/${encodeURIComponent(id)}/reset-credentials`,
+      { method: "POST" }),
+  // Historical CPU + memory + net/disk I/O for one database. Bucketed on the
+  // server side; the client just plots the points. Range picks a default
+  // bucket unless one is passed explicitly.
+  databaseMetrics: (id: string, range: "1h" | "24h" | "7d" | "30d" = "24h", bucket?: string) => {
+    const q = new URLSearchParams({ range });
+    if (bucket) q.set("bucket", bucket);
+    return call<DatabaseMetrics>(`/databases/${encodeURIComponent(id)}/metrics?${q}`);
+  },
 
   streamSandboxLogs: async (
     id: string,
@@ -505,7 +575,7 @@ export const api = {
     name: string,
     size_mb: number,
     rootfs: File,
-    cpu = 1,
+    cpu = 8, // server pins every template to 8 burstable vCPUs — RAM is the only knob
     memory_mb = 512
   ): Promise<TemplateBuild> => {
     const fd = new FormData();
@@ -528,32 +598,6 @@ export const api = {
   deleteTemplate: (name: string) =>
     call<void>(`/templates/${encodeURIComponent(name)}`, { method: "DELETE" }),
 
-  // Phase 4: simple REPL (stateless single call)
-  replOnce: (id: string, language: string, code: string) =>
-    call<{ language: string; stdout: string; stderr: string; exit_code: number }>(
-      `/sandboxes/${id}/repl`,
-      {
-        method: "POST",
-        body: JSON.stringify({ language, code }),
-      }
-    ),
-
-  // Phase 5: persistent REPL sessions
-  replSessions: (id: string) =>
-    call<ReplSession[]>(`/sandboxes/${id}/repl/sessions`),
-  replCreateSession: (id: string, language = "python") =>
-    call<ReplSession>(`/sandboxes/${id}/repl/sessions`, {
-      method: "POST",
-      body: JSON.stringify({ language }),
-    }),
-  replRun: (id: string, sid: string, code: string, timeout_ms = 30000) =>
-    call<ReplRunResult>(`/sandboxes/${id}/repl/sessions/${sid}/run`, {
-      method: "POST",
-      body: JSON.stringify({ code, timeout_ms }),
-    }),
-  replDeleteSession: (id: string, sid: string) =>
-    call<void>(`/sandboxes/${id}/repl/sessions/${sid}`, { method: "DELETE" }),
-
   ports: (id: string) => call<Port[]>(`/sandboxes/${id}/ports`),
   registerPort: (id: string, port: number, label?: string) =>
     call<Port>(`/sandboxes/${id}/ports`, {
@@ -574,7 +618,7 @@ export const api = {
 };
 
 // Override via NEXT_PUBLIC_PANDASTACK_PREVIEW_HOST; else derived from API_BASE
-// by stripping a leading "api." label (api.pandastack.ai -> pandastack.ai).
+// by stripping a leading "api." label (api.example.com -> example.com).
 // Self-hosted deployments should set the env var explicitly.
 export function previewHostSuffix(): string {
   const override = process.env.NEXT_PUBLIC_PANDASTACK_PREVIEW_HOST;
@@ -585,7 +629,7 @@ export function previewHostSuffix(): string {
     if (host.startsWith("api.") && host.length > 4) return host.slice(4);
     return host;
   } catch {
-    return "pandastack.ai";
+    return "localhost";
   }
 }
 
@@ -614,21 +658,6 @@ export type TemplateBuild = {
   bytes?: number;
 };
 
-export type ReplSession = {
-  id: string;
-  sandbox_id: string;
-  language: string;
-  created_at: string;
-  cells?: number;
-};
-
-export type ReplRunResult = {
-  stdout: string;
-  stderr: string;
-  exit: number;
-  duration_ms: number;
-};
-
 export type ForkResult = {
   parent_id: string;
   snapshot_id: string;
@@ -636,10 +665,4 @@ export type ForkResult = {
   at: string;
 };
 
-export type SandboxEvent = {
-  time: string;
-  sandbox_id: string;
-  type: string;
-  payload?: Record<string, unknown>;
-};
 

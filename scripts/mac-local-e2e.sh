@@ -229,9 +229,9 @@ JSON
   '
 }
 
-# seed_base_template derives the universal "base" app-runtime template from the
-# freshly seeded ubuntu-24.04 rootfs. This is the single, language-agnostic base
-# that all apps default to (replacing the old Node-only "node" template).
+# seed_base_template derives the universal "base" template from the freshly
+# seeded ubuntu-24.04 rootfs. This is the single, language-agnostic sandbox
+# runtime (replacing the old per-language templates).
 #
 # It ships:
 #   - build essentials (git curl ca-certificates build-essential xz-utils unzip
@@ -239,7 +239,7 @@ JSON
 #   - mise (https://mise.jdx.dev) — one static arm64 binary that manages runtime
 #     versions for node/python/go/ruby/bun/deno/java/etc. and reads idiomatic
 #     version files (.nvmrc/.python-version/.tool-versions/mise.toml);
-#   - pre-warmed Node 22 LTS + Python 3.12 + Go (latest) + Bun via `mise use -g`
+#   - pre-warmed Node 24 LTS + Python 3.12 + Go (latest) + Bun via `mise use -g`
 #     plus the pnpm + yarn package managers, so the common JS/TS/Python/Go cases
 #     deploy instantly (no runtime download at build time). Anything else is
 #     installed on demand by `mise install` during the build.
@@ -248,12 +248,13 @@ JSON
 # exec sessions used by the build pipeline):
 #   MISE_DATA_DIR=/opt/mise  MISE_CONFIG_DIR=/opt/mise  shims=/opt/mise/shims
 #
-# Bakes memory_mb 2048 (Firecracker snapshot freezes RAM at bake time; builds
-# need more than the 256 MiB base ubuntu uses) and grows the rootfs to 14 GiB
+# Bakes memory_mb 4096 (Firecracker snapshot freezes RAM at bake time, so this
+# is the guest's real memory ceiling — sized for BUILDS: Next/Vite/tsc prod
+# builds spike 2.5-4 GiB and OOM at 2 GiB) and grows the rootfs to 14 GiB
 # (mise + four runtimes + package managers + build caches need the headroom).
 # Idempotent.
 seed_base_template() {
-  step "Seeding universal 'base' app-runtime template (mise + Node 22 + Python 3.12 + Go + Bun + pnpm/yarn, 2 GiB / 14 GiB)"
+  step "Seeding universal 'base' runtime template (mise + Node 24 + Python 3.12 + Go + Bun + pnpm/yarn, 4 GiB / 14 GiB)"
   limactl shell --workdir /workspace "$LIMA_NAME" -- sudo bash -lc '
     set -euo pipefail
     SRC=/var/lib/pandastack/templates/ubuntu-24.04
@@ -298,18 +299,30 @@ seed_base_template() {
       chmod 0755 /usr/local/bin/mise
       mise --version
 
-      # Make the mise env + shims resolvable for login shells too (belt and
-      # suspenders; the build pipeline sets these explicitly for sh -c).
+      # Make the mise env + shims resolvable for EVERY session, not just login
+      # shells: detached \"setsid sh -c\" sessions source neither /etc/profile.d
+      # nor a Docker ENV, and a mise shim is inert without MISE_DATA_DIR /
+      # MISE_CONFIG_DIR. Bake the resolution into /etc/environment (read by PAM
+      # for every session) plus a login-shell fallback. NODE_OPTIONS raises the
+      # Node heap so JS builds use the baked RAM. Keep in sync with
+      # templates/base/Dockerfile.
+      cat > /etc/environment <<ENVFILE
+MISE_DATA_DIR=/opt/mise
+MISE_CONFIG_DIR=/opt/mise
+PATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NODE_OPTIONS=--max-old-space-size=3072
+ENVFILE
       cat > /etc/profile.d/mise.sh <<PROFILE
 export MISE_DATA_DIR=/opt/mise
 export MISE_CONFIG_DIR=/opt/mise
 export PATH=/opt/mise/shims:\\\$PATH
+export NODE_OPTIONS=--max-old-space-size=3072
 PROFILE
 
       # Pre-warm the common runtimes globally (precompiled, no source build).
-      # Node 22 LTS + Python 3.12 + Go (latest) + Bun, then pnpm + yarn package
+      # Node 24 LTS + Python 3.12 + Go (latest) + Bun, then pnpm + yarn package
       # managers (installed against the pre-warmed Node so their shims exist).
-      mise use -g node@22
+      mise use -g node@24
       mise use -g python@3.12
       mise use -g go@latest
       mise use -g bun@latest
@@ -324,6 +337,18 @@ PROFILE
       /opt/mise/shims/pnpm --version
       /opt/mise/shims/yarn --version
 
+      # Real-binary symlinks into /usr/local/bin (belt-and-suspenders): even a
+      # process with a clobbered PATH, or a tool hardcoding /usr/local/bin/node,
+      # resolves the runtimes without shim machinery. Verify under an EMPTY env
+      # (the worst case a detached setsid child inherits) or fail the seed.
+      for b in node npm npx python python3 pip pip3 go bun pnpm yarn; do
+        t=\$(/usr/local/bin/mise which \$b 2>/dev/null || true)
+        [ -n \"\$t\" ] && [ -x \"\$t\" ] && ln -sf \"\$t\" /usr/local/bin/\$b || true
+      done
+      env -i /usr/local/bin/node -v
+      env -i /usr/local/bin/python --version
+      env -i /usr/local/bin/python3 --version || ln -sf /usr/local/bin/python /usr/local/bin/python3
+
       apt-get clean
       rm -rf /var/lib/apt/lists/*
       git --version
@@ -332,7 +357,7 @@ PROFILE
     umount "$MNT"
 
     cat > "$DST/meta.json" <<JSON
-{"name":"base","arch":"aarch64","cpu":2,"memory_mb":2048,"disk_gb":14,"kernel":"vmlinux-5.10"}
+{"name":"base","arch":"aarch64","cpu":8,"memory_mb":4096,"disk_gb":14,"kernel":"vmlinux-5.10"}
 JSON
     echo "base template ready:"; ls -la "$DST"
   '
@@ -427,15 +452,8 @@ CREATE TABLE IF NOT EXISTS orgs (
     slug TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     owner_user_id TEXT NOT NULL,
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    subscription_tier TEXT NOT NULL DEFAULT 'free',
-    subscription_status TEXT NOT NULL DEFAULT 'active',
-    current_period_start TIMESTAMPTZ,
-    current_period_end TIMESTAMPTZ,
-    free_credit_micros_grant BIGINT NOT NULL DEFAULT 5400000
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS org_members (
     org_id UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -475,8 +493,6 @@ PANDASTACK_REGION=local
 PANDASTACK_ZONE=mac
 PANDASTACK_METRICS_LISTEN=0.0.0.0:9100
 PANDASTACK_CLICKHOUSE_URL=http://pandastack:pandastack@host.lima.internal:8123/pandastack
-STRIPE_API_KEY=
-STRIPE_WEBHOOK_SECRET=
 ENV
   limactl shell --workdir /workspace "$LIMA_NAME" -- sudo tee /etc/systemd/system/pandastack-agent-local-e2e.service >/dev/null <<'UNIT'
 [Unit]
@@ -511,21 +527,19 @@ UNIT
 build_and_start_api() {
   step "Building and starting API on macOS"
   (cd "$REPO_ROOT/api" && go build -o "$BIN_DIR/pandastack-api" ./cmd/api)
-  # Pull GitHub App creds (private clones + OAuth connect + webhooks) from
-  # .env.local without sourcing the whole file — sourcing would clobber the
-  # Lima-topology vars set above. Only the GitHub keys are read, and only if not
+  # Pull the dashboard URL from .env.local without sourcing the whole file —
+  # sourcing would clobber the Lima-topology vars set above. Read only if not
   # already present in env.
+  # `|| true`: a key absent from .env.local makes grep exit 1, which under
+  # `set -euo pipefail` silently kills the whole bootstrap right after the
+  # API build — this key is OPTIONAL (guarded by [[ -n "$v" ]] below).
   if [[ -f "$REPO_ROOT/.env.local" ]]; then
-    for k in GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY \
-             GITHUB_APP_SLUG GITHUB_APP_CLIENT_ID GITHUB_APP_CLIENT_SECRET \
-             GITHUB_APP_WEBHOOK_SECRET PANDASTACK_DASHBOARD_URL; do
+    for k in PANDASTACK_DASHBOARD_URL; do
       if [[ -z "${!k:-}" ]]; then
-        v="$(grep -E "^${k}=" "$REPO_ROOT/.env.local" | head -1 | cut -d= -f2-)"
+        v="$(grep -E "^${k}=" "$REPO_ROOT/.env.local" | head -1 | cut -d= -f2- || true)"
         [[ -n "$v" ]] && export "$k=$v"
       fi
     done
-    [[ -n "${GITHUB_APP_ID:-}" ]] && printf "  GitHub App configured (id %s) — private repo clones + git-driven deploys enabled\n" "${GITHUB_APP_ID}"
-    [[ -n "${GITHUB_APP_CLIENT_ID:-}" ]] && printf "  GitHub OAuth connect enabled (slug %s)\n" "${GITHUB_APP_SLUG:-?}"
   fi
   port_must_be_free_or_owned 8080 "$API_PID" "API"
   if [[ -f "$API_PID" ]] && kill -0 "$(cat "$API_PID")" 2>/dev/null; then
@@ -545,21 +559,10 @@ build_and_start_api() {
         PANDASTACK_STUB_USER_ID="$PANDASTACK_STUB_USER_ID" \
         PANDASTACK_STUB_ORG_ID="$PANDASTACK_STUB_ORG_ID" \
         PANDASTACK_STUB_WORKSPACE="$PANDASTACK_STUB_WORKSPACE" \
-        PANDASTACK_APP_HOST_SUFFIX="${PANDASTACK_APP_HOST_SUFFIX:-}" \
-        PANDASTACK_PREVIEW_HOST_SUFFIX="${PANDASTACK_PREVIEW_HOST_SUFFIX:-}" \
         PANDASTACK_API_BASE_URL="${PANDASTACK_API_BASE_URL:-http://localhost:8080}" \
         PANDASTACK_DB_SNI_SUFFIX="$([[ "$ENABLE_DB_PROXY" == "1" ]] && echo "$DB_SNI_SUFFIX" || echo "")" \
         PANDASTACK_DB_PROXY_PORT="$([[ "$ENABLE_DB_PROXY" == "1" ]] && echo "$DB_PROXY_PORT" || echo "")" \
-        GITHUB_APP_ID="${GITHUB_APP_ID:-}" \
-        GITHUB_APP_INSTALLATION_ID="${GITHUB_APP_INSTALLATION_ID:-}" \
-        GITHUB_APP_PRIVATE_KEY="${GITHUB_APP_PRIVATE_KEY:-}" \
-        GITHUB_APP_SLUG="${GITHUB_APP_SLUG:-}" \
-        GITHUB_APP_CLIENT_ID="${GITHUB_APP_CLIENT_ID:-}" \
-        GITHUB_APP_CLIENT_SECRET="${GITHUB_APP_CLIENT_SECRET:-}" \
-        GITHUB_APP_WEBHOOK_SECRET="${GITHUB_APP_WEBHOOK_SECRET:-}" \
         PANDASTACK_DASHBOARD_URL="${PANDASTACK_DASHBOARD_URL:-http://localhost:3000}" \
-        STRIPE_API_KEY= \
-        STRIPE_WEBHOOK_SECRET= \
         "$BIN_DIR/pandastack-api" -addr :8080 -token-file "$TOKENS_FILE" \
           >"$LOG_DIR/api.log" 2>&1 &
       echo $! > "$API_PID"
@@ -684,8 +687,9 @@ smoke_test() {
   local tpl id out
   # Prefer the 'base' template: it is the one this script actually builds a
   # local rootfs for (seed_base_template). Other catalog entries (agent,
-  # browser, …) are registered but their images are synced from object storage
-  # in production, so they have no local rootfs here and would 500 on create.
+  # code-interpreter) are registered but their images are synced from object
+  # storage in production, so they have no local rootfs here and would 500 on
+  # create.
   for _ in {1..60}; do
     tpl=$(curl -fsS "${auth[@]}" http://localhost:8080/v1/templates \
       | jq -r '(map(.name) | index("base")) as $i | if $i then "base" else (.[0].name // empty) end' 2>/dev/null || true)
@@ -727,8 +731,8 @@ smoke_test() {
 # registers /var/lib/pandastack/templates/postgres-16/. Idempotent (skips if the
 # rootfs already exists; set FORCE=1 to rebake). ~5-10 min the first time.
 #
-# To bake the OTHER first-party templates (agent, browser, code-interpreter,
-# claude-agent) the same way, see docs-site/.../getting-started/local-testing.mdx.
+# To bake the OTHER first-party templates (agent, code-interpreter) the same
+# way, see docs-site/.../getting-started/local-testing.mdx.
 seed_postgres_template() {
   step "Baking 'postgres-16' template in Lima (managed databases; ~5-10 min first run)"
   limactl shell --workdir /workspace "$LIMA_NAME" -- sudo bash -lc '

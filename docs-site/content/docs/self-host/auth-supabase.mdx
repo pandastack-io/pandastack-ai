@@ -1,142 +1,189 @@
 ---
 title: Supabase auth
+description: Point the self-hosted PandaStack API at your Supabase project's JWKS endpoint so dashboard sign-in produces JWTs the API will verify.
 ---
 
 # Supabase auth for self-hosting
 
 Use Supabase Auth when your PandaStack deployment has more than one human user, more than one organization, or a dashboard exposed beyond a single trusted development machine.
 
-Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider.
+Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider. This page assumes you already have the API, agent, and dashboard running — see [self-hosting](/docs/getting-started/self-host) if you do not.
 
 ## When to use it
 
-Choose Supabase auth when you need:
+Use Supabase auth when you need:
 
 - dashboard sign-in for multiple users
 - organization membership and invitations
 - API requests tied to a real user identity
-- JWT verification instead of the local `pds_local_dev_token`
+- per-user identity in addition to the workspace-scoped `pds_` API tokens
 - a path to hosted auth without operating an identity service yourself
 
 Do not use stub auth for shared hosts or internet-facing deployments.
+
+## How verification works
+
+The API treats a Supabase access token as an ordinary OIDC JWT and verifies it against your project's public keys:
+
+- It fetches the JSON Web Key Set from `SUPABASE_JWKS_URL` once at startup, then re-fetches it periodically. A failed refresh logs `jwks refresh failed` and keeps the keys already in memory.
+- It accepts only the asymmetric algorithms `ES256` (EC P-256) and `RS256`. Any other `alg` is rejected with `unsupported alg`.
+- A bearer token starting with `pds_` is looked up in the API token store and never reaches the JWT path, so API tokens keep working alongside user sign-in.
+
+There is no shared JWT secret in this path, and the API never calls Supabase's REST, auth, or admin API. Only the dashboard talks to Supabase directly.
+
+<Callout type="warn">
+`SUPABASE_JWKS_URL` is the switch. If it is empty, the API logs `jwt auth disabled, only API tokens accepted` and rejects every bearer that is not a `pds_` API token — dashboard sign-in then fails on every request.
+</Callout>
 
 ## Required environment variables
 
 ### API
 
-```bash
+```bash title="/etc/pandastack/env"
 PANDASTACK_AUTH_MODE=supabase
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
-SUPABASE_SERVICE_ROLE_KEY=YOUR_PRIVATE_SERVICE_ROLE_KEY
-SUPABASE_JWT_SECRET=YOUR_JWT_SECRET
-PANDASTACK_DATABASE_URL=postgres://...
-PANDASTACK_CLICKHOUSE_URL=http://...
+SUPABASE_JWKS_URL=https://YOUR_PROJECT.supabase.co/auth/v1/.well-known/jwks.json
+SUPABASE_ISSUER=https://YOUR_PROJECT.supabase.co/auth/v1
+SUPABASE_AUDIENCE=authenticated
+PANDASTACK_DB_DSN=postgres://USER:PASSWORD@HOST:5432/DATABASE
+PANDASTACK_CLICKHOUSE_URL=http://USER:PASSWORD@HOST:8123/DATABASE
+PANDASTACK_DASHBOARD_URL=https://YOUR_DASHBOARD_HOST
 ```
 
-- `SUPABASE_URL` is used to discover the project and validate issuer/audience assumptions.
-- `SUPABASE_ANON_KEY` is safe for browser-adjacent configuration but should still be managed as config.
-- `SUPABASE_SERVICE_ROLE_KEY` is server-only. Never expose it to the dashboard bundle.
-- `SUPABASE_JWT_SECRET` is used by the API to verify Supabase-issued access tokens.
+- `SUPABASE_JWKS_URL` is the project's JWKS endpoint. This is the only variable that enables JWT verification.
+- `SUPABASE_ISSUER` must equal the `iss` claim in your tokens. Leaving it empty skips the issuer check entirely, which you do not want in production.
+- `SUPABASE_AUDIENCE` is `authenticated` for standard Supabase sessions.
+- `PANDASTACK_AUTH_MODE` only selects stub mode. The value `stub` disables JWT verification; any other value, including leaving it unset, means Supabase mode.
+- `PANDASTACK_DB_DSN` is the control-plane Postgres DSN that holds orgs, members, invites, and API tokens. Setting it is also what puts the API into multi-node mode.
+- `PANDASTACK_DASHBOARD_URL` is the base the API builds invite links from. A self-hosted deployment that leaves it unset will email invitees a link to the wrong site.
+
+The API reads no other Supabase variables. `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_JWT_SECRET` have no effect on the API — setting them will not make sign-in work.
+
+<Callout type="warn">
+A JWKS URL that is unreachable, returns a non-2xx status, or contains no EC/RSA keys is a hard startup failure: the API logs `jwt auth init failed` and exits. Check it with `curl` from the API host before restarting the service.
+</Callout>
+
+### Agent
+
+The per-host agent reads the same three Supabase variables and enables JWT auth only when `SUPABASE_JWKS_URL` is set. The reference deploy deliberately leaves it off for the agent, because the agent is reached through the API, not by browsers.
 
 ### Dashboard
 
-```bash
-NEXT_PUBLIC_PANDASTACK_API=https://api.pandastack.ai
+```bash title="dashboard/.env.local"
+NEXT_PUBLIC_PANDASTACK_API=https://api.example.com
 NEXT_PUBLIC_PANDASTACK_AUTH_MODE=supabase
 NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
 ```
+
+The dashboard uses the project URL and anon key to run the sign-in flow and exchange the callback code for a session, then sends the resulting access token to the API. As on the API, any `NEXT_PUBLIC_PANDASTACK_AUTH_MODE` other than `stub` means Supabase mode.
 
 Only `NEXT_PUBLIC_*` values are shipped to the browser. Do not add service-role keys or JWT secrets to dashboard environment variables.
 
 ## Supabase project setup
 
 1. Create a Supabase project.
-2. Open **Project Settings → API**.
-3. Copy the project URL into `SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`.
-4. Copy the anon public key into `SUPABASE_ANON_KEY` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-5. Copy the service-role key into `SUPABASE_SERVICE_ROLE_KEY` for the API only.
-6. Open **Project Settings → API → JWT Settings** and copy the JWT secret into `SUPABASE_JWT_SECRET`.
+2. Open **Project Settings → API** and copy the project URL.
+3. Set `NEXT_PUBLIC_SUPABASE_URL` to that URL, and set `SUPABASE_JWKS_URL` to the same host with `/auth/v1/.well-known/jwks.json` appended.
+4. Copy the anon public key into `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+5. Set `SUPABASE_ISSUER` to the project URL with `/auth/v1` appended, and `SUPABASE_AUDIENCE` to `authenticated`.
+6. Verify the JWKS endpoint before starting the API, as described below.
 7. Configure redirect URLs before inviting users.
+
+No JWT secret and no service-role key are needed anywhere in this setup.
+
+Check the endpoint from the API host, so DNS and egress rules are exercised too:
+
+```bash
+curl -s https://YOUR_PROJECT.supabase.co/auth/v1/.well-known/jwks.json
+```
+
+The response must contain at least one key with a `kid` and either `"kty": "EC"` with `"crv": "P-256"` or `"kty": "RSA"`. An empty `keys` array means the project still signs tokens with the legacy shared secret, which this API cannot verify.
 
 ## Redirect URLs
 
-In Supabase Auth URL configuration, add:
+The dashboard completes sign-in at `/auth/callback`, which exchanges the code for a session. In Supabase Auth URL configuration, add:
 
 - `http://localhost:3000/auth/callback` for local dashboard testing
 - `https://YOUR_DASHBOARD_HOST/auth/callback` for your deployed dashboard
-- `https://YOUR_DASHBOARD_HOST/login` as an allowed site URL or redirect target if your deployment uses a login page
 
 Keep localhost redirects only for development projects or explicitly trusted deployments.
 
-## Database migrations
+## Database schema
 
-On first boot, the API and agent apply idempotent migrations against the configured Postgres database. For Supabase auth, the important tables are:
+There is no separate migration step for the control plane. Each subsystem owns an idempotent `SetupSchema` that runs at API boot against `PANDASTACK_DB_DSN`, so restarting against an already-provisioned database is a no-op.
 
-- `orgs` from `agent/migrations/postgres/00010_orgs_billing.sql`
-- `org_members` from `agent/migrations/postgres/00010_orgs_billing.sql`
-- `org_invites` from `agent/migrations/postgres/00010_orgs_billing.sql`
-- `user_current_org` from `agent/migrations/postgres/00010_orgs_billing.sql`
-- `api_tokens` from the API token store bootstrap
-- `sandboxes`, `snapshots`, `allocations`, `network_state`, `boot_events`, `usage_events`, `agents`, `leases`, and `sandbox_events` from the agent Postgres migrations
-- `processed_stripe_events` and `pending_meter_events` when billing/metering paths are enabled, even if Stripe is disabled in self-host mode
+- `orgs`, `org_members`, `org_invites`, and `user_current_org` are created by the API's orgs subsystem at boot, and also ship as `agent/migrations/postgres/00010_orgs_billing.sql` for deployments that migrate the database out of band. (The filename is historical — the table definitions carry no billing columns.)
+- `api_tokens` is created by the API token store when it switches to the Postgres backend. Existing tokens from the local `tokens.json` file are migrated into it once, on first boot.
+- `sandboxes`, `snapshots`, `allocations`, `network_state`, `agents`, `boot_events`, `leases`, and `sandbox_events` come from the agent's own migrations in `agent/migrations/postgres/`.
 
-ClickHouse is initialized separately for observability tables such as `sandbox_metrics`, `sandbox_events`, `audit_log`, `boot_events`, and `http_requests`.
+ClickHouse is initialized separately for the observability tables `sandbox_metrics`, `sandbox_events`, `audit_log`, `boot_events`, and `http_requests`. It is optional: with `PANDASTACK_CLICKHOUSE_URL` unset the API skips those writes and `/v1/metrics/*` returns `503`.
 
-The Supabase Auth schema remains owned by Supabase. PandaStack stores its own organization and workspace records in the application database.
+The Supabase Auth schema remains owned by Supabase. PandaStack stores its own organization and workspace records in whatever database `PANDASTACK_DB_DSN` points at, which may be your Supabase project's Postgres.
 
-## First-user provisioning
+<Callout type="warn">
+If you host the PandaStack tables inside Supabase Postgres, do not enable RLS on them. The API connects as the role in your DSN and does not set or assume any RLS policies, so enabling RLS without explicit policies for that role makes its queries return nothing.
+</Callout>
 
-After the first user signs up, seed an organization and mark that user as owner. Replace the values with the Supabase user ID and email from the Auth dashboard:
+## First user
 
-```sql
-INSERT INTO orgs (slug, name, owner_user_id)
-VALUES ('default', 'Default', 'SUPABASE_USER_ID')
-ON CONFLICT (slug) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id
-RETURNING id;
+No manual SQL is needed. The first authenticated `GET /v1/me` provisions the user: it creates a personal org, inserts the user into `org_members` with role `owner`, and records it in `user_current_org`. The dashboard calls `/v1/me` on load, so signing in is enough.
 
-INSERT INTO org_members (org_id, user_id, email, role)
-SELECT id, 'SUPABASE_USER_ID', 'owner@example.com', 'owner'
-FROM orgs
-WHERE slug = 'default'
-ON CONFLICT (org_id, user_id) DO UPDATE SET role = 'owner', email = EXCLUDED.email;
-
-INSERT INTO user_current_org (user_id, org_id)
-SELECT 'SUPABASE_USER_ID', id
-FROM orgs
-WHERE slug = 'default'
-ON CONFLICT (user_id) DO UPDATE SET org_id = EXCLUDED.org_id, updated_at = now();
-```
-
-Then refresh the dashboard session. The first user should see the seeded organization.
+To create a differently named organization afterwards, use `POST /v1/orgs` and switch to it with `POST /v1/me/current-org`.
 
 ## Troubleshooting
 
-### `401 invalid token`
+An auth rejection returns `401` with a JSON body of the form `{"error":"unauthorized","detail":"..."}`. The `detail` string names the exact failure, so read it first.
+
+### `"detail":"jwt auth disabled"`
+
+`SUPABASE_JWKS_URL` is empty on the API, so only `pds_` API tokens are accepted. This is the single most common cause of a dashboard that signs in successfully and then gets rejected on every request. Confirm the variable is present in the API's environment — not only in the dashboard's — and restart the API.
+
+### `"detail":"missing bearer token"`
+
+The request arrived with no `Authorization: Bearer` header and no `access_token` query parameter. For WebSocket and `EventSource` clients, which cannot set headers, pass the token as `?access_token=`.
+
+### `"detail":"invalid api token"`
+
+The bearer starts with `pds_`, so it was looked up as an API token and not found. Tokens are workspace-scoped and stored in Postgres once `PANDASTACK_DB_DSN` is set; a token minted before you moved to Postgres is migrated once on first boot, but a token minted against a different database will not resolve.
+
+### `token signature is invalid` or `unknown kid "..."`
+
+This is a key-material problem, not a secret mismatch — verification is asymmetric and there is no shared secret to get wrong. Work through it in order:
+
+1. Confirm `SUPABASE_JWKS_URL` points at the same project that issued the token. A staging dashboard against a production API produces exactly this error.
+2. If you rotated signing keys in Supabase, new tokens carry a new `kid`. The API refreshes its JWKS periodically, so it rejects them with `unknown kid` until the next refresh. Restart the API to force an immediate fetch.
+3. Check the API logs for `jwks refresh failed`. On a failed refresh the API keeps serving with its previously loaded keys, which go stale after a rotation.
+
+### `unsupported alg "HS256"`
+
+The token was signed with the legacy shared secret. The API accepts only `ES256` and `RS256`. Move the project to asymmetric signing keys, then confirm the JWKS endpoint returns them with the `curl` check under Supabase project setup.
+
+### API exits at startup with `jwt auth init failed`
+
+The initial JWKS fetch failed. The URL is unreachable, returned a non-2xx status, returned something that is not a JWKS document, or contained no EC P-256/RSA key with a `kid`. Reproduce it with `curl` from the API host — DNS and egress rules are frequent causes on locked-down networks.
+
+### `token has invalid issuer` or `token has invalid audience`
+
+`SUPABASE_ISSUER` must equal the `iss` claim exactly, normally the project URL with `/auth/v1` appended and no trailing slash. `SUPABASE_AUDIENCE` is `authenticated` for standard Supabase sessions. Decode a real token and compare rather than guessing.
+
+### Dashboard redirects to `/login?error=auth_not_configured`
+
+The callback route found `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY` missing. These are build-time public variables — rebuild the dashboard after setting them. A redirect to `/login?error=missing_code` instead means the provider returned no `code`, which usually points at a redirect URL that is not on the Supabase allow list.
+
+### Sign-in works but the API still rejects requests
 
 Check that the dashboard is sending the Supabase access token, not the anon key. The anon key identifies the app; the access token identifies the signed-in user.
 
-### `JWT signature is invalid`
+### The API accepts a `pds_` token even though Supabase is configured
 
-Verify `SUPABASE_JWT_SECRET` exactly matches the project's JWT secret. Rotating the secret requires restarting API instances and forcing users to sign in again.
-
-### `issuer mismatch`
-
-Confirm `SUPABASE_URL` uses the same project that issued the token. Mixing staging dashboard config with production API config commonly causes this.
+That is by design, not a misconfiguration. API tokens and user JWTs are both valid bearers; enabling Supabase does not disable tokens. If the API is accepting requests with no bearer at all, `PANDASTACK_AUTH_MODE` is set to `stub` — stub auth is only for single-tenant local development.
 
 ### User signs in but sees no organization
 
-Seed `orgs`, `org_members`, and `user_current_org` for the Supabase user ID. Email alone is not enough; the API keys membership by user ID.
-
-### RLS errors in Supabase
-
-PandaStack application tables should live in the application database controlled by the API. If you place them inside Supabase Postgres and enable RLS manually, create explicit policies for the API service role or disable RLS on PandaStack-owned tables.
-
-### Dashboard has Supabase config but API still accepts local token
-
-Check `PANDASTACK_AUTH_MODE`. It must be `supabase` on the API. Stub auth is only for single-tenant local development.
+Call `GET /v1/me` and read the response. That endpoint is what provisions the personal org. If the response lists orgs but `current_org` is null, set it with `POST /v1/me/current-org`.
 
 ### Invitations do not work
 
-Confirm `org_invites` exists, the inviter is an `owner` or `admin`, and the dashboard redirect URL is allowed in Supabase.
+`POST /v1/orgs/{id}/members` requires the caller to be an `owner` or `admin` of that org, and it is JWT-only — an API token gets `401`. A `403` names the role you have.
+
+Set `PANDASTACK_DASHBOARD_URL` on the API. The invite link is built from it, so a self-hosted deployment that leaves it unset emails invitees a link to the wrong site. Invites expire after seven days.

@@ -9,23 +9,8 @@
       "authentication"
     ],
     "heading": "",
-    "body": "Check your PANDASTACK_TOKEN is set and valid. Get a new token from dashboard settings.",
+    "body": "Check your PANDASTACK_API_KEY is set and valid. Get a new token from dashboard settings.",
     "url": "/docs/quickstart/authentication",
-    "type": "troubleshooting"
-  },
-  {
-    "title": "Getting 402 Payment Required",
-    "keywords": [
-      "402",
-      "payment",
-      "upgrade",
-      "paid",
-      "tier",
-      "plan"
-    ],
-    "heading": "",
-    "body": "This feature requires a paid plan. Upgrade to Pro, Team, or Enterprise.",
-    "url": "https://pandastack.ai/pricing",
     "type": "troubleshooting"
   },
   {
@@ -33,13 +18,12 @@
     "keywords": [
       "429",
       "rate limit",
-      "quota",
       "throttle",
       "too many"
     ],
     "heading": "",
-    "body": "You've hit the hourly sandbox creation limit. Wait or upgrade your plan.",
-    "url": "/docs/concepts/billing#quotas",
+    "body": "You've hit the API rate limit. Back off and retry.",
+    "url": "/docs/reference/rest-api",
     "type": "troubleshooting"
   },
   {
@@ -97,31 +81,17 @@
     "type": "troubleshooting"
   },
   {
-    "title": "App deploy failing or stuck",
+    "title": "Can't create sandbox - no capacity",
     "keywords": [
-      "app",
-      "deploy",
-      "build",
-      "failing",
-      "error"
-    ],
-    "heading": "",
-    "body": "Check deployment logs for errors. Verify framework detection and build commands.",
-    "url": "/docs/guides/apps",
-    "type": "troubleshooting"
-  },
-  {
-    "title": "Can't create sandbox - quota exceeded",
-    "keywords": [
-      "quota",
+      "capacity",
       "limit",
       "max sandboxes",
       "create",
       "exceeded"
     ],
     "heading": "",
-    "body": "You've reached your workspace sandbox limit. Delete old sandboxes or upgrade.",
-    "url": "/docs/concepts/billing#quotas",
+    "body": "The cluster has no free capacity. Delete unused sandboxes or add another agent host.",
+    "url": "/docs/concepts/sandboxes",
     "type": "troubleshooting"
   },
   {
@@ -144,7 +114,7 @@
     "title": "Databases",
     "keywords": [],
     "heading": "",
-    "body": "Beta. Managed Databases are in public beta. The API is stable for create / list / get / delete, but advanced features (branching, read replicas, point-in-time restore) are still in progress — see Coming soon. Don't yet rely on a single beta database as the only copy of irreplaceable production data. A database is a managed PostgreSQL 16 instance running in its own dedicated Firecracker microVM — not a shared schema on a multi-tenant cluster. Each database gets its own kernel, its own process, a ",
+    "body": "Beta. Managed Databases are in public beta. The API is stable for create / list / get / delete, every database is continuously archived to object storage, and a failed database can be failed over onto a healthy host. Read replicas and storage autoscaling are still in progress — see Coming soon. Don't yet rely on a single beta database as the only copy of irreplaceable production data. A database is a managed PostgreSQL 16 instance running in its own dedicated Firecracker microVM — not a shared s",
     "url": "/docs/concepts/databases",
     "type": "doc"
   },
@@ -189,10 +159,10 @@
     "type": "doc"
   },
   {
-    "title": "Hosted MCP Server",
+    "title": "Workspace MCP Server",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack ships a hosted, workspace-level MCP server . Where the per-sandbox MCP endpoint turns one sandbox into a tool, this endpoint turns your whole workspace into one: the model can create and destroy sandboxes, run commands, read/write files, provision Postgres databases, and trigger app deploys — all through a single URL and your existing API token. is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works",
+    "body": "PandaStack ships a workspace-level MCP server . Where the per-sandbox MCP endpoint turns one sandbox into a tool, this endpoint turns your whole workspace into one: the model can create and destroy sandboxes, run commands, read/write files, and provision Postgres databases — all through a single URL and your existing API token. is an alias. The transport is stateless streamable-HTTP JSON-RPC 2.0 — every request stands alone, no session handshake required, so it works with every MCP client that s",
     "url": "/docs/concepts/mcp-server",
     "type": "doc"
   },
@@ -200,7 +170,7 @@
     "title": "MCP (Model Context Protocol)",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack speaks MCP natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the CLI, or your own agent at it and the model gets , , , and tools wired to a real Linux microVM. Looking for workspace-level tools (create/delete sandboxes, databases, app deploys) behind a single URL? That's the hosted MCP server at — this page covers the per-sandbox endpoint. Body is JSON-RPC 2.0. Stateless — every request stands alone, no session affinity needed. Methods Returns capabi",
+    "body": "PandaStack speaks MCP natively. Every sandbox is a fully-formed MCP server — point Claude Desktop, Cursor, the CLI, or your own agent at it and the model gets , , , and tools wired to a real Linux microVM. Looking for workspace-level tools (create/delete sandboxes, databases) behind a single URL? That's the workspace MCP server at — this page covers the per-sandbox endpoint. Body is JSON-RPC 2.0. Stateless — every request stands alone, no session affinity needed. Methods Returns capabilities + t",
     "url": "/docs/concepts/mcp",
     "type": "doc"
   },
@@ -208,7 +178,7 @@
     "title": "Networking — NATID mode",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack uses a network mode called NATID (NAT-identity-preserving) to deliver fast snapshot restores. Understanding it matters when you're debugging connectivity. The problem Firecracker snapshots include the kernel's network state — interface IPs, ARP tables, DHCP leases. If we restore a snapshot into a VM that has a different IP than the one baked into the snapshot, the guest networking is broken until DHCP renegotiates. For 180 ms cold boots, we can't afford that. The solution Every snapsh",
+    "body": "PandaStack uses a network mode called NATID (NAT-identity-preserving) to deliver fast snapshot restores. Understanding it matters when you're debugging connectivity. The problem Firecracker snapshots include the kernel's network state — interface IPs, ARP tables, DHCP leases. If we restore a snapshot into a VM that has a different IP than the one baked into the snapshot, the guest networking is broken until DHCP renegotiates. For sub-100 ms cold boots, we can't afford that. The solution Every sn",
     "url": "/docs/concepts/networking-natid",
     "type": "doc"
   },
@@ -221,10 +191,18 @@
     "type": "doc"
   },
   {
+    "title": "Open source vs Cloud",
+    "keywords": [],
+    "heading": "",
+    "body": "PandaStack is open core. The repository is the real engine — the same Firecracker orchestration, snapshot machinery, scheduler, and managed-Postgres control plane that PandaStack Cloud runs — under the Apache License 2.0. PandaStack Cloud is the hosted service operated by the PandaStack team. It runs that same core, adds a small set of hosted-only database features, and takes the fleet off your hands. This page states exactly where the line is, so you can decide without guessing. The short versi",
+    "url": "/docs/concepts/open-source-vs-cloud",
+    "type": "doc"
+  },
+  {
     "title": "Performance",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack's whole point is \"start a real VM faster than you can blink.\" This page is the honest breakdown — what we measure, how the snapshot-restore boot path works, and what numbers you should plan against. Measured cold-start (production, n=50) Last refresh: 2026-06-01 , snapshot-natid mode on XFS+reflink, template, → . | Percentile | (server-side) | (client over public internet) | | ---------- | ----------------------- | --------------------------------------- | | min | 157 ms | 412 ms | | ",
+    "body": "PandaStack's whole point is \"start a real VM faster than you can blink.\" This page is the honest breakdown — what we measure, how the snapshot-restore boot path works, and what numbers you should plan against. Measured cold-start (production, n=50) Last refresh: 2026-06-17 , snapshot-natid mode on XFS+reflink, template, → . | Percentile | (server-side) | (client over public internet) | | ---------- | ----------------------- | --------------------------------------- | | min | 45 ms | 412 ms | | p",
     "url": "/docs/concepts/performance",
     "type": "doc"
   },
@@ -248,7 +226,7 @@
     "title": "Sandbox lifecycle",
     "keywords": [],
     "heading": "",
-    "body": "A sandbox is a single Firecracker microVM with a dedicated kernel, rootfs, network namespace, and lifecycle. Sandboxes are identified by a UUID (e.g. ) and always belong to a workspace. States Lifetime guarantees | Transition | P50 | P99 | Notes | | ------------------ | -------- | -------- | ----- | | Create → running | 179 ms | 203 ms | Snapshot-natid path on every create, n=50 prod. See Performance. | | Pause → resume | &lt;5 ms | 8 ms | Just / . No memory writes. | | Hibernate → wake | 150 ms",
+    "body": "A sandbox is a single Firecracker microVM with a dedicated kernel, rootfs, network namespace, and lifecycle. Sandboxes are identified by a UUID (e.g. ) and always belong to a workspace. States Lifetime guarantees | Transition | P50 | P99 | Notes | | ------------------ | -------- | -------- | ----- | | Create → running | 49 ms | 64 ms | Snapshot-natid path on every create, n=50 prod. See Performance. | | Pause → resume | &lt;5 ms | 8 ms | Just / . No memory writes. | | Hibernate → wake | 150 ms |",
     "url": "/docs/concepts/sandbox-lifecycle",
     "type": "doc"
   },
@@ -256,7 +234,7 @@
     "title": "Snapshots and forks",
     "keywords": [],
     "heading": "",
-    "body": "Snapshots capture a sandbox state. Forks create a new sandbox from an existing sandbox. The supported API works from a live sandbox ID; SDK helpers that construct directly from a snapshot are not available today. CLI Python TypeScript API",
+    "body": "A snapshot captures a running sandbox's memory and device state, plus its disk, so you can create a new sandbox from it later with . You can list, get, and delete your snapshots. A fork creates one or more new sandboxes from an existing live sandbox. There are three fork paths and they do not preserve the same things. Read the table before you pick one — a plain fork does not carry the parent's running processes. Fork modes compared | Behavior | (default) | | with | | --- | --- | --- | --- | | S",
     "url": "/docs/concepts/snapshots-and-forks",
     "type": "doc"
   },
@@ -264,7 +242,7 @@
     "title": "Templates",
     "keywords": [],
     "heading": "",
-    "body": "A template is a snapshot-ready root filesystem with a pinned kernel. When you , the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at 179 ms instead of \"boot a kernel from scratch\". Templates are immutable and content-addressed: once a snapshot exists for , every sandbox boots from the same bytes. Official catalog PandaStack ships 5 production templates. All names are stable and accepted by in the SDKs and in the CLI. CPU and memory are baked in",
+    "body": "A template is a snapshot-ready root filesystem with a pinned kernel. When you , the scheduler restores a snapshot of that template into a fresh microVM — that's how cold-start lands at 49 ms instead of \"boot a kernel from scratch\". Templates are immutable and content-addressed: once a snapshot exists for , every sandbox boots from the same bytes. Official catalog PandaStack ships four first-party templates. All names are stable and accepted by in the SDKs and in the CLI. CPU and memory are baked",
     "url": "/docs/concepts/templates",
     "type": "doc"
   },
@@ -280,7 +258,7 @@
     "title": "Volumes",
     "keywords": [],
     "heading": "",
-    "body": "A volume is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies — the data stays. Lifecycle Backing layout: one file per volume at . Maximum size 65,536 MB (64 GiB) per volume on every plan. Names are workspace-scoped. Attach to a sandbox Each entry adds a device to the VM. Volumes appear in the guest in attach-order: | Attach position | Gu",
+    "body": "A volume is a named ext4 image that lives on the host independently of any sandbox. Attach it to one or many sandboxes at create-time and mount it inside the guest like any other block device. Detach when the sandbox dies — the data stays. Lifecycle Backing layout: one file per volume at . Maximum size 65,536 MB (64 GiB) per volume. Names are workspace-scoped. Attach to a sandbox Each entry adds a device to the VM. Volumes appear in the guest in attach-order: | Attach position | Guest device | |",
     "url": "/docs/concepts/volumes",
     "type": "doc"
   },
@@ -328,7 +306,7 @@
     "title": "Local testing & baking templates",
     "keywords": [],
     "heading": "",
-    "body": "Local testing & baking templates > Single-tenant dev mode. This page assumes you've already run the local > bootstrap from the Apple Silicon guide > ( ) and have the agent running inside a Lima VM. What gets seeded by default To keep the first-run fast, only bakes the two templates most people need: | Template | What it is | Baked locally? | | --- | --- | --- | | | Universal app runtime — Ubuntu 24.04 + mise (Node 22, Python 3.12, Go, Bun, pnpm/yarn). Backs sandboxes and git-driven app hosting. ",
+    "body": "Local testing & baking templates > Single-tenant dev mode. This page assumes you've already run the local > bootstrap from the Apple Silicon guide > ( ) and have the agent running inside a Lima VM. What gets seeded by default To keep the first-run fast, only bakes the two templates most people need: | Template | What it is | Baked locally? | | --- | --- | --- | | | Universal language runtime — Ubuntu 24.04 + mise (Node 22, Python 3.12, Go, Bun, pnpm/yarn). The general-purpose sandbox image. | ✅ ",
     "url": "/docs/getting-started/local-testing",
     "type": "doc"
   },
@@ -336,7 +314,7 @@
     "title": "Quickstart",
     "keywords": [],
     "heading": "",
-    "body": "1. Authenticate Or sign in with the CLI: 2. Create a sandbox Available templates are , , , , and . 3. Run a command Python TypeScript Preview a service SDK equivalents are in Python and in TypeScript.",
+    "body": "1. Authenticate Or sign in with the CLI: 2. Create a sandbox Available templates are , , , and . For anything else, bake your own. 3. Run a command Python TypeScript Preview a service SDK equivalents are in Python and in TypeScript.",
     "url": "/docs/getting-started/quickstart",
     "type": "doc"
   },
@@ -365,14 +343,6 @@
     "type": "doc"
   },
   {
-    "title": "Claude Managed Agents",
-    "keywords": [],
-    "heading": "",
-    "body": "Claude Managed Agents let Anthropic run the agent loop — the model, the reasoning, the multi-turn session state — while the agent's tool calls execute in infrastructure you control . Anthropic calls this a self-hosted sandbox , and a PandaStack microVM is an ideal one: every session gets a fresh, isolated Firecracker VM that boots from a snapshot in 180 ms and can hibernate between turns. This guide wires the two together. By the end you'll have an agent whose , file, and code tool calls run ins",
-    "url": "/docs/guides/claude-managed-agents",
-    "type": "doc"
-  },
-  {
     "title": "Code interpreter",
     "keywords": [],
     "heading": "",
@@ -392,7 +362,7 @@
     "title": "PandaStack",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack Open-source Firecracker microVM sandboxes for AI agents and code execution. 60-second quickstart Create a sandbox from the local API: What it does - Firecracker microVM sandboxes with strong process and kernel isolation. - Snapshot anywhere and fork running environments instantly. - Sub-second boot on every create via baked snapshot restore. - Template-defined CPU, RAM, and disk quotas. - Network egress controls for safer code execution. - Template-based images: Docker images converte",
+    "body": "PandaStack Open-source Firecracker microVM sandboxes and managed PostgreSQL, self-hosted. 60-second quickstart Create a sandbox from the local API: What it does - Firecracker microVM sandboxes with strong process and kernel isolation. - Managed PostgreSQL 16 — a durable database in its own microVM, with a native URL in seconds. - Snapshot anywhere and fork running environments instantly, including fork trees. - Sub-second boot on every create via baked snapshot restore. - On-demand memory and ro",
     "url": "/docs/index",
     "type": "doc"
   },
@@ -408,7 +378,7 @@
     "title": "Networking",
     "keywords": [],
     "heading": "",
-    "body": "Every sandbox lives in its own Linux network namespace, with its own MAC and its own private IP. The host doesn't share an IP space with the guest, the guests don't share an IP space with each other, and yet every guest can reach the internet and be reached on whatever ports it exposes. This page is how. The per-sandbox netns For sandbox : Inside the netns lives one tap device ( ) that Firecracker plumbs into the VM's . The veth pair shuttles packets between the netns and the root namespace wher",
+    "body": "Every sandbox lives in its own Linux network namespace with a tap device carrying the template's baked guest IP and MAC. That baked identity is a per-template constant, so two sandboxes of the same template genuinely have the same guest IP — the namespace is what stops them colliding. Each sandbox also gets a unique /30 on a veth pair, which is the address the host actually dials. Guests reaching each other is prevented by an explicit firewall rule , not by the namespacing. If you self-host, rea",
     "url": "/docs/internals/networking",
     "type": "doc"
   },
@@ -416,7 +386,7 @@
     "title": "Scheduler",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack has a tiny global scheduler — a handful of SQL queries plus a deterministic scoring function — that picks the right agent host for every create. It's not Kubernetes; it doesn't need to be. The whole thing fits in one file. The decision Whichever agent scores highest wins the create. Agents that fail the resource floor (requested CPU/RAM doesn't fit in free capacity) are excluded before scoring. Every create takes the same snapshot-restore fast path on any agent that has the template's",
+    "body": "PandaStack has a tiny global scheduler — a handful of SQL queries plus a deterministic scoring function — that picks the right agent host for every create. It's not Kubernetes; it doesn't need to be. The whole thing fits in one file. The decision Whichever agent scores highest wins the create. Agents that fail the resource floor (the request doesn't fit in free capacity) are excluded before scoring — with one asymmetry: memory is a hard gate (a sandbox's committed RAM must genuinely fit), while ",
     "url": "/docs/internals/scheduler",
     "type": "doc"
   },
@@ -424,12 +394,12 @@
     "title": "Snapshot & Restore",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux once at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is 179 ms and p99 is 203 ms on bare-metal Intel Cascade Lake. This page walks the full path, end to end. The artifacts on disk For each template (e.g., ) we keep three files o",
+    "body": "PandaStack doesn't cold-boot Linux every time you ask for a sandbox. We boot Linux once at template-bake time, write the entire VM state (memory + CPU registers + device state) to disk, and on every subsequent create we that state into a fresh Firecracker process and let it execute the very next instruction. That's how p50 is 49 ms and p99 is 64 ms on bare-metal Intel Cascade Lake. This page walks the full path, end to end. The artifacts on disk For each template (e.g., ) we keep three files on ",
     "url": "/docs/internals/snapshot-restore",
     "type": "doc"
   },
   {
-    "title": "Streaming Restore (UFFD)",
+    "title": "Streaming Restore (UFFD + NBD)",
     "keywords": [],
     "heading": "",
     "body": "Snapshot restore is fast because is already a local file: Firecracker s it and pages fault in lazily. But that assumes the file is on the host . On a cold host — one that has never restored this template — the agent first has to download the entire (256 MiB – several GiB) from object storage before Firecracker can it. That download is the \"cold host first-boot cliff\": the create blocks on transferring memory the guest may never even touch. Streaming restore removes that cliff. Instead of downloa",
@@ -440,7 +410,7 @@
     "title": "Architecture",
     "keywords": [],
     "heading": "",
-    "body": "PandaStack has three main layers: 1. Control plane — API, auth, organizations, tokens, templates, billing, and orchestration. 2. Data plane — agents that run sandbox operations on hosts. 3. Workload microVMs — Firecracker sandboxes created from templates. Public surfaces - Marketing: - Dashboard: - API: - Docs: API entry points Sandbox operations are scoped under . Filesystem access uses , lifecycle uses routes such as , , , , , and , and streaming uses , , and WebSocket upgrades. Agent-proxied ",
+    "body": "PandaStack has three main layers: 1. Control plane — API, auth, organizations, tokens, templates, databases, and orchestration. 2. Data plane — agents that run sandbox operations on hosts. 3. Workload microVMs — Firecracker sandboxes created from templates. Public surfaces On a self-hosted deployment these are whatever hostnames you choose; the hosted service uses: - Dashboard: - API: - Docs: API entry points Sandbox operations are scoped under . Filesystem access uses , lifecycle uses routes su",
     "url": "/docs/reference/architecture",
     "type": "doc"
   },
@@ -448,7 +418,7 @@
     "title": "Errors",
     "keywords": [],
     "heading": "",
-    "body": "All HTTP errors follow a consistent JSON envelope: | HTTP | Code prefix | Meaning | |---|---|---| | 400 | | Invalid request shape or parameter | | 401 | | Missing or invalid credentials | | 403 | , | Authenticated but not allowed | | 404 | | Resource does not exist | | 409 | | Resource state conflict (e.g. delete while booting) | | 429 | | Too many requests | | 500 | | Bug in PandaStack — please report | | 503 | | No agent capacity for placement | Common codes | Code | Meaning | |---|---| | | JW",
+    "body": "All HTTP errors follow a consistent JSON envelope: | HTTP | Code prefix | Meaning | |---|---|---| | 400 | | Invalid request shape or parameter | | 401 | | Missing or invalid credentials | | 403 | | Authenticated but not allowed | | 404 | | Resource does not exist | | 409 | | Resource state conflict (e.g. delete while booting) | | 429 | | Too many requests in a short window (abuse guard, not a usage quota) | | 500 | | Bug in PandaStack — please report | | 503 | | No agent capacity for placement |",
     "url": "/docs/reference/errors",
     "type": "doc"
   },
@@ -472,7 +442,7 @@
     "title": "CLI reference",
     "keywords": [],
     "heading": "",
-    "body": "Installation Build from source: Global flags Use for machine-readable output where supported. Auth Token-based clients use: Templates Known templates: , , , , . Sandboxes Databases (Beta) Manage managed PostgreSQL databases. is an alias for . is optional and just tags the database for easy identification in . CPU and memory are fixed by the template (baked into its snapshot at build time) and can't be set per-database. returns the URL for the database. Tokens Misc There are no , , , or subcomman",
+    "body": "Installation Build from source: Global flags Use for machine-readable output where supported. Auth Token-based clients use: Templates Known templates: , , , . Sandboxes Databases (Beta) Manage managed PostgreSQL databases. is an alias for . is optional and just tags the database for easy identification in . CPU and memory are fixed by the template (baked into its snapshot at build time) and can't be set per-database. returns the URL for the database. Tokens Misc There are no , , , or subcommands",
     "url": "/docs/sdk/cli",
     "type": "doc"
   },
@@ -496,8 +466,16 @@
     "title": "Supabase auth",
     "keywords": [],
     "heading": "",
-    "body": "Supabase auth for self-hosting Use Supabase Auth when your PandaStack deployment has more than one human user, more than one organization, or a dashboard exposed beyond a single trusted development machine. Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider. When to use it Choose Supabase auth when you need: - dashboard sign-in for multiple users - organization membership and invitations - API requests ti",
+    "body": "Supabase auth for self-hosting Use Supabase Auth when your PandaStack deployment has more than one human user, more than one organization, or a dashboard exposed beyond a single trusted development machine. Local development can run in stub auth mode. Production-like self-hosting should use Supabase or another OIDC/JWT-compatible identity provider. This page assumes you already have the API, agent, and dashboard running — see self-hosting if you do not. When to use it Use Supabase auth when you ",
     "url": "/docs/self-host/auth-supabase",
+    "type": "doc"
+  },
+  {
+    "title": "Troubleshooting",
+    "keywords": [],
+    "heading": "",
+    "body": "Every entry below is a real failure, with the symptom you see first. If you know the HTTP status or the error text, search this page for it. Quick triage by HTTP status | Status | Usually means | Go to | |---|---|---| | | Missing or wrong API key | Authentication | | | Wrong ID, or resource belongs to another workspace | Wrong workspace | | | Sandbox is paused, or you deleted a managed sandbox directly | 409 conflicts | | | sent with no body through an edge proxy | 411 Length Required | | | Shor",
+    "url": "/docs/troubleshooting/index",
     "type": "doc"
   }
 ]

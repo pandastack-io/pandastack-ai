@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   SiPython,
-  SiGooglechrome,
   SiUbuntu,
   SiPostgresql,
   SiDocker,
-  SiClaude,
 } from "react-icons/si";
 import { Terminal as TerminalIcon, Box } from "lucide-react";
 import type { ReactNode } from "react";
@@ -20,9 +18,11 @@ export type TemplateInfo = {
 
 const i = (node: ReactNode) => node;
 
+// The first-party catalog: base, code-interpreter, agent, postgres-16. Anything
+// else a user launches is a custom template and falls back to FALLBACK_INFO.
 export const TEMPLATE_INFO: Record<string, TemplateInfo> = {
   base: {
-    label: "Base (apps runtime)",
+    label: "Base",
     category: "base",
     base: "ubuntu:24.04 + mise",
     tools: ["node 22", "python 3.12", "go", "bun", "pnpm", "yarn"],
@@ -38,29 +38,15 @@ export const TEMPLATE_INFO: Record<string, TemplateInfo> = {
   agent: {
     label: "Coding Agent",
     category: "agents",
-    base: "ubuntu + node 22",
-    tools: ["claude-code", "codex", "opencode", "ripgrep", "git"],
+    base: "ubuntu + node 24",
+    tools: ["claude", "codex", "opencode", "amp", "grok", "gemini", "copilot", "ripgrep", "git"],
     icon: i(<TerminalIcon size={14} className="text-emerald-400" />),
-  },
-  "claude-agent": {
-    label: "Claude Managed Agents",
-    category: "agents",
-    base: "ubuntu:24.04 + ant + mise",
-    tools: ["ant", "node 22", "python 3.12", "git", "ripgrep"],
-    icon: i(<SiClaude size={14} className="text-[#D97757]" />),
-  },
-  browser: {
-    label: "Browser",
-    category: "data",
-    base: "ubuntu:24.04",
-    tools: ["chromium", "playwright", "crawl4ai", "xvfb", "ffmpeg"],
-    icon: i(<SiGooglechrome size={14} className="text-[#4285F4]" />),
   },
   "postgres-16": {
     label: "PostgreSQL 16",
     category: "data",
     base: "ubuntu:24.04 + PGDG",
-    tools: ["postgresql 16", "pgvector", "pgbouncer"],
+    tools: ["postgresql 16", "pgvector"],
     icon: i(<SiPostgresql size={14} className="text-[#4169E1]" />),
   },
 };

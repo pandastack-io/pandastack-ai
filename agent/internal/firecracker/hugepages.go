@@ -50,6 +50,30 @@ func hugePagesEnabled() bool {
 	return os.Getenv("PANDASTACK_HUGEPAGES") == "1"
 }
 
+// noHugeTemplate reports whether this template is in the no-hugepage class
+// (PANDASTACK_NOHUGE_TEMPLATES, comma-separated). Members cold-boot with
+// ordinary 4 KiB pages even on a hugepage fleet, so their baked seeds carry
+// no hugepages marker — making them (a) governable by cgroup memory.max
+// (hugetlb guest RAM is invisible to cgroup memory accounting), and
+// (b) CoW-shareable via mem_file_path MAP_PRIVATE (memory-cow BET1/BET2).
+func noHugeTemplate(template string) bool {
+	if template == "" {
+		return false
+	}
+	for _, item := range strings.Split(os.Getenv("PANDASTACK_NOHUGE_TEMPLATES"), ",") {
+		item = strings.TrimSpace(item)
+		if item == template {
+			return true
+		}
+		// Trailing-* prefix pattern ("app-*" covers every baked app image —
+		// the long-running squeeze targets; per-app names are dynamic).
+		if p, ok := strings.CutSuffix(item, "*"); ok && p != "" && strings.HasPrefix(template, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // hugePagesFit reports whether a cold boot of memMB can be FULLY backed by
 // 2 MiB hugetlb pages within the host's current budget. With pure overcommit
 // (nr_overcommit_hugepages, no reserved pool) and MAP_NORESERVE-style
@@ -239,7 +263,7 @@ func (d *Driver) applyHugePagesConfig() error {
 	if memMB%2 != 0 {
 		memMB++
 	}
-	hc := newUnixHTTP(d.spec.SocketPath)
+	hc := d.hcShort()
 	return putJSON(hc, "/machine-config", map[string]any{
 		"vcpu_count":   d.spec.CPUs,
 		"mem_size_mib": memMB,

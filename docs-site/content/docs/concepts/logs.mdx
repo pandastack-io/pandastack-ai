@@ -8,7 +8,7 @@ Every sandbox has a single combined console log (the Firecracker serial port + t
 ## Snapshot — read what's been logged so far
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/logs?tail=200"
 ```
 
@@ -27,7 +27,7 @@ print(log)
 ## Follow — server-sent events
 
 ```bash
-curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -N -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/logs?follow=1"
 ```
 

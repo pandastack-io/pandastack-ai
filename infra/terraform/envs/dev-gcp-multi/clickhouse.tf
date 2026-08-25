@@ -1,11 +1,11 @@
 // clickhouse.tf — single-node ClickHouse on a dedicated GCP VM in the agents
 // subnet. Auto-deploys via cloud-init/user-data-clickhouse.sh which mounts a
-// 50GB persistent disk, runs the official CH container, and applies the
+// a dedicated persistent disk, runs the official CH container, and applies the
 // pandastack schema from GCS.
 //
 // Why a dedicated VM:
 //   - 2GB e2-small edges already run the Go API; CH starvation could stall
-//     api.pandastack.ai. The dedicated VM isolates analytics writes/queries.
+//     the edge tier. The dedicated VM isolates analytics writes/queries.
 //   - No public IP — only reachable from edge+agent tags via internal 8123.
 //   - On the cloud-nat router so it can pull docker images.
 //
@@ -22,7 +22,7 @@ locals {
 resource "google_compute_disk" "clickhouse_data" {
   name = "${local.project_tag}-clickhouse-data"
   type = "pd-ssd"
-  size = 50
+  size = var.clickhouse_data_disk_size_gb
   zone = local.ch_zone
   labels = {
     project = local.project_tag
@@ -39,7 +39,7 @@ resource "google_storage_bucket_object" "clickhouse_schema" {
 
 resource "google_compute_instance" "clickhouse" {
   name         = local.ch_vm_name
-  machine_type = "e2-medium"
+  machine_type = var.clickhouse_machine_type
   zone         = local.ch_zone
   tags         = [module.network.agent_tag, "${local.project_tag}-clickhouse"]
 

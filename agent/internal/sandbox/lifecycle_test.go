@@ -12,6 +12,7 @@ import (
 
 	"github.com/pandastack/agent/internal/config"
 	"github.com/pandastack/agent/internal/network"
+	"github.com/pandastack/agent/internal/slotstore"
 	"github.com/pandastack/agent/internal/store"
 )
 
@@ -67,7 +68,12 @@ func TestReaperDeletesIdleSandboxAfterTTL(t *testing.T) {
 		_ = os.Remove(dbPath + "-wal")
 	}()
 
-	np, err := network.NewPool("172.20.0.0/16", st)
+	slots, err := slotstore.Open(filepath.Join(t.TempDir(), "slots.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slots.Close()
+	np, err := network.NewPool("172.20.0.0/16", st, slots)
 	if err != nil {
 		t.Fatal(err)
 	}

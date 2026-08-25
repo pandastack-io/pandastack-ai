@@ -25,7 +25,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -176,12 +178,88 @@ func setupEgress(s Spec) error {
 	// every Create is a no-op after the first and there is nothing to remove
 	// in Destroy.
 	if s.PoolCIDR != "" {
+		// CROSS-TENANT ISOLATION (security): a guest must never reach another
+		// guest. Without this, tenant A could scan the pool /16 from inside its
+		// VM and hit neighbor guests' SSH:22 / app ports / Postgres:5432 (the
+		// per-netns DNAT exposes every guest port, ip_forward routes connected
+		// /30s, and the egress ACCEPTs below would otherwise permit it). Legit
+		// traffic is unaffected: WAN egress and host-mediated DB access (via the
+		// db-proxy in root netns) do not transit pool->pool. This DROP must be
+		// the FIRST FORWARD rule so it wins over the appended egress ACCEPTs.
+		ensureRootFirst("FORWARD", "-s", s.PoolCIDR, "-d", s.PoolCIDR, "-j", "DROP")
+
+		// CLOUD-METADATA SSRF BLOCK (security, CRITICAL): a guest must never
+		// reach the cloud metadata service at the link-local 169.254.169.254. On
+		// GCP that endpoint hands out the HOST VM's service-account OAuth token
+		// (full cloud-platform scope) — a tenant sandbox could `curl` it and steal
+		// a token that reads EVERY customer's GCS seeds/snapshots and, depending on
+		// the SA's IAM, compromise the whole project. NATID mode wires no
+		// Firecracker MMDS, and ip_forward + the WAN MASQUERADE below would
+		// otherwise route guest packets straight to the metadata IP. Drop the
+		// entire 169.254.0.0/16 link-local range (a guest never legitimately routes
+		// link-local off-host). Inserted FIRST, before the egress ACCEPTs.
+		ensureRootFirst("FORWARD", "-s", s.PoolCIDR, "-d", "169.254.0.0/16", "-j", "DROP")
+
+		// CRYPTO-MINING ABUSE PREVENTION (security): drop guest egress to the
+		// well-known Stratum mining-pool ports. We run untrusted tenant code, so
+		// a free-tier abuser spinning up a miner is a recurring abuse vector (and
+		// trips the cloud provider's crypto-mining abuse detector, which can get
+		// the whole host/project flagged). Blocking the Stratum control ports at
+		// the host FORWARD chain kills the pool handshake for the overwhelming
+		// majority of miners with zero impact on legitimate workloads — these are
+		// not ports any normal app dials outbound. Inserted FIRST (like the
+		// cross-tenant DROP) so it precedes the egress ACCEPTs. Ports are tunable
+		// via PANDASTACK_BLOCKED_EGRESS_PORTS (comma-separated; empty disables).
+		for _, port := range blockedEgressPorts() {
+			ensureRootFirst("FORWARD", "-s", s.PoolCIDR, "-o", s.WANIface,
+				"-p", "tcp", "--dport", port, "-j", "DROP")
+		}
+
 		ensureRoot("-t", "nat", "POSTROUTING",
 			"-s", s.PoolCIDR, "-o", s.WANIface, "-j", "MASQUERADE")
 		ensureRoot("FORWARD", "-s", s.PoolCIDR, "-o", s.WANIface, "-j", "ACCEPT")
 		ensureRoot("FORWARD", "-d", s.PoolCIDR, "-i", s.WANIface, "-j", "ACCEPT")
 	}
 	return nil
+}
+
+// defaultBlockedEgressPorts are the well-known Stratum / cryptocurrency
+// mining-pool TCP ports. Blocking the pool handshake stops the miner before it
+// can hash. This is a denylist, not a panacea (a miner can use a custom port or
+// tunnel over 443), but it kills the default config of essentially every
+// off-the-shelf miner and every public pool's standard endpoints — which is the
+// abuse we actually see. Pairs with a CPU-abuse watchdog (future) for miners
+// that evade the port block.
+var defaultBlockedEgressPorts = []string{
+	"3333",  // Stratum (most common default)
+	"4444",  // Stratum / XMRig default
+	"5555",  // Stratum alt
+	"7777",  // Stratum alt
+	"8333",  // Bitcoin p2p (also a mining vector)
+	"9999",  // Stratum alt
+	"14444", // XMRig / Monero pools
+	"45700", // Monero (supportxmr et al.)
+}
+
+// blockedEgressPorts returns the mining-pool ports to drop from guest egress.
+// Override via PANDASTACK_BLOCKED_EGRESS_PORTS (comma-separated TCP ports).
+// Setting it to an empty value (PANDASTACK_BLOCKED_EGRESS_PORTS="") disables the
+// block — an explicit opt-out for a single-tenant/trusted deployment.
+func blockedEgressPorts() []string {
+	v, set := os.LookupEnv("PANDASTACK_BLOCKED_EGRESS_PORTS")
+	if !set {
+		return defaultBlockedEgressPorts
+	}
+	if v = strings.TrimSpace(v); v == "" {
+		return nil // explicit opt-out
+	}
+	var ports []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			ports = append(ports, p)
+		}
+	}
+	return ports
 }
 
 // ensureRoot adds a root-netns iptables rule only if an identical one is not
@@ -203,6 +281,44 @@ func ensureRoot(args ...string) {
 	_ = run("iptables", add...)
 }
 
+// ensureRootFirst is like ensureRoot but INSERTS the rule at the top of the
+// chain (-I <chain> 1) instead of appending, so it is evaluated before any
+// already-present rules. Idempotent via the same -C guard, so re-running on
+// every Create does not stack duplicates. Used for the cross-tenant DROP, which
+// must precede the egress ACCEPT rules to take effect.
+func ensureRootFirst(args ...string) {
+	if run("iptables", iptablesCheckArgs(args)...) == nil {
+		return // already present
+	}
+	_ = run("iptables", iptablesInsertArgs(args)...)
+}
+
+// iptablesVerbAt returns the index where the iptables verb (-A/-C/-I) belongs,
+// skipping a leading "-t <table>".
+func iptablesVerbAt(args []string) int {
+	if len(args) >= 2 && args[0] == "-t" {
+		return 2
+	}
+	return 0
+}
+
+// iptablesCheckArgs builds the "-C" existence-check form of a rule.
+func iptablesCheckArgs(args []string) []string {
+	verbAt := iptablesVerbAt(args)
+	out := append(append([]string{}, args[:verbAt]...), "-C")
+	return append(out, args[verbAt:]...)
+}
+
+// iptablesInsertArgs builds the "-I <chain> 1" insert-at-top form of a rule, so
+// the rule is evaluated before any already-present rules in the chain.
+func iptablesInsertArgs(args []string) []string {
+	verbAt := iptablesVerbAt(args)
+	chain := args[verbAt]
+	rest := args[verbAt+1:]
+	out := append(append([]string{}, args[:verbAt]...), "-I", chain, "1")
+	return append(out, rest...)
+}
+
 // cidrNetwork returns the network CIDR (e.g. "172.20.6.116/30") containing ip
 // at the given prefix length. Falls back to a /32 host route on parse error.
 func cidrNetwork(ip string, mask int) string {
@@ -211,6 +327,22 @@ func cidrNetwork(ip string, mask int) string {
 		return ip + "/32"
 	}
 	return n.String()
+}
+
+// Exists reports whether a network namespace of the given name is present.
+// iproute2 mount-binds each named netns at /var/run/netns/<name> (a bind to
+// /proc/<pid>/ns/net), so a stat there is the authoritative, race-free check —
+// no need to shell out to `ip netns list`. Used by Wake to detect a netns that
+// was torn down (e.g. the prewarmer rebuilt the slot pool across an agent
+// restart) before launching Firecracker into a namespace that no longer exists.
+func Exists(name string) bool {
+	if name == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join("/var/run/netns", name)); err == nil {
+		return true
+	}
+	return false
 }
 
 // Destroy tears down the netns and root-side veth. Errors are swallowed
@@ -234,6 +366,67 @@ func run(name string, args ...string) error {
 		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// List returns all named network namespaces. iproute2 bind-mounts each at
+// /var/run/netns/<name>, so a readdir is the exec-free source of truth (same
+// place Exists checks). Returns nil (no error) when the dir is absent.
+func List() ([]string, error) {
+	ents, err := os.ReadDir("/var/run/netns")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// ClearStaleHolders removes any ROOT-netns veth (other than keepVeth) that still
+// carries hostVethIP — a leftover from a crashed sandbox on the same /30. Such a
+// leftover makes the connected route for that /30 ambiguous, so a dial to the
+// peer (guest proxy) address can route into the dead namespace instead of the
+// live one → i/o timeout. Deleting the stale root veth alone removes the
+// ambiguous route and fully cures the poison; we deliberately do NOT also delete
+// a namespace derived from the veth name (a name derivation could match an
+// unrelated live namespace) — the boot sweep reaps namespaces by an authoritative
+// predicate. Returns the veth names cleared.
+//
+// One address-filtered query (`ip -o -4 addr show to <ip>/32`), no per-netns
+// fan-out: in the healthy case it returns only keepVeth and deletes nothing.
+func ClearStaleHolders(hostVethIP, keepVeth string) []string {
+	if hostVethIP == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ip", "-o", "-4", "addr", "show", "to", hostVethIP+"/32").CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var cleared []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		// `ip -o addr` format: "<ifindex>: <dev> ..." — field[1] is the device
+		// name (already colon-free in this format; TrimSuffix is defensive).
+		dev := strings.TrimSuffix(f[1], ":")
+		// Only touch our own per-sandbox host veths (vh-*), never keepVeth (the
+		// slot we're about to use), and never an unrelated interface.
+		if dev == "" || dev == keepVeth || !strings.HasPrefix(dev, "vh-") {
+			continue
+		}
+		// Deleting the veth auto-removes its peer in the (now-dead) namespace.
+		_ = run("ip", "link", "del", dev)
+		cleared = append(cleared, dev)
+	}
+	return cleared
 }
 
 var (

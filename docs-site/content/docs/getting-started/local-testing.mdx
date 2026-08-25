@@ -15,14 +15,12 @@ templates most people need:
 
 | Template | What it is | Baked locally? |
 | --- | --- | --- |
-| `base` | Universal app runtime — Ubuntu 24.04 + mise (Node 22, Python 3.12, Go, Bun, pnpm/yarn). Backs sandboxes **and** git-driven app hosting. | ✅ yes |
-| `postgres-16` | Managed PostgreSQL 16 + pgvector + connection pooler + REST query broker. Backs `POST /v1/databases`. | ✅ yes |
+| `base` | Universal language runtime — Ubuntu 24.04 + mise (Node 22, Python 3.12, Go, Bun, pnpm/yarn). The general-purpose sandbox image. | ✅ yes |
+| `postgres-16` | Managed PostgreSQL 16 + pgvector + REST query broker. Backs `POST /v1/databases`. | ✅ yes |
 | `code-interpreter` | Python + Node + the data-science / Playwright stack. | ❌ on demand |
-| `browser` | Headless browser automation. | ❌ on demand |
 | `agent` | Coding-agent CLI box (Node 22 + agent CLIs). | ❌ on demand |
-| `claude-agent` | Claude Managed Agents self-hosted runtime. | ❌ on demand |
 
-All six templates are **registered in the catalog** (they show up in
+All four templates are **registered in the catalog** (they show up in
 `GET /v1/templates`), but only the baked ones have a local `rootfs.ext4`.
 Creating a sandbox from an unbaked template fails — the agent has no filesystem
 to boot:
@@ -117,7 +115,7 @@ limactl shell --workdir /workspace pandastack-lima-vm -- \
 
 # Bake several at once:
 limactl shell --workdir /workspace pandastack-lima-vm -- \
-  sudo BASE_NAME=base bash /workspace/scripts/bake-templates.sh browser agent
+  sudo BASE_NAME=base bash /workspace/scripts/bake-templates.sh code-interpreter agent
 
 # Re-bake one that already exists (FORCE):
 limactl shell --workdir /workspace pandastack-lima-vm -- \
@@ -163,11 +161,11 @@ resources, edit its entry in `scripts/bake-templates.sh` and re-bake with
 - **`base` is the prerequisite for everything.** Every other template is baked
   *from* the `base` rootfs, so seed it first (the bootstrap already does).
 - **Baking is slow the first time, fast after.** Each template installs a real
-  toolchain in a chroot. `code-interpreter` (data-science + Playwright) and
-  `claude-agent` are the heaviest.
+  toolchain in a chroot. `code-interpreter` (data-science + Playwright) is the
+  heaviest.
 - **Disk.** Templates are multi-GB each (`postgres-16` ~12 GiB, `code-interpreter`
   ~larger). The Lima VM's disk is 30 GiB by default — bake selectively, not all
-  six at once, unless you've grown the VM disk.
+  four at once, unless you've grown the VM disk.
 - **Production bakes everything.** In a real deployment the
   `.github/workflows/bake-templates.yml` pipeline bakes all templates to object
   storage and the agents sync them; you only bake locally for dev/testing.

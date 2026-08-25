@@ -16,7 +16,7 @@ GET /v1/sandboxes/{id}/events?tail=20&follow=1   # SSE stream
 {
   "ts": "2026-06-01T15:30:18.482Z",
   "sandbox_id": "6be92de4-…",
-  "agent_id": "pandastack-agent-pz20",
+  "agent_id": "pandastack-multi-agent-pz20",
   "type": "sandbox.running",
   "code": "ok",
   "message": "tap=tap0 guest_ip=172.20.6.118 boot_ms=183",
@@ -67,7 +67,7 @@ GET /v1/sandboxes/{id}/events?tail=20&follow=1   # SSE stream
 ## Snapshot example
 
 ```bash
-curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/events?tail=10"
 ```
 
@@ -83,7 +83,7 @@ curl -H "Authorization: Bearer $PANDASTACK_TOKEN" \
 ## Follow (SSE)
 
 ```bash
-curl -N -H "Authorization: Bearer $PANDASTACK_TOKEN" \
+curl -N -H "Authorization: Bearer $PANDASTACK_API_KEY" \
   "https://api.pandastack.ai/v1/sandboxes/$SID/events?follow=1&tail=5"
 ```
 

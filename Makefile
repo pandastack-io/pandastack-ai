@@ -37,12 +37,11 @@ dashboard: ## Run the Next.js dashboard
 test-api: ## Curl harness covering all Phase 1+2 endpoints (api + agent must be running)
 	./scripts/api-tests.sh
 
-test-apps: ## Curl harness for git-driven apps (Postgres-backed API + agent must be running)
-	./scripts/apps-tests.sh
-
 tidy: ## go mod tidy in every Go module
-	cd agent && go mod tidy
-	cd api   && go mod tidy
+	cd agent          && go mod tidy
+	cd api            && go mod tidy
+	cd db-proxy       && go mod tidy
+	cd cmd/pandastack && go mod tidy
 
 pg-migrate-up: ## Apply Postgres migrations using .env.local
 	set -a; [ ! -f .env.local ] || source .env.local; set +a; cd agent && PANDASTACK_DB_DRIVER=postgres PANDASTACK_DB_DSN="$${DATABASE_DIRECT_URL:-$${PANDASTACK_DB_DSN}}" go run ./cmd/migrate up
@@ -93,4 +92,4 @@ tf-gcp-destroy: ## Destroy GCP multi-node infra
 tf-gcp-output: ## Show Terraform outputs for GCP multi-node infra
 	terraform -chdir=infra/terraform/envs/dev-gcp-multi output
 
-.PHONY: help setup smoke agent deploy-agent api dashboard test-api test-apps tidy pg-migrate-up pg-migrate-down pg-migrate-status clean destroy tf-aws-init tf-aws-plan tf-aws-apply tf-aws-destroy tf-aws-output tf-gcp-init tf-gcp-plan tf-gcp-apply tf-gcp-destroy tf-gcp-output
+.PHONY: help setup smoke agent deploy-agent api dashboard test-api tidy pg-migrate-up pg-migrate-down pg-migrate-status clean destroy tf-aws-init tf-aws-plan tf-aws-apply tf-aws-destroy tf-aws-output tf-gcp-init tf-gcp-plan tf-gcp-apply tf-gcp-destroy tf-gcp-output

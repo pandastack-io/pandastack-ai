@@ -3,6 +3,7 @@ export const runtime = "edge";
 
 import ClientDatabasePage from "./client";
 
-export default function Page(props: { params: Promise<{ id: string }> }) {
-  return <ClientDatabasePage {...props} />;
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  return <ClientDatabasePage id={id} />;
 }

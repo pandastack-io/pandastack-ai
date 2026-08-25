@@ -103,7 +103,7 @@ export default function Home() {
 
       {/* ---------- stats band ---------- */}
       <section className="container mx-auto max-w-5xl px-6 py-14">
-        <div className="grid grid-cols-2 gap-8 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-8 md:grid-cols-3">
           <Stat value="179ms" label="p50 create" />
           <Stat value="80ms" label="snapshot restore" />
           <Stat value="400ms" label="same-host fork" />
@@ -282,13 +282,13 @@ export default function Home() {
           />
           <Card
             icon={<Layers className="size-5" />}
-            title="5 first-party templates"
-            desc="base, code-interpreter, agent, browser, postgres-16 — all pre-baked. Build your own from any Dockerfile."
+            title="4 first-party templates"
+            desc="base, code-interpreter, agent, postgres-16 — all pre-baked. Build your own from any Dockerfile."
           />
           <Card
             icon={<Code2 className="size-5" />}
             title="Python · TypeScript · CLI"
-            desc="First-class SDKs. SSE streaming exec, PTY over WebSocket, filesystem API, managed Postgres, app hosting."
+            desc="First-class SDKs. SSE streaming exec, PTY over WebSocket, filesystem API, and managed Postgres."
           />
         </div>
       </section>

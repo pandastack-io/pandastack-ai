@@ -17,6 +17,10 @@ type execReq struct {
 func registerExec(mux *http.ServeMux, mgr *sandbox.Manager) {
 	// POST /sandboxes/{id}/exec   { "cmd": "uname -a" }
 	mux.HandleFunc("POST /sandboxes/{id}/exec", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.CheckRunnable(r.Context(), r.PathValue("id")); err != nil {
+			writeErr(w, 409, err)
+			return
+		}
 		gc, err := mgr.Guest(r.PathValue("id"))
 		if err != nil {
 			writeErr(w, 404, err)
@@ -40,6 +44,10 @@ func registerExec(mux *http.ServeMux, mgr *sandbox.Manager) {
 
 	// POST /sandboxes/{id}/exec/stream  -> SSE: event=stdout|stderr|exit
 	mux.HandleFunc("POST /sandboxes/{id}/exec/stream", func(w http.ResponseWriter, r *http.Request) {
+		if err := mgr.CheckRunnable(r.Context(), r.PathValue("id")); err != nil {
+			writeErr(w, 409, err)
+			return
+		}
 		gc, err := mgr.Guest(r.PathValue("id"))
 		if err != nil {
 			writeErr(w, 404, err)

@@ -60,7 +60,17 @@ import (
 // pre-sync"). A gzip tar is not range-seekable, hence the split. The restore
 // side either writes a vm.mem.gcs sidecar (streaming) or downloads the
 // standalone object into snapDir (non-streaming) — see syncOne.
-const SchemaVersion = 3
+//
+// v4: clone.ext4 ALSO leaves the tarball and is published as a standalone,
+// uncompressed object (genPrefix/clone.ext4), the disk analog of v3's vm.mem.
+// A disk-streaming agent (PANDASTACK_STREAM_DISK=1) writes a rootfs.gcs sidecar
+// and demand-pages the rootfs over NBD instead of downloading it; a
+// non-streaming agent downloads the standalone object into snapDir, exactly as
+// before. The clone.ext4.header (PSD1 chunk index) + clone.ext4.prefetch travel
+// as optional tarball files (tiny). This finally removes the multi-hundred-MB
+// clone.ext4 from the always-downloaded path. Bumping the schema invalidates
+// pre-v4 seeds fleet-wide (they re-bake on next publish).
+const SchemaVersion = 4
 
 // essentialFiles are the only files copied into a seed tarball. Notably this
 // EXCLUDES build-vm/ (10G build scratch), the build logs, and (since v3) vm.mem
@@ -69,8 +79,10 @@ const SchemaVersion = 3
 // recreated on restore as a size-matched hardlink to clone.ext4 (see extract);
 // the phased-boot data placeholder (if any) is recreated as a sparse file from
 // Manifest.DataPlaceholderGB.
+// essentialFiles are copied into a seed tarball. Since v4 this EXCLUDES
+// clone.ext4 (published standalone like vm.mem, see below) in addition to the
+// v3 exclusion of vm.mem — so the tarball is now tiny (just VM state + metadata).
 var essentialFiles = []string{
-	"clone.ext4",
 	"vm.state",
 	"identity.json",
 	"snap-meta.json",
@@ -82,11 +94,25 @@ var essentialFiles = []string{
 // generation prefix: gs://<bucket>/seeds/<template>/<generation>/vm.mem.
 const memObjectName = "vm.mem"
 
+// cloneObjectName is the standalone clone.ext4 (rootfs) object's filename within
+// a seed generation prefix: gs://<bucket>/seeds/<template>/<generation>/clone.ext4.
+// Published uncompressed (range-seekable) since v4 so a disk-streaming agent can
+// demand-page it over NBD; downloaded whole by non-streaming agents.
+const cloneObjectName = "clone.ext4"
+
 // streamRestoreEnabled mirrors firecracker.streamRestoreEnabled without
 // importing that package (it imports memstream, not seed): when set, seed-sync
 // writes a vm.mem.gcs sidecar instead of downloading vm.mem locally.
 func streamRestoreEnabled() bool {
 	return os.Getenv("PANDASTACK_STREAM_RESTORE") == "1"
+}
+
+// streamDiskEnabled gates disk (rootfs) streaming, deliberately separate from
+// streamRestoreEnabled so the disk path can roll out independently of the memory
+// path. When set, seed-sync writes a rootfs.gcs sidecar instead of downloading
+// the standalone clone.ext4.
+func streamDiskEnabled() bool {
+	return os.Getenv("PANDASTACK_STREAM_DISK") == "1"
 }
 
 // optionalFiles travel inside the seed tarball when present at bake time but
@@ -101,6 +127,12 @@ func streamRestoreEnabled() bool {
 var optionalFiles = []string{
 	"vm.mem.header",
 	"hugepages",
+	// clone.ext4 chunk index (PSD1) + hot-block prefetch trace for disk
+	// streaming (v4). Tiny; absent on a bake that predates disk streaming, in
+	// which case a disk-streaming restore is not possible and the agent
+	// downloads the standalone clone.ext4 instead.
+	"clone.ext4.header",
+	"clone.ext4.prefetch",
 }
 
 // Manifest is JSON-serialised alongside each seed generation. It carries the
@@ -129,6 +161,14 @@ type Manifest struct {
 	// validate the streamed object against the chunk header's TotalSize and to
 	// stamp the vm.mem.gcs sidecar. Zero in pre-v3 manifests.
 	MemBytes         int64  `json:"mem_bytes,omitempty"`
+	// CloneObject is the object key (within Bucket) of the standalone,
+	// uncompressed clone.ext4 (rootfs) published alongside this generation, e.g.
+	// "seeds/<template>/<generation>/clone.ext4". Empty in pre-v4 manifests.
+	CloneObject string `json:"clone_object,omitempty"`
+	// CloneBytes is the exact byte length of that standalone clone.ext4 object.
+	// Used to validate the streamed object against the PSD1 header's TotalSize and
+	// to stamp the rootfs.gcs sidecar. Zero in pre-v4 manifests.
+	CloneBytes int64 `json:"clone_bytes,omitempty"`
 	SSHKeyFP          string `json:"ssh_key_fp"`
 	Flavor           string `json:"flavor"`
 	RootfsGeneration string `json:"rootfs_generation"`

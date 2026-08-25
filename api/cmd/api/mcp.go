@@ -438,22 +438,6 @@ func (m *mcpAPI) handleToolCall(w http.ResponseWriter, r *http.Request, req mcpR
 		}
 		done(m.call(r, "DELETE", "/v1/databases/"+url.PathEscape(id), nil, "", 60*time.Second))
 
-	// --- apps ---
-	case "list_apps":
-		done(m.call(r, "GET", "/v1/apps", nil, "", 30*time.Second))
-
-	case "deploy_app":
-		id, ok := needID("app_id")
-		if !ok {
-			return
-		}
-		payload := map[string]any{}
-		if ref := mcpArgStr(args, "git_ref"); ref != "" {
-			payload["git_ref"] = ref
-		}
-		b, _ := json.Marshal(payload)
-		done(m.call(r, "POST", "/v1/apps/"+url.PathEscape(id)+"/deploys", b, "", 60*time.Second))
-
 	// --- templates ---
 	case "list_templates":
 		done(m.call(r, "GET", "/v1/templates", nil, "", 30*time.Second))
@@ -482,7 +466,7 @@ func mcpWorkspaceTools() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "create_sandbox",
-			"description": "Create a new Firecracker microVM sandbox. Returns the sandbox JSON including its id. Templates: base, code-interpreter, agent, browser.",
+			"description": "Create a new Firecracker microVM sandbox. Returns the sandbox JSON including its id. Templates: base, code-interpreter, agent, postgres-16.",
 			"inputSchema": obj(map[string]any{
 				"template":    str("Template name (default: code-interpreter)."),
 				"ttl_seconds": num("Optional auto-delete TTL in seconds."),
@@ -552,19 +536,6 @@ func mcpWorkspaceTools() []map[string]any {
 			"inputSchema": obj(map[string]any{
 				"database_id": str("Database id."),
 			}, "database_id"),
-		},
-		{
-			"name":        "list_apps",
-			"description": "List git-driven hosted apps in this workspace.",
-			"inputSchema": obj(map[string]any{}),
-		},
-		{
-			"name":        "deploy_app",
-			"description": "Trigger a new deployment for an app (blue-green). Returns the deployment record; poll its status via list_apps.",
-			"inputSchema": obj(map[string]any{
-				"app_id":  str("App id."),
-				"git_ref": str("Optional git ref (branch, tag, or commit) to deploy."),
-			}, "app_id"),
 		},
 		{
 			"name":        "list_templates",

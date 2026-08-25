@@ -4,8 +4,13 @@ export const runtime = 'edge';
 
 import { NextResponse, type NextRequest } from 'next/server';
 import { Resend } from 'resend';
+import { requireEmailSecret } from '@/lib/email-auth';
 
-const FROM = 'PandaStack <hello@pandastack.ai>';
+// Sender and links are deployment-specific: a self-hosted install must not
+// send mail as the vendor, nor link users at the vendor's hosted dashboard.
+const FROM = process.env.PANDASTACK_EMAIL_FROM || 'PandaStack <onboarding@example.com>';
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || APP_URL;
 
 function welcomeHtml(name: string): string {
   const displayName = name || 'there';
@@ -55,7 +60,7 @@ function welcomeHtml(name: string): string {
               <table cellpadding="0" cellspacing="0" style="margin-bottom:32px;">
                 <tr>
                   <td style="background:#ffffff;border-radius:8px;">
-                    <a href="https://app.pandastack.ai/sandboxes" 
+                    <a href="${APP_URL}/sandboxes" 
                        style="display:inline-block;padding:13px 28px;font-size:14px;font-weight:600;color:#0a0a0a;text-decoration:none;letter-spacing:0.1px;">
                       Launch your first sandbox →
                     </a>
@@ -72,7 +77,7 @@ function welcomeHtml(name: string): string {
 
               <p style="margin:0;font-size:13px;line-height:1.7;color:#737373;">
                 Questions? Reply to this email or join us on 
-                <a href="https://discord.gg/pandastack" style="color:#a3e635;text-decoration:none;">Discord</a>.
+                <a href="https://discord.gg/GzxpktHpHD" style="color:#a3e635;text-decoration:none;">Discord</a>.
                 We read every message.
               </p>
             </td>
@@ -82,7 +87,7 @@ function welcomeHtml(name: string): string {
           <tr>
             <td style="padding:20px 40px;border-top:1px solid #1e1e1e;font-size:12px;color:#525252;line-height:1.6;">
               PandaStack · Built for developers · 
-              <a href="https://pandastack.ai" style="color:#525252;">pandastack.ai</a>
+              <a href="${SITE_URL}" style="color:#525252;">${SITE_URL.replace(/^https?:\/\//, "")}</a>
             </td>
           </tr>
 
@@ -100,12 +105,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'email not configured' }, { status: 503 });
   }
 
-  // Validate request came from our own auth callback (shared secret)
-  const secret = req.headers.get('x-welcome-secret');
-  const expected = process.env.WELCOME_EMAIL_SECRET;
-  if (expected && secret !== expected) {
-    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
-  }
+  // Fail-closed shared-secret gate (never an open relay).
+  const denied = requireEmailSecret(req);
+  if (denied) return denied;
 
   let body: { email?: string; name?: string };
   try {

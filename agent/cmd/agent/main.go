@@ -22,11 +22,14 @@ import (
 	"github.com/pandastack/agent/internal/api"
 	"github.com/pandastack/agent/internal/clickhouse"
 	"github.com/pandastack/agent/internal/config"
+	"github.com/pandastack/agent/internal/diskstream"
 	"github.com/pandastack/agent/internal/events"
 	"github.com/pandastack/agent/internal/guest"
+	"github.com/pandastack/agent/internal/nbdstream"
 	"github.com/pandastack/agent/internal/network"
 	"github.com/pandastack/agent/internal/obs"
 	"github.com/pandastack/agent/internal/sandbox"
+	"github.com/pandastack/agent/internal/slotstore"
 	"github.com/pandastack/agent/internal/store"
 )
 
@@ -41,7 +44,8 @@ func main() {
 	var (
 		socketPath    = flag.String("socket", "/run/pandastack/agent.sock", "Unix socket to listen on")
 		dataDir       = flag.String("data-dir", "/var/lib/pandastack", "Root of templates / vms / snapshots")
-		dbPath        = flag.String("db", "/var/lib/pandastack/pandastack.db", "SQLite metadata DB")
+		dbPath        = flag.String("db", "/var/lib/pandastack-io/pandastack-ai-oss.db", "SQLite metadata DB")
+		slotDB        = flag.String("slot-db", "/var/lib/pandastack-io/slots.db", "Local SQLite ledger owning /30 network slot indices. MUST be on the boot disk (slot state is ephemeral host state that resets on reboot), never the stateful data disk.")
 		cidr          = flag.String("sandbox-cidr", "172.20.0.0/16", "CIDR pool for per-sandbox /30 subnets")
 		idleAfter     = flag.Duration("idle-after", envDurationDefault("PANDASTACK_IDLE_AFTER", 0), "Auto-hibernate sandboxes idle for this long (0=disabled). Env override: PANDASTACK_IDLE_AFTER")
 		metricsListen = flag.String("metrics-listen", os.Getenv("PANDASTACK_METRICS_LISTEN"), "Optional TCP listen address for /metrics + /healthz (e.g. :9100). Empty = serve on the unix socket only.")
@@ -56,6 +60,7 @@ func main() {
 		SocketPath: *socketPath,
 		DataDir:    *dataDir,
 		DBPath:     *dbPath,
+		SlotDBPath: *slotDB,
 		CIDR:       *cidr,
 	}
 
@@ -80,13 +85,38 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 	}
 	obs.RegisterCollectors()
 
+	// Wire streaming-disk metric hooks to obs counters (§6.3). The diskstream /
+	// nbdstream packages are dependency-free (no obs import) and expose no-op
+	// hook vars; we bind them here so events are counted as they happen — so a
+	// closed/recovered device's counts (esp. fetch_bytes) are never
+	// lost. No-ops until bound, so unit tests of those packages stay isolated.
+	diskstream.OnFetch = obs.DiskFetchesTotal.Inc
+	diskstream.OnZeroFill = obs.DiskZeroFillTotal.Inc
+	diskstream.OnFetchBytes = func(template, generation string, n int64) {
+		obs.DiskFetchBytesTotal.WithLabelValues(template, generation).Add(float64(n))
+	}
+	diskstream.OnVerifyError = obs.DiskVerifyErrorsTotal.Inc
+	diskstream.OnGCSRetry = obs.DiskGCSRetriesTotal.Inc
+	diskstream.OnCapHit = obs.DiskCapHitsTotal.Inc
+	nbdstream.OnBreakerOpen = obs.DiskBreakerOpenTotal.Inc
+
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	netPool, err := network.NewPool(cfg.CIDR, st)
+	// Local slot ledger (boot disk). Owns /30 slot indices authoritatively.
+	if err := os.MkdirAll(filepath.Dir(cfg.SlotDBPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir slot db dir: %w", err)
+	}
+	slots, err := slotstore.Open(cfg.SlotDBPath)
+	if err != nil {
+		return err
+	}
+	defer slots.Close()
+
+	netPool, err := network.NewPool(cfg.CIDR, st, slots)
 	if err != nil {
 		return err
 	}
@@ -102,6 +132,54 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 	if err := mgr.Recover(context.Background()); err != nil {
 		log.Warn("recover incomplete", "err", err)
 	}
+	// Reconcile slot ownership against the sandboxes that actually survived
+	// recovery. Frees slots stranded by a crash-mid-allocate (claimed before the
+	// sandbox row existed) — which the sandbox-row-walking Recover() can't see —
+	// while keeping the slots of recovered persistent VMs (managed DBs / apps).
+	// On a cold boot (blank boot disk after autoheal) the ledger is empty and
+	// this is a no-op; recovered persistent VMs re-derive their slots.
+	if live, lerr := st.ListSandboxesForAgent(context.Background(), st.AgentID()); lerr == nil {
+		ids := make([]string, 0, len(live))
+		for _, sb := range live {
+			if m, ok := sb.(map[string]any); ok {
+				if id, _ := m["id"].(string); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+		if n, rerr := netPool.Reconcile(context.Background(), ids); rerr != nil {
+			log.Warn("slot reconcile failed", "err", rerr)
+		} else if n > 0 {
+			log.Info("reclaimed orphaned network slots on startup", "count", n)
+		}
+		// Orphan-loop sweep: detach loop devices whose backing file is gone or
+		// whose backing vm dir belongs to a sandbox id not in the DB. A crash
+		// that killed firecracker, let Recover GC the vm dir, but never detached
+		// the cow.img loop device leaves a dangling loop that survives reboots
+		// forever; this reclaims it on boot. Uses the SAME id set as the slot
+		// Reconcile so a recovered persistent VM keeps its loop.
+		if n := mgr.SweepOrphanLoops(ids); n > 0 {
+			log.Info("reclaimed orphan loop devices on startup", "count", n)
+		}
+		// Orphan-netns sweep: delete every ns-* network namespace not backed by a
+		// live sandbox. A crash/SIGKILL mid-teardown (a non-atomic kernel op —
+		// KillMode=mixed rolling deploys / OOM) can strand a netns that keeps
+		// answering ARP for its /30, poisoning a later create that reuses that
+		// slot index (the static-builder-host deploy-loop incident). This runs
+		// STRICTLY before StartNATIDPrewarmer below (empty free list, all prebuilt
+		// sentinels freed by Reconcile), so it never races the prewarmer and any
+		// surviving ns-p* is a dead prior-generation leftover. Fails closed if the
+		// live keep-set can't be built (never risks a live persistent-VM netns).
+		if n, err := netPool.SweepOrphanNetns(context.Background(), ids); err != nil {
+			log.Warn("orphan netns sweep skipped", "err", err)
+		} else if n > 0 {
+			log.Info("reclaimed orphan network namespaces on startup", "count", n)
+		}
+	}
+	// Start the NATID prewarmer ONLY after Recover()+Reconcile have run, so its
+	// prebuilt slot sentinels can't be reclaimed mid-build by the one-shot
+	// startup reconcile (which would cause a transient root-netns /30 collision).
+	mgr.StartNATIDPrewarmer()
 
 	// Audit-log retention. Default 365d (matches ClickHouse TTL); override via
 	// PANDASTACK_AUDIT_RETENTION_DAYS=N (0 disables prune).
@@ -134,7 +212,6 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 			log.Info("audit retention enabled", "days", retainDays)
 		}
 	}
-
 
 	// ClickHouse analytics sink. nil-safe; no-op when env unset.
 	var chWriter *clickhouse.Client
@@ -203,6 +280,37 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 		log.Info("idle sweeper enabled", "after", idleAfter)
 	}
 
+	// Snapshot garbage collector. Snapshots are DURABLE — they outlive their
+	// sandbox (cascade-delete fires only on an EXPLICIT user/feature delete, not
+	// an idle-reap). This reaper reclaims orphaned snapshots (source sandbox
+	// gone) only AFTER a grace period, giving a restore/fork window.
+	//   PANDASTACK_SNAPSHOT_GC_INTERVAL  sweep cadence (Go duration; default 15m; "0" disables)
+	//   PANDASTACK_SNAPSHOT_TTL_DAYS     grace days before an orphan expires (default 7; "0" = expire immediately)
+	snapGCInterval := 15 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("PANDASTACK_SNAPSHOT_GC_INTERVAL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			snapGCInterval = d
+		}
+	}
+	snapGrace := 7 * 24 * time.Hour
+	if v := strings.TrimSpace(os.Getenv("PANDASTACK_SNAPSHOT_TTL_DAYS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			snapGrace = time.Duration(n) * 24 * time.Hour
+		}
+	}
+	if snapGCInterval > 0 {
+		go mgr.RunSnapshotReaper(ctx, snapGCInterval, snapGrace)
+		log.Info("snapshot reaper enabled", "interval", snapGCInterval.String(), "grace", snapGrace.String())
+	}
+
+	// Streaming-disk NBD watchdog (F5): force-recover a wedged NBD origin. Cheap
+	// to run unconditionally (no-op without streaming bases), but only meaningful
+	// when disk streaming is enabled.
+	if os.Getenv("PANDASTACK_STREAM_DISK") == "1" {
+		go mgr.RunDiskWatchdog(ctx)
+		log.Info("streaming-disk watchdog enabled")
+	}
+
 	// Durable-volume auto-grow for managed databases (default on; set
 	// PANDASTACK_VOLUME_AUTOGROW=0 to disable). Grows the PGDATA image when
 	// the guest reports >=80% usage: host truncate → live PATCH /drives →
@@ -229,6 +337,18 @@ func run(cfg config.Config, idleAfter time.Duration, metricsListen, listenTCP st
 			log.Info("wal archiving relay disabled (no PANDASTACK_SNAPSHOT_BUCKET)")
 		}
 	}
+
+	// DB health reconcile loop: probes running managed databases with
+	// pg_isready, restarts postgres in place on failure, and marks the row
+	// failed when restarts don't stick — the signal the failover preflight
+	// accepts. Deliberately NOT gated on WAL archiving: a crashed postgres
+	// deserves a restart on archiving-less (dev) deployments too.
+	mgr.StartDBMonitor(ctx)
+
+	// Managed-database auto-suspend: hibernate DBs idle past
+	// PANDASTACK_DB_IDLE_AFTER_SECONDS (0/unset = disabled). Wake-on-connect
+	// in db-proxy + the broker proxy resumes them transparently.
+	mgr.StartDBIdleSweep(ctx)
 
 	// 15s ClickHouse metrics poller (no-op if CH sink unset).
 	mgr.StartMetricsPoller(ctx, 15*time.Second)
@@ -358,13 +478,13 @@ func defaultAuthSkipPaths() []string {
 // envDurationDefault returns the parsed time.Duration from the given env var,
 // or the provided fallback if the var is unset or unparseable.
 func envDurationDefault(name string, fallback time.Duration) time.Duration {
-v := os.Getenv(name)
-if v == "" {
-return fallback
-}
-d, err := time.ParseDuration(v)
-if err != nil {
-return fallback
-}
-return d
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }

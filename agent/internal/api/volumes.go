@@ -21,11 +21,9 @@ import (
 // /dev/vdc, ... A sandbox can only attach volumes owned by its own
 // workspace.
 //
-// Quotas (per tier; see sandbox/tier.go):
-//   MaxVolumes         — count cap
-//   MaxVolumeSizeMB    — per-volume size ceiling
-//   MaxVolumeTotalMB   — sum of all owned volumes
-// All checked at POST /volumes time.
+// This build applies no per-workspace volume caps. The only limit at
+// POST /volumes time is host storage headroom, which returns 507 (see the
+// oversubscription budget and free-space reserve in volumes_headroom.go).
 
 type volumeInfo struct {
 	Name      string `json:"name"`

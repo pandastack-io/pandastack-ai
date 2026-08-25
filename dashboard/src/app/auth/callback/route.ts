@@ -3,11 +3,27 @@ export const runtime = 'edge';
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+// safeNext resolves a caller-supplied ?next= against our own origin and keeps
+// only the path. A prefix check ("/" but not "//") is NOT enough: the WHATWG
+// URL parser treats a backslash like a slash for special schemes, so "/\evil.com"
+// passes that test and then resolves to https://evil.com — an open redirect that
+// carries through the magic-link emailRedirectTo. Resolving and comparing the
+// origin rejects every off-site form (//host, /\host, https://host, \/\/host).
+function safeNext(raw: string | null, base: string): string {
+  if (!raw) return "/sandboxes";
+  try {
+    const url = new URL(raw, base);
+    if (url.origin !== new URL(base).origin) return "/sandboxes";
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "/sandboxes";
+  }
+}
+
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
-  const nextParam = requestUrl.searchParams.get("next");
-  const next = nextParam?.startsWith("/") && !nextParam.startsWith("//") ? nextParam : "/sandboxes";
+  const next = safeNext(requestUrl.searchParams.get("next"), request.url);
 
   if (!code) {
     return NextResponse.redirect(new URL("/login?error=missing_code", request.url));
@@ -24,17 +40,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(new URL(`/login?error=${encodeURIComponent(error.message)}`, request.url));
   }
 
-  // Fire welcome email for brand-new users (created_at ≈ last_sign_in_at within 10s).
+  // Fire the welcome email exactly once per user, on the first session we see —
+  // regardless of signup method (OAuth, magic-link, or email/password). We use an
+  // idempotent `welcome_sent` flag stored in Supabase user_metadata rather than a
+  // fragile created_at≈last_sign_in_at time heuristic (which never fired for
+  // password/magic-link flows where first login lags account creation).
   const user = sessionData?.user;
-  if (user?.email && user.created_at && user.last_sign_in_at) {
-    const ageDiff = Math.abs(
-      new Date(user.created_at).getTime() - new Date(user.last_sign_in_at).getTime()
-    );
-    if (ageDiff < 10_000) {
-      const name = user.user_metadata?.full_name ?? user.user_metadata?.name ?? '';
-      const origin = new URL(request.url).origin;
-      // Best-effort — don't block redirect on email failure.
-      fetch(`${origin}/api/send-welcome`, {
+  if (user?.email && user.user_metadata?.welcome_sent !== true) {
+    const name = user.user_metadata?.full_name ?? user.user_metadata?.name ?? '';
+    const origin = new URL(request.url).origin;
+    try {
+      const res = await fetch(`${origin}/api/send-welcome`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -43,7 +59,14 @@ export async function GET(request: NextRequest) {
             : {}),
         },
         body: JSON.stringify({ email: user.email, name }),
-      }).catch(() => {});
+      });
+      // Only mark as sent when the email actually went out, so a transient
+      // failure (e.g. Resend down) is retried on the user's next login.
+      if (res.ok) {
+        await supabase.auth.updateUser({ data: { welcome_sent: true } });
+      }
+    } catch {
+      // Best-effort — never block the redirect on email/metadata failures.
     }
   }
 
