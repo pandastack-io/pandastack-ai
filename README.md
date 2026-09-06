@@ -10,6 +10,8 @@ Open-source Firecracker microVM sandboxes and managed PostgreSQL, self-hosted.
 [![CI](https://github.com/pandastack-io/pandastack-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/pandastack-io/pandastack-ai/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/pandastack-io/pandastack-ai?style=social)](https://github.com/pandastack-io/pandastack-ai/stargazers)
 
+<img width="1657" height="949" alt="pandastack-dashboard-image" src="https://github.com/user-attachments/assets/72a7e7dc-2218-4ecb-acfb-953e278f3406" />
+
 
 ## 60-second quickstart
 
