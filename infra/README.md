@@ -131,6 +131,33 @@ terraform apply
 `make tf-aws-plan` / `make tf-gcp-plan` (and the `-apply` / `-destroy` / `-output`
 variants) wrap these for convenience — see the repo `Makefile`.
 
+## AWS (`dev-aws`) caveats
+
+The AWS env provisions the same shape as `dev-gcp-multi` and its user-data
+templates (`envs/dev-aws/*.sh.tftpl`) are line-for-line ports of the GCP
+cloud-init scripts, but three things differ because of the platform:
+
+- **Object storage is GCS-only in the agent.** seed-sync, cross-host
+  snapshot/fork replication, the managed-database WAL archive + failover
+  restore, and UFFD/NBD streaming all speak `gs://`; there is no S3 backend
+  yet. On AWS those stay off (`PANDASTACK_GCS_BUCKET` / `PANDASTACK_SNAPSHOT_BUCKET`
+  empty): every agent cold-bakes its own template snapshots on first use,
+  forks stay same-host, and a managed database is only as durable as its
+  host's data volume. Kernels, rootfs templates and binaries do come from the
+  S3 build bucket (`kernels/`, `templates/`, `bin/`, `keys/`).
+- **No stateful disks in an ASG.** Each agent gets a dedicated data volume for
+  customer volumes + PGDATA (`agent_data_disk_size_gb`, kept on termination),
+  but when the ASG replaces an instance the volume is left detached rather
+  than re-attached the way a GCP MIG does. Recovery: `aws ec2 attach-volume`
+  it to the replacement and reboot — user-data mounts it by label and never
+  reformats a disk that already has a filesystem. The ClickHouse data volume
+  behaves the same way.
+- **Health checks.** The agent ASG uses EC2 status checks only (no HTTP
+  autoheal on `:8081/healthz`); the edge ASG is health-checked by the ALB.
+
+The edge and db-proxy reach agents on **:8081** (`X-Node-Token` gated), the
+same port as the GCP fleet.
+
 ## Notes
 
 - `terraform.tfvars`, all `*.tfstate`, and all saved plan files (`*.tfplan`,

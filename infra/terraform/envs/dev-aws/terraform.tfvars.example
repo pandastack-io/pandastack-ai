@@ -40,6 +40,13 @@ agent_max_count                 = 8
 agent_boot_disk_size_gb         = 1000
 agent_boot_disk_iops            = 12000
 agent_boot_disk_throughput_mbps = 500
+# XFS+reflink loopback carved out of the root volume (shrink with it).
+agent_xfs_image_size_gb = 700
+# Durable per-agent data volume (customer volumes + managed-DB PGDATA). Kept on
+# termination; re-attach to the replacement after an ASG replace.
+agent_data_disk_size_gb         = 500
+agent_data_disk_iops            = 6000
+agent_data_disk_throughput_mbps = 250
 
 # Cloudflare (Zone:DNS:Edit on your zone).
 cloudflare_api_token = "<create at https://dash.cloudflare.com/profile/api-tokens>"
@@ -68,8 +75,10 @@ rds_multi_az             = true
 rds_deletion_protection  = true
 
 # ClickHouse (boot events + per-sandbox metrics behind the dashboard charts).
-clickhouse_instance_type = "m6i.xlarge"
-clickhouse_disk_size_gb  = 1000
+clickhouse_instance_type     = "m6i.xlarge"
+clickhouse_disk_size_gb      = 1000 # data volume, kept on termination
+clickhouse_root_disk_size_gb = 50
+clickhouse_memory_limit      = "12g" # ~75% of instance RAM
 
 # db-proxy (terminates TLS for every managed-database connection).
 db_proxy_instance_type = "c6i.large"

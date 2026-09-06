@@ -185,17 +185,19 @@ resource "aws_security_group" "edge" {
   tags = merge(local.tags, { Name = "${local.name}-edge" })
 }
 
-# Agent: Firecracker hosts in private subnets. Reachable from edge (proxy) and
-# db-proxy (pg-tunnel) only; full intra-agent traffic allowed.
+# Agent: Firecracker hosts in private subnets. Reachable from edge (API proxy)
+# and db-proxy (pg-tunnel) only, both on :8081 — the multi-node agent listens on
+# :8081 (PANDASTACK_LISTEN_TCP in user-data-agent.sh.tftpl, same as the GCP
+# fleet), not the single-node :7070. Full intra-agent traffic allowed.
 resource "aws_security_group" "agent" {
   name        = "${local.name}-agent"
   description = "PandaStack agent (Firecracker) hosts"
   vpc_id      = aws_vpc.this.id
 
   ingress {
-    description     = "Agent API from edge"
-    from_port       = 7070
-    to_port         = 7070
+    description     = "Agent API from edge (X-Node-Token gated)"
+    from_port       = 8081
+    to_port         = 8081
     protocol        = "tcp"
     security_groups = [aws_security_group.edge.id]
   }
@@ -279,6 +281,18 @@ data "aws_iam_policy_document" "node" {
     sid       = "CloudWatchLogs"
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["*"]
+  }
+  # Agents tag themselves with the NATID slot they claimed (observability only,
+  # best-effort in user-data-agent.sh.tftpl). Scoped to instances of this stack.
+  statement {
+    sid       = "TagOwnInstance"
+    actions   = ["ec2:CreateTags"]
+    resources = ["arn:aws:ec2:${var.aws_region}:*:instance/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/project"
+      values   = [var.project_tag]
+    }
   }
 }
 
@@ -389,6 +403,7 @@ resource "aws_launch_template" "edge" {
     secret_prefix    = local.name
     edge_binary_url  = var.edge_binary_url
     dashboard_bucket = var.dashboard_bucket
+    zone_name        = var.cloudflare_zone_name
   }))
 
   tag_specifications {
@@ -438,10 +453,10 @@ resource "aws_launch_template" "agent" {
     arn = aws_iam_instance_profile.node.arn
   }
 
-  # This volume is the template preseed cache, the UFFD/NBD chunk cache and the
-  # host-pinned PGDATA for every managed database on this host. gp3's baseline
-  # 3000 IOPS / 125 MB/s is the bottleneck on all three at once, so provision
-  # both explicitly rather than taking the default.
+  # Root volume = OS + the XFS+reflink loopback (template cache, UFFD/NBD chunk
+  # cache, per-sandbox CoW deltas) + 16G swapfile. Customer data lives on the
+  # separate data volume below. gp3's baseline 3000 IOPS / 125 MB/s bottlenecks
+  # restores and the chunk cache, so provision both explicitly.
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
@@ -451,6 +466,26 @@ resource "aws_launch_template" "agent" {
       throughput            = var.agent_boot_disk_throughput_mbps
       encrypted             = true
       delete_on_termination = true
+    }
+  }
+
+  # Durable data volume: customer volumes + host-pinned managed-database PGDATA
+  # (mounted at /var/lib/pandastack/volumes by user-data). Mirrors the GCP
+  # stateful "pandastack-volumes" disk, with one honest difference: an ASG has
+  # no stateful-disk concept, so when it replaces an instance this volume is
+  # LEFT BEHIND (delete_on_termination = false) rather than re-attached, and
+  # recovery is a manual attach-volume to the replacement (infra/README.md).
+  # Never delete_on_termination = true: that would make every ASG replace a
+  # customer-data wipe. On Nitro/metal it appears in the guest as /dev/nvmeXn1.
+  block_device_mappings {
+    device_name = "/dev/sdf"
+    ebs {
+      volume_size           = var.agent_data_disk_size_gb
+      volume_type           = "gp3"
+      iops                  = var.agent_data_disk_iops
+      throughput            = var.agent_data_disk_throughput_mbps
+      encrypted             = true
+      delete_on_termination = false
     }
   }
 
@@ -467,11 +502,12 @@ resource "aws_launch_template" "agent" {
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-agent.sh.tftpl", {
-    region           = var.aws_region
-    project_tag      = var.project_tag
-    secret_prefix    = local.name
-    agent_binary_url = var.agent_binary_url
-    s3_bucket_name   = module.storage.bucket_name
+    region            = var.aws_region
+    project_tag       = var.project_tag
+    secret_prefix     = local.name
+    agent_binary_url  = var.agent_binary_url
+    s3_bucket_name    = module.storage.bucket_name
+    xfs_image_size_gb = var.agent_xfs_image_size_gb
   }))
 
   tag_specifications {
