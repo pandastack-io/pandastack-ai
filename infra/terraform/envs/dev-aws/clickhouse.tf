@@ -68,15 +68,27 @@ resource "aws_instance" "clickhouse" {
   iam_instance_profile   = aws_iam_instance_profile.node.name
 
   root_block_device {
-    volume_size = var.clickhouse_disk_size_gb
+    volume_size = var.clickhouse_root_disk_size_gb
     volume_type = "gp3"
     encrypted   = true
+  }
+
+  # Dedicated data volume for /var/lib/clickhouse (mirror of the GCP persistent
+  # data disk). Kept on instance termination so the metrics history survives a
+  # rebuild: re-attach it to the replacement and user-data mounts it by label.
+  ebs_block_device {
+    device_name           = "/dev/sdf"
+    volume_size           = var.clickhouse_disk_size_gb
+    volume_type           = "gp3"
+    encrypted             = true
+    delete_on_termination = false
   }
 
   user_data = base64encode(templatefile("${path.module}/user-data-clickhouse.sh.tftpl", {
     region              = var.aws_region
     clickhouse_password = random_password.clickhouse.result
     schema_s3_url       = "s3://${module.storage.bucket_name}/clickhouse/schema.sql"
+    memory_limit        = var.clickhouse_memory_limit
   }))
 
   tags = merge(local.tags, { role = "clickhouse", Name = "${local.name}-clickhouse-1" })
@@ -84,9 +96,9 @@ resource "aws_instance" "clickhouse" {
   depends_on = [aws_s3_object.clickhouse_schema]
 
   lifecycle {
-    # The data volume is the root disk here; pin the boot AMI + user_data so a
-    # floating AMI or edited cloud-init doesn't recreate the CH node on every
-    # apply. Taint explicitly to roll it.
+    # Pin the boot AMI + user_data so a floating AMI or edited cloud-init doesn't
+    # recreate the CH node on every apply. Taint explicitly to roll it (the data
+    # volume survives; re-attach it to the replacement).
     ignore_changes = [ami, user_data]
   }
 }

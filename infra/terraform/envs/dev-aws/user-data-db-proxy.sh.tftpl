@@ -1,45 +1,144 @@
 #!/bin/bash
-# cloud-init for the pandastack db-proxy node (AWS). Native postgres:// TLS
-# proxy with SNI routing for *.db.<zone>:5432. Fetches secrets from AWS Secrets
-# Manager (prefix "${secret_prefix}-").
+# cloud-init for the pandastack db-proxy node (AWS).
+#
+# AWS port of cloud-init/user-data-db-proxy.sh. Runs the TLS SNI postgres
+# proxy: listens on :5432, routes by the sandbox ID in the SNI hostname
+# (*.db.<zone> → that database's Postgres on the owning agent, over :8081).
+#
+# Secrets come from AWS Secrets Manager (names prefixed "${secret_prefix}-").
+# Terraform renders:
+#   region              - AWS region label
+#   secret_prefix       - Secrets Manager name prefix
+#   db_proxy_binary_url - https:// or s3:// URL of pandastack-db-proxy
+#   sni_suffix          - SNI suffix, e.g. .db.example.com (REQUIRED)
+#   acme_email          - Let's Encrypt account contact (REQUIRED)
 set -euo pipefail
-exec > >(tee -a /var/log/pandastack-cloud-init.log) 2>&1
+exec > >(tee -a /var/log/pandastack-db-proxy-cloud-init.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 
 REGION="${region}"
 SECRET_PREFIX="${secret_prefix}"
-DB_PROXY_BINARY_URL="${db_proxy_binary_url}"
+BINARY_URL="${db_proxy_binary_url}"
 SNI_SUFFIX="${sni_suffix}"
 ACME_EMAIL="${acme_email}"
 
-apt-get update -y
-apt-get install -y awscli jq curl ca-certificates certbot
+for _ in $(seq 1 120); do
+  if ! fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
 
-secret() { aws --region "$REGION" secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text; }
+apt-get update
+apt-get install -y ca-certificates curl wget jq unzip certbot python3-certbot-dns-cloudflare
 
+if ! command -v aws >/dev/null 2>&1; then
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install --update
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+export AWS_DEFAULT_REGION="$REGION"
+
+secret() {
+  aws secretsmanager get-secret-value --secret-id "$1" --query SecretString --output text 2>/dev/null || true
+}
 NODE_TOKEN="$(secret "$${SECRET_PREFIX}-node-token")"
 DATABASE_URL="$(secret "$${SECRET_PREFIX}-database-url")"
-CLOUDFLARE_TOKEN="$(secret "$${SECRET_PREFIX}-cloudflare-api-token")"
+CLOUDFLARE_API_TOKEN="$(secret "$${SECRET_PREFIX}-cloudflare-api-token")"
+: "$${NODE_TOKEN:?node-token secret is empty}"
+: "$${DATABASE_URL:?database-url secret is empty}"
+: "$${CLOUDFLARE_API_TOKEN:?cloudflare-api-token secret is empty}"
 
-mkdir -p /etc/pandastack
-{
-  echo "PANDASTACK_NODE_TOKEN=$${NODE_TOKEN}"
-  echo "PANDASTACK_DB_DSN=$${DATABASE_URL}"
-  echo "PANDASTACK_SNI_SUFFIX=$${SNI_SUFFIX}"
-  echo "CLOUDFLARE_API_TOKEN=$${CLOUDFLARE_TOKEN}"
-} > /etc/pandastack/db-proxy.env
-chmod 600 /etc/pandastack/db-proxy.env
+# No defaults for these two: a default SNI suffix would request a certificate
+# for someone else's domain; a default ACME email would register the account
+# (and its expiry warnings) to someone else.
+: "$${SNI_SUFFIX:?sni_suffix is required (e.g. .db.example.com)}"
+: "$${ACME_EMAIL:?acme_email is required}"
+DOMAIN="$${SNI_SUFFIX#.}"   # strip leading dot → db.example.com
+CERT_DIR="/etc/letsencrypt/live/$${DOMAIN}"
 
-# TODO: obtain the wildcard cert for *$${SNI_SUFFIX} via certbot DNS-01
-#       (register the ACME account against $${ACME_EMAIL})
-# (Cloudflare plugin, using CLOUDFLARE_API_TOKEN), then install + start the
-# pandastack-db-proxy binary under systemd with
-# EnvironmentFile=/etc/pandastack/db-proxy.env. If the AMI is pre-baked, this
-# block is a no-op.
-if [ -n "$DB_PROXY_BINARY_URL" ]; then
-  curl -fsSL "$DB_PROXY_BINARY_URL" -o /usr/local/bin/pandastack-db-proxy
-  chmod +x /usr/local/bin/pandastack-db-proxy
+# ── Cloudflare credentials for DNS-01 ─────────────────────────────────────────
+CF_CREDS=/etc/cloudflare.ini
+printf 'dns_cloudflare_api_token = %s\n' "$CLOUDFLARE_API_TOKEN" > "$CF_CREDS"
+chmod 600 "$CF_CREDS"
+
+# ── Wildcard cert ─────────────────────────────────────────────────────────────
+if [ ! -f "$${CERT_DIR}/fullchain.pem" ]; then
+  certbot certonly \
+    --non-interactive \
+    --agree-tos \
+    --email "$ACME_EMAIL" \
+    --dns-cloudflare \
+    --dns-cloudflare-credentials "$CF_CREDS" \
+    --dns-cloudflare-propagation-seconds 30 \
+    -d "$${DOMAIN}" \
+    -d "*.$${DOMAIN}"
 fi
-systemctl daemon-reload || true
-systemctl enable --now pandastack-db-proxy 2>/dev/null || \
-  echo "pandastack-db-proxy unit not present — bake it into the AMI or extend this script."
+
+# Renewal: reload the proxy so it picks up the new chain.
+HOOK=/etc/letsencrypt/renewal-hooks/deploy/db-proxy-reload.sh
+cat > "$HOOK" <<'HOOK'
+#!/bin/bash
+systemctl kill --signal=SIGHUP pandastack-db-proxy.service || true
+HOOK
+chmod +x "$HOOK"
+(crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet") | crontab -
+
+# ── Binary ────────────────────────────────────────────────────────────────────
+BINARY=/usr/local/bin/pandastack-db-proxy
+if [ -n "$BINARY_URL" ]; then
+  case "$BINARY_URL" in
+    s3://*) aws s3 cp "$BINARY_URL" "$BINARY" ;;
+    *)      curl -fsSL "$BINARY_URL" -o "$BINARY" ;;
+  esac
+  chmod +x "$BINARY"
+fi
+[ -x "$BINARY" ] || echo "WARN: $BINARY missing — set db_proxy_binary_url or bake it into the AMI"
+
+# ── Environment ───────────────────────────────────────────────────────────────
+ENV_FILE=/etc/pandastack-db-proxy.env
+cat > "$ENV_FILE" <<EOF
+PANDASTACK_DB_DSN=$${DATABASE_URL}
+PANDASTACK_NODE_TOKEN=$${NODE_TOKEN}
+PANDASTACK_CERT_DIR=$${CERT_DIR}
+PANDASTACK_LISTEN_ADDR=:5432
+PANDASTACK_SNI_SUFFIX=$${SNI_SUFFIX}
+PANDASTACK_METRICS_ADDR=:5433
+EOF
+chmod 600 "$ENV_FILE"
+
+cat > /etc/systemd/system/pandastack-db-proxy.service <<SERVICE
+[Unit]
+Description=PandaStack DB Proxy (postgres:// SNI router)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=$${ENV_FILE}
+ExecStart=$${BINARY}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/etc/letsencrypt
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pandastack-db-proxy
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+systemctl daemon-reload
+systemctl enable pandastack-db-proxy
+systemctl start pandastack-db-proxy || true
+
+echo "DB Proxy cloud-init complete. Listening on :5432."

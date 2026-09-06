@@ -1,5 +1,5 @@
 // rds.tf — RDS for PostgreSQL (mirror of cloudsql.tf). Private subnets only;
-// reachable from edge + agent security groups on 5432. The connection string
+// reachable from the edge, agent and db-proxy security groups on 5432. The connection string
 // is written to the database-url secret (secrets.tf) so edge/agent instances
 // pick it up at boot.
 
@@ -28,6 +28,16 @@ resource "aws_security_group" "rds" {
     to_port         = 5432
     protocol        = "tcp"
     security_groups = [aws_security_group.agent.id]
+  }
+  # db-proxy resolves <sandbox>.db.<zone> to the owning agent by querying the
+  # control-plane Postgres (leases JOIN agents); without this rule every
+  # customer database connection fails at SNI lookup.
+  ingress {
+    description     = "Postgres from db-proxy"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.db_proxy.id]
   }
   egress {
     from_port   = 0

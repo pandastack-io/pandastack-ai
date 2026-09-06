@@ -132,8 +132,10 @@ variable "agent_max_count" {
 
 variable "agent_boot_disk_size_gb" {
   type = number
-  # 1000G. This volume is not scratch — it is simultaneously the template cache,
-  # the streaming chunk cache and customer data:
+  # 1000G. Root volume = OS + swap + the XFS+reflink loopback image
+  # (var.agent_xfs_image_size_gb). Customer data is NOT here any more — it lives
+  # on the separate data volume (var.agent_data_disk_size_gb). The loopback is
+  # simultaneously the template cache and the streaming chunk cache:
   #
   #  * Template preseed. seed-sync pulls a baked memory snapshot + base rootfs
   #    for EVERY first-party template (base, code-interpreter, agent,
@@ -147,17 +149,55 @@ variable "agent_boot_disk_size_gb" {
   #    and grows with the working set of every template + user image the host
   #    has touched. Undersize it and the cache thrashes, turning a ~150ms
   #    restore back into a multi-second object-store fetch.
-  #  * Durable customer data. Managed-Postgres PGDATA is host-pinned to this
-  #    volume (the XFS loopback data volume created in
-  #    cloud-init/user-data-agent.sh). Running out of space here is a customer
-  #    data incident, not a cache miss.
   #  * Per-sandbox dm-snapshot CoW deltas for everything currently running.
   #
   # 400G was a single-tenant dev figure that leaves ~100G once templates and the
   # chunk cache are warm. 1000G is the smallest number that holds the warm
   # working set of a 72-vCPU host with real tenants on it.
   default     = 1000
-  description = "Agent root volume size (GB). Holds template preseeds, the UFFD/NBD chunk cache, and host-pinned managed-database PGDATA."
+  description = "Agent root volume size (GB). Holds the OS, swap and the XFS+reflink loopback (template preseeds, UFFD/NBD chunk cache, CoW deltas). Customer data lives on agent_data_disk_size_gb."
+}
+
+variable "agent_xfs_image_size_gb" {
+  type = number
+  # 700G of the 1000G root: the XFS+reflink loopback that /var/lib/pandastack is
+  # mounted from (cloud-init creates it sparse at /opt/pandastack.img). Leaves
+  # ~280G for the OS, the 16G swapfile, journald and apt scratch. Shrink BOTH
+  # numbers together: the image is sparse, so an oversized one ENOSPCs mid-write
+  # instead of failing at create time.
+  default     = 700
+  description = "Size (GB) of the XFS+reflink loopback image on the agent root volume. Must fit inside agent_boot_disk_size_gb with room for OS + 16G swap."
+
+  validation {
+    condition     = var.agent_xfs_image_size_gb >= 100
+    error_message = "agent_xfs_image_size_gb must be at least 100 (template preseeds alone are tens of GB)."
+  }
+}
+
+variable "agent_data_disk_size_gb" {
+  type = number
+  # 500G, the counterpart of the GCP env's stateful volumes disk. Mounted at
+  # /var/lib/pandastack/volumes: customer volumes + the host-pinned PGDATA of
+  # every managed Postgres on this agent. Kept when the instance terminates
+  # (delete_on_termination = false); running out of space here is a customer
+  # data incident, so it gets its own disk and its own headroom.
+  default     = 500
+  description = "Per-agent durable data volume (GB) for customer volumes + managed-database PGDATA. Survives instance termination as a detached volume (re-attach manually after an ASG replacement)."
+}
+
+variable "agent_data_disk_iops" {
+  type = number
+  # Managed-Postgres WAL fsyncs from every database pinned to the host land on
+  # this volume concurrently; gp3's 3000 baseline is not enough once a handful
+  # of databases are busy.
+  default     = 6000
+  description = "Provisioned IOPS for the agent data volume."
+}
+
+variable "agent_data_disk_throughput_mbps" {
+  type        = number
+  default     = 250
+  description = "Provisioned throughput (MB/s) for the agent data volume."
 }
 
 variable "agent_boot_disk_iops" {
@@ -229,8 +269,9 @@ variable "db_proxy_binary_url" {
 }
 
 variable "dashboard_bucket" {
-  type    = string
-  default = ""
+  type        = string
+  default     = ""
+  description = "S3 bucket holding bin/pandastack-api + dashboard/ for the edge when edge_binary_url is empty. The node IAM role only reads the build bucket this stack creates (output s3_bucket) — either publish there or extend data.aws_iam_policy_document.node."
 }
 
 # --- RDS (control-plane Postgres) --------------------------------------------
@@ -299,9 +340,25 @@ variable "clickhouse_disk_size_gb" {
   # in that window, plus boot events, plus the transient 2-3x space merges need
   # while rewriting parts. 70G is a demo figure — it fills within days of real
   # fleet traffic and a full ClickHouse disk silently drops the dashboard's
-  # history.
+  # history. This is the dedicated DATA volume (kept on termination); the root
+  # volume is clickhouse_root_disk_size_gb.
   default     = 1000
-  description = "ClickHouse data/root volume size (GB)."
+  description = "ClickHouse data volume size (GB), mounted at /var/lib/clickhouse. Survives instance termination."
+}
+
+variable "clickhouse_root_disk_size_gb" {
+  type        = number
+  default     = 50
+  description = "ClickHouse root (OS + docker) volume size (GB). Data lives on clickhouse_disk_size_gb."
+}
+
+variable "clickhouse_memory_limit" {
+  type = string
+  # 12g on the m6i.xlarge default (16 GiB): leaves the OS + page cache room and
+  # keeps a runaway merge from OOM-killing the host instead of the container.
+  # Raise it in step with clickhouse_instance_type.
+  default     = "12g"
+  description = "Docker memory cap for the ClickHouse container (e.g. 12g). Size it to ~75% of the instance RAM."
 }
 
 # --- db-proxy (customer postgres:// SNI router) ------------------------------
