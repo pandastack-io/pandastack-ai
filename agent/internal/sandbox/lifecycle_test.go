@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -52,21 +51,14 @@ func TestLifecycleStore(t *testing.T) {
 }
 
 func TestReaperDeletesIdleSandboxAfterTTL(t *testing.T) {
-	dbPath := filepath.Join(".", "lifecycle_reaper_test.db")
-	_ = os.Remove(dbPath)
-	_ = os.Remove(dbPath + "-shm")
-	_ = os.Remove(dbPath + "-wal")
-
-	st, err := store.Open(dbPath)
+	// In a temp dir, not next to the sources: the source tree can be
+	// read-only (a container mount, a module cache), and a test must not
+	// leave a database behind in it.
+	st, err := store.Open(filepath.Join(t.TempDir(), "lifecycle_reaper_test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		_ = st.Close()
-		_ = os.Remove(dbPath)
-		_ = os.Remove(dbPath + "-shm")
-		_ = os.Remove(dbPath + "-wal")
-	}()
+	defer st.Close()
 
 	slots, err := slotstore.Open(filepath.Join(t.TempDir(), "slots.db"))
 	if err != nil {

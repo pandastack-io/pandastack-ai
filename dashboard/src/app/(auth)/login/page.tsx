@@ -15,15 +15,15 @@ import { OAuthButtons } from "@/components/oauth-buttons";
 // slash, so "/\evil.com" passes it and then resolves off-site — an open redirect
 // that also rides along in the magic-link emailRedirectTo. Compare origins instead.
 function nextPath() {
-  if (typeof window === "undefined") return "/sandboxes";
+  if (typeof window === "undefined") return "/now";
   const raw = new URLSearchParams(window.location.search).get("next");
-  if (!raw) return "/sandboxes";
+  if (!raw) return "/now";
   try {
     const url = new URL(raw, window.location.origin);
-    if (url.origin !== window.location.origin) return "/sandboxes";
+    if (url.origin !== window.location.origin) return "/now";
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
-    return "/sandboxes";
+    return "/now";
   }
 }
 

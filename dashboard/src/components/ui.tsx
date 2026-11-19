@@ -4,6 +4,10 @@ import { clsx } from "clsx";
 import { Copy, Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 
+// The system's label voice: small, mono, lowercase, smoke. One constant so a
+// table head, a form label and a key all say it the same way.
+export const LABEL = "font-mono text-[11px] lowercase tracking-normal";
+
 // ─── Page Header ───────────────────────────────────────────────────────────────
 export function PageHeader({
   title,
@@ -21,13 +25,13 @@ export function PageHeader({
       <div className="flex items-center gap-3">
         <div>
           <div className="flex items-center gap-2.5">
-            <h1 className="text-[15px] font-semibold tracking-tight" style={{ color: "var(--text-primary)" }}>
+            <h1 className="text-[22px] font-semibold leading-none tracking-[-0.035em]" style={{ color: "var(--text-primary)" }}>
               {title}
             </h1>
             {badge}
           </div>
           {description && (
-            <p className="mt-0.5 text-[13px]" style={{ color: "var(--text-secondary)" }}>{description}</p>
+            <p className="mt-2 text-[13px]" style={{ color: "var(--text-muted)" }}>{description}</p>
           )}
         </div>
       </div>
@@ -90,25 +94,25 @@ export function Btn({
   icon?: ReactNode;
 }) {
   const base =
-    "inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition-all disabled:cursor-not-allowed disabled:opacity-40 select-none";
+    "inline-flex items-center justify-center gap-1.5 rounded-md font-mono font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-40 select-none";
 
   const sizes: Record<BtnSize, string> = {
     xs: "px-2 py-0.5 text-[11px] h-6",
-    sm: "px-2.5 py-1 text-xs h-7",
-    md: "px-3.5 py-1.5 text-[13px] h-8",
+    sm: "px-2.5 py-1 text-[11.5px] h-7",
+    md: "px-3.5 py-1.5 text-[12.5px] h-8",
   };
 
   const variants: Record<BtnVariant, string> = {
     primary:
-      "bg-emerald-500 text-white font-semibold hover:bg-emerald-400 active:bg-emerald-600 shadow-sm",
+      "bg-bone text-ink hover:bg-white active:bg-zinc-200",
     secondary:
-      "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 active:bg-zinc-900 shadow-sm border border-white/5",
+      "bg-coal-2 text-bone border border-line-2 hover:border-smoke active:bg-coal",
     ghost:
       "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 active:bg-zinc-900",
     danger:
-      "text-red-400 hover:bg-red-500/10 hover:text-red-300 active:bg-red-500/20 border border-red-500/20 hover:border-red-500/40",
+      "text-red-400 hover:bg-red-500/10 hover:text-red-300 active:bg-red-500/20 border border-red-500/30 hover:border-red-500/60",
     outline:
-      "border text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800/50",
+      "border text-zinc-300 hover:text-zinc-100 hover:border-smoke",
   };
 
   return (
@@ -117,7 +121,7 @@ export function Btn({
       disabled={disabled}
       onClick={onClick}
       className={clsx(base, sizes[size], variants[variant], className)}
-      style={variant === "outline" ? { borderColor: "var(--border-default)" } : undefined}
+      style={variant === "outline" ? { borderColor: "var(--border-strong)" } : undefined}
     >
       {icon && <span className="shrink-0">{icon}</span>}
       {children}
@@ -138,7 +142,7 @@ export function Input(
   return (
     <label className="flex flex-col gap-1">
       {label && (
-        <span className="text-[11px] font-medium uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>
+        <span className={LABEL} style={{ color: "var(--text-muted)" }}>
           {label}
         </span>
       )}
@@ -154,7 +158,7 @@ export function Input(
             "rounded-md border px-3 py-1.5 text-[13px] transition-colors w-full",
             "placeholder:text-zinc-600 focus:outline-none",
             prefixEl && "pl-8",
-            error ? "border-red-500/50 focus:border-red-400" : "focus:border-emerald-500/60",
+            error ? "border-red-500/50 focus:border-red-400" : "focus:border-zinc-400",
             className
           )}
           style={{
@@ -178,14 +182,14 @@ export function Select(
   return (
     <label className="flex flex-col gap-1">
       {label && (
-        <span className="text-[11px] font-medium uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>
+        <span className={LABEL} style={{ color: "var(--text-muted)" }}>
           {label}
         </span>
       )}
       <select
         {...rest}
         className={clsx(
-          "rounded-md border px-3 py-1.5 text-[13px] transition-colors focus:outline-none focus:border-emerald-500/60 cursor-pointer",
+          "rounded-md border px-3 py-1.5 text-[13px] transition-colors focus:outline-none focus:border-zinc-400 cursor-pointer",
           className
         )}
         style={{
@@ -201,28 +205,31 @@ export function Select(
 // ─── Status Pill ───────────────────────────────────────────────────────────────
 type SandboxStatus = "creating" | "running" | "paused" | "stopping" | "deleted" | "failed" | "hibernated";
 
-const STATUS_MAP: Record<SandboxStatus, { bg: string; text: string; border: string; dot: string }> = {
-  running:    { bg: "rgba(16,185,129,0.1)",  text: "var(--status-running)",    border: "rgba(16,185,129,0.25)",  dot: "var(--status-running)" },
-  paused:     { bg: "rgba(245,158,11,0.1)",  text: "var(--status-paused)",     border: "rgba(245,158,11,0.25)",  dot: "var(--status-paused)" },
-  failed:     { bg: "rgba(239,68,68,0.1)",   text: "var(--status-failed)",     border: "rgba(239,68,68,0.25)",   dot: "var(--status-failed)" },
-  hibernated: { bg: "rgba(139,92,246,0.1)",  text: "var(--status-hibernated)", border: "rgba(139,92,246,0.25)",  dot: "var(--status-hibernated)" },
-  creating:   { bg: "rgba(59,130,246,0.1)",  text: "var(--status-creating)",   border: "rgba(59,130,246,0.25)",  dot: "var(--status-creating)" },
-  stopping:   { bg: "rgba(245,158,11,0.08)", text: "var(--status-paused)",     border: "rgba(245,158,11,0.2)",   dot: "var(--status-paused)" },
-  deleted:    { bg: "rgba(82,82,91,0.15)",   text: "var(--z-500)",             border: "rgba(82,82,91,0.3)",     dot: "var(--z-500)" },
+// One orange thing: the dot beside "running". Everything else is the ramp;
+// asleep is a dashed outline (the same dash the timeline draws for sleep) and
+// only failure gets a hue.
+const STATUS_MAP: Record<SandboxStatus, { text: string; border: string; dot: string; dashed?: boolean; live?: boolean }> = {
+  running:    { text: "var(--c-bone)",  border: "var(--c-line-2)", dot: "var(--c-signal)", live: true },
+  creating:   { text: "var(--c-ash)",   border: "var(--c-line-2)", dot: "var(--c-ash)", live: true },
+  paused:     { text: "var(--c-ash)",   border: "var(--c-line-2)", dot: "var(--c-warn)" },
+  stopping:   { text: "var(--c-ash)",   border: "var(--c-line-2)", dot: "var(--c-warn)", live: true },
+  hibernated: { text: "var(--c-smoke)", border: "var(--c-line-2)", dot: "var(--c-mute)", dashed: true },
+  failed:     { text: "var(--c-fail)",  border: "rgba(255,107,107,0.45)", dot: "var(--c-fail)" },
+  deleted:    { text: "var(--c-mute)",  border: "var(--c-line)", dot: "var(--c-mute)" },
 };
 
 export function StatusPill({ status }: { status: SandboxStatus }) {
   const s = STATUS_MAP[status] ?? STATUS_MAP.deleted;
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{ background: s.bg, color: s.text, border: `1px solid ${s.border}` }}
+      className="inline-flex h-5 items-center gap-1.5 rounded-sm px-1.5 font-mono text-[11px]"
+      style={{ color: s.text, border: `1px ${s.dashed ? "dashed" : "solid"} ${s.border}` }}
     >
       <span
-        className={clsx("size-1.5 rounded-full shrink-0", status === "running" && "animate-pulse")}
+        className={clsx("size-1.5 rounded-full shrink-0", s.live && "live-pulse")}
         style={{ background: s.dot }}
       />
-      {status}
+      {status === "hibernated" ? "asleep" : status}
     </span>
   );
 }
@@ -293,17 +300,17 @@ export function Badge({
   className?: string;
 }) {
   const styles: Record<string, { bg: string; text: string; border: string }> = {
-    default: { bg: "var(--bg-overlay)", text: "var(--text-secondary)", border: "var(--border-default)" },
-    success: { bg: "rgba(16,185,129,0.1)", text: "var(--status-running)",    border: "rgba(16,185,129,0.25)" },
-    warning: { bg: "rgba(245,158,11,0.1)", text: "var(--status-paused)",     border: "rgba(245,158,11,0.25)" },
-    error:   { bg: "rgba(239,68,68,0.1)",  text: "var(--status-failed)",     border: "rgba(239,68,68,0.25)" },
-    info:    { bg: "rgba(59,130,246,0.1)",  text: "var(--status-creating)",   border: "rgba(59,130,246,0.25)" },
-    violet:  { bg: "rgba(139,92,246,0.1)",  text: "var(--status-hibernated)", border: "rgba(139,92,246,0.25)" },
+    default: { bg: "transparent", text: "var(--c-ash)",   border: "var(--c-line-2)" },
+    success: { bg: "transparent", text: "var(--c-bone)",  border: "var(--c-line-2)" },
+    warning: { bg: "transparent", text: "var(--c-warn)",  border: "rgba(242,178,76,0.4)" },
+    error:   { bg: "transparent", text: "var(--c-fail)",  border: "rgba(255,107,107,0.45)" },
+    info:    { bg: "transparent", text: "var(--c-ash)",   border: "var(--c-line-2)" },
+    violet:  { bg: "transparent", text: "var(--c-smoke)", border: "var(--c-line-2)" },
   };
   const s = styles[variant] ?? styles.default;
   return (
     <span
-      className={clsx("inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium", className)}
+      className={clsx("inline-flex h-[18px] items-center rounded-sm px-1.5 font-mono text-[10.5px]", className)}
       style={{ background: s.bg, color: s.text, border: `1px solid ${s.border}` }}
     >
       {children}
@@ -320,7 +327,7 @@ export function Divider() {
 export function Kv({ k, v }: { k: string; v: string }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{k}</div>
+      <div className={LABEL} style={{ color: "var(--text-muted)" }}>{k}</div>
       <div className="mt-0.5 font-mono text-[13px]" style={{ color: "var(--text-primary)" }}>{v || "—"}</div>
     </div>
   );
@@ -340,7 +347,7 @@ export function CopyRow({ label, value, secret = false, masked }: { label: strin
   const shown = isHidden ? (masked ?? "••••••••••••") : value;
   return (
     <div className="flex items-center gap-2">
-      <span className="w-28 shrink-0 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{label}</span>
+      <span className={clsx("w-28 shrink-0", LABEL)} style={{ color: "var(--text-muted)" }}>{label}</span>
       <code className="flex-1 truncate rounded px-2 py-1 font-mono text-[12px]" style={{ background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}>{shown}</code>
       {secret && (
         <Btn size="sm" variant="ghost" icon={revealed ? <EyeOff size={12} /> : <Eye size={12} />} onClick={() => setRevealed((v) => !v)}>
@@ -366,7 +373,7 @@ export function Table({ children }: { children: ReactNode }) {
 export function Th({ children, right }: { children?: ReactNode; right?: boolean }) {
   return (
     <th
-      className={clsx("px-4 py-2.5 text-[11px] font-medium uppercase tracking-wider whitespace-nowrap", right && "text-right")}
+      className={clsx("px-4 py-2.5 font-normal whitespace-nowrap", LABEL, right && "text-right")}
       style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)" }}
     >
       {children}
@@ -393,9 +400,9 @@ export function Td({ children, right, mono, muted, className = "" }: {
 // ─── Alert ─────────────────────────────────────────────────────────────────────
 export function Alert({ type = "error", children }: { type?: "error" | "success" | "info"; children: ReactNode }) {
   const styles = {
-    error:   { bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.2)", text: "var(--red-300)" },
-    success: { bg: "rgba(16,185,129,0.08)", border: "rgba(16,185,129,0.2)", text: "var(--status-running)" },
-    info:    { bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.2)", text: "var(--status-creating)" },
+    error:   { bg: "rgba(255,107,107,0.06)", border: "rgba(255,107,107,0.35)", text: "var(--red-300)" },
+    success: { bg: "var(--c-coal)", border: "var(--c-line-2)", text: "var(--c-bone)" },
+    info:    { bg: "var(--c-coal)", border: "var(--c-line-2)", text: "var(--c-ash)" },
   }[type];
   return (
     <div
@@ -439,12 +446,20 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!opts) return;
+    // The key press that opened this dialog may still be on its way up to
+    // window when this effect runs (the command bar asks on Enter), and a held
+    // key repeats. Neither may answer the question, least of all "delete?":
+    // listen from the next task on, and only to a fresh press.
     const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
       if (e.key === "Escape") close(false);
       if (e.key === "Enter") close(true);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const armed = setTimeout(() => window.addEventListener("keydown", onKey), 0);
+    return () => {
+      clearTimeout(armed);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [opts, close]);
 
   return (
@@ -452,7 +467,9 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       {children}
       {opts && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          // Above everything else, the command bar (z 80) included: a question
+          // that is hidden behind the thing that asked it cannot be answered.
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 px-4"
           onClick={() => close(false)}
         >
           <div
@@ -523,10 +540,10 @@ export function Tabs<T extends string>({
             className={clsx(
               "flex items-center gap-1.5 whitespace-nowrap px-4 py-2.5 text-[13px] font-medium transition-colors border-b-2 -mb-px",
               active
-                ? "border-emerald-500 text-emerald-400"
+                ? "border-zinc-100 text-zinc-100"
                 : "border-transparent hover:text-zinc-200"
             )}
-            style={{ color: active ? undefined : "var(--text-secondary)" }}
+            style={{ color: active ? undefined : "var(--text-muted)" }}
           >
             {tab.icon}
             {tab.label}

@@ -21,7 +21,7 @@ export default function InviteAcceptPage() {
       .then((res) => {
         setState("success");
         setMessage(`You've joined the organization as ${res.role}!`);
-        setTimeout(() => router.push("/sandboxes"), 2000);
+        setTimeout(() => router.push("/now"), 2000);
       })
       .catch((err: unknown) => {
         setState("error");
@@ -43,7 +43,7 @@ export default function InviteAcceptPage() {
           <p className="text-sm text-neutral-400">{message}</p>
         )}
         {state === "success" && (
-          <p className="text-xs text-neutral-500">Redirecting to your sandboxes…</p>
+          <p className="text-xs text-neutral-500">Redirecting to your dashboard…</p>
         )}
         {state === "error" && (
           <a

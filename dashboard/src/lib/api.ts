@@ -164,6 +164,8 @@ export type Template = {
   category?: string;
   base?: string;
   tools?: string[];
+  // Set when this entry is a second name for another template (same image).
+  alias_of?: string;
   meta?: Record<string, unknown>;
 };
 
@@ -211,6 +213,21 @@ export type Me = {
   email: string;
   current_org_id?: string | null;
   orgs: Org[];
+};
+
+export type BootStatsResponse = {
+  total_samples: number;
+  window_seconds?: number;
+  overall: { count?: number; min_ms?: number; max_ms?: number; mean_ms?: number; p50_ms?: number; p90_ms?: number; p99_ms?: number };
+  recent: { sandbox_id: string; template: string; boot_mode: string; boot_ms: number; ts: string }[] | null;
+};
+
+export type AuditLogEntry = {
+  id: string | number;
+  ts: string;
+  method: string;
+  path: string;
+  status: string | number;
 };
 
 export type DirEntry = {
@@ -391,6 +408,14 @@ export const api = {
   // Phase 2: templates
   templates: () => call<Template[]>("/templates"),
 
+  // History behind the Now screen (lib/timeline.ts). Both are scoped to the
+  // caller's workspace by the server.
+  //   bootStats: every microVM restore since `sinceUnix`, with its time in ms
+  //   audit:     the caller's own API calls since `sinceISO`
+  bootStats: (sinceUnix: number, limit = 500) =>
+    call<BootStatsResponse>(`/stats/boot?limit=${limit}&since=${Math.floor(sinceUnix)}`),
+  audit: (sinceISO: string, limit = 500) =>
+    call<{ entries: AuditLogEntry[] | null }>(`/audit?since=${encodeURIComponent(sinceISO)}&limit=${limit}`),
   // Phase 1: filesystem
   readFile: (id: string, path: string) =>
     call<string>(`/sandboxes/${id}/fs?path=${encodeURIComponent(path)}`),

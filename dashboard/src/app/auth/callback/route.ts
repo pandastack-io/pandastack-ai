@@ -10,13 +10,13 @@ import { createClient } from "@/lib/supabase/server";
 // carries through the magic-link emailRedirectTo. Resolving and comparing the
 // origin rejects every off-site form (//host, /\host, https://host, \/\/host).
 function safeNext(raw: string | null, base: string): string {
-  if (!raw) return "/sandboxes";
+  if (!raw) return "/now";
   try {
     const url = new URL(raw, base);
-    if (url.origin !== new URL(base).origin) return "/sandboxes";
+    if (url.origin !== new URL(base).origin) return "/now";
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
-    return "/sandboxes";
+    return "/now";
   }
 }
 

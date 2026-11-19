@@ -4,6 +4,8 @@ package guest
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +33,10 @@ type Client struct {
 	// pandastack-daemon (see vsock_client.go / vsock_dispatch.go). Empty means
 	// SSH-only, the pre-Phase-1 behaviour. Guarded by mu.
 	vsockUDS string
+
+	// addr replaces host:22 as the dial target. Tests only (an in-process
+	// SSH server on a loopback port).
+	addr string
 }
 
 func NewClient(host, user string, signer ssh.Signer) *Client {
@@ -80,7 +86,11 @@ func (c *Client) dial(ctx context.Context) (*ssh.Client, error) {
 		Timeout:         3 * time.Second,
 	}
 	d := net.Dialer{Timeout: 3 * time.Second}
-	netConn, err := d.DialContext(ctx, "tcp", c.host+":22")
+	addr := c.addr
+	if addr == "" {
+		addr = c.host + ":22"
+	}
+	netConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -140,8 +150,17 @@ func (c *Client) execSSH(ctx context.Context, cmd string) (*ExecResult, error) {
 	return &ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exit}, nil
 }
 
-// ExecStream runs cmd and copies interleaved stdout/stderr to chunkFn as
-// data arrives. Returns the exit code.
+// ExecStream runs cmd and hands its stdout and stderr to chunkFn as the data
+// arrives. It returns the exit code.
+//
+// chunkFn is never called from two goroutines at once: stdout and stderr are
+// read by separate pumps, but the calls are serialised, so chunkFn may write
+// to a single sink (an http.ResponseWriter, a buffer) without its own lock.
+// The data slice is chunkFn's to keep.
+//
+// When ctx ends before the command does, the command is stopped (see stop):
+// SIGTERM, then SIGKILL after killGrace. The error is then ctx.Err(), joined
+// with ErrStillRunning when the stop could not be confirmed.
 func (c *Client) ExecStream(ctx context.Context, cmd string, chunkFn func(stream string, data []byte)) (int, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
@@ -153,21 +172,35 @@ func (c *Client) ExecStream(ctx context.Context, cmd string, chunkFn func(stream
 	}
 	defer sess.Close()
 
+	// Mark the command's processes so stop can find them. Best effort: a
+	// guest whose sshd does not accept the variable still runs the command,
+	// it just cannot be force-stopped.
+	tag := newExecTag()
+	if sess.Setenv(execTagEnv, tag) != nil {
+		tag = ""
+	}
+
 	outR, _ := sess.StdoutPipe()
 	errR, _ := sess.StderrPipe()
 	if err := sess.Start(cmd); err != nil {
 		return -1, err
 	}
 
-	var wg sync.WaitGroup
+	var (
+		wg      sync.WaitGroup
+		chunkMu sync.Mutex
+	)
 	wg.Add(2)
 	pump := func(stream string, r io.Reader) {
 		defer wg.Done()
-		buf := make([]byte, 4096)
+		buf := make([]byte, 32*1024)
 		for {
 			n, err := r.Read(buf)
 			if n > 0 {
-				chunkFn(stream, append([]byte(nil), buf[:n]...))
+				chunk := append([]byte(nil), buf[:n]...)
+				chunkMu.Lock()
+				chunkFn(stream, chunk)
+				chunkMu.Unlock()
 			}
 			if err != nil {
 				return
@@ -182,8 +215,14 @@ func (c *Client) ExecStream(ctx context.Context, cmd string, chunkFn func(stream
 
 	select {
 	case <-ctx.Done():
-		_ = sess.Signal(ssh.SIGTERM)
+		stopped := c.stop(conn, sess, tag, done)
+		// Closing the channel ends the pumps even when a process outside the
+		// command's process group still holds the output pipes.
+		_ = sess.Close()
 		wg.Wait()
+		if !stopped {
+			return -1, errors.Join(ctx.Err(), ErrStillRunning)
+		}
 		return -1, ctx.Err()
 	case werr := <-done:
 		wg.Wait()
@@ -195,6 +234,160 @@ func (c *Client) ExecStream(ctx context.Context, cmd string, chunkFn func(stream
 			return ee.ExitStatus(), nil
 		}
 		return -1, werr
+	}
+}
+
+// ErrExecTimeout is returned by ExecTimeout when the command ran past its
+// timeout and was stopped.
+var ErrExecTimeout = errors.New("exec timeout")
+
+// ErrStillRunning is joined to the error of an exec whose context ended when
+// the command could not be confirmed dead: the guest's sshd refused the
+// process tag, no session was free for the stop helper, or a process that
+// left the command's process group kept the output open.
+var ErrStillRunning = errors.New("the command could not be stopped and may still be running")
+
+// ExecTimeout is Exec with a limit on the command's run time. When the limit
+// passes, the command is stopped in the guest and the error is ErrExecTimeout
+// (joined with ErrStillRunning if the stop could not be confirmed); the
+// result then holds the output produced so far. A timeout of zero or less is
+// plain Exec.
+//
+// ctx ending also stops the command. A caller that wants the command to
+// outlive its own request passes a context that is not cancelled with it.
+func (c *Client) ExecTimeout(ctx context.Context, cmd string, timeout time.Duration) (*ExecResult, error) {
+	if timeout <= 0 {
+		return c.Exec(ctx, cmd)
+	}
+	if c.vsockEnabled() {
+		res, err := c.execVsock(ctx, cmd, timeout)
+		if err == nil || !isVsockUnavailable(err) {
+			return res, err
+		}
+		// transport failed before the command ran → fall through to SSH
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	exit, err := c.ExecStream(tctx, cmd, func(stream string, data []byte) {
+		if stream == "stderr" {
+			stderr.Write(data)
+			return
+		}
+		stdout.Write(data)
+	})
+	res := &ExecResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exit}
+	if err == nil {
+		return res, nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		if errors.Is(err, ErrStillRunning) {
+			return res, errors.Join(ErrExecTimeout, ErrStillRunning)
+		}
+		return res, ErrExecTimeout
+	}
+	return nil, err
+}
+
+// --- stopping a command -------------------------------------------------------
+
+// execTagEnv carries a per-exec token into the guest. sshd passes it to the
+// command, every process the command starts inherits it, and the stop helper
+// finds the command by it in /proc/<pid>/environ.
+//
+// The name is an LC_ variable because stock sshd_config accepts those from a
+// client (AcceptEnv LANG LC_*) and nothing else; libc ignores an LC_ category
+// it does not know.
+const execTagEnv = "LC_PANDASTACK_EXEC"
+
+// Variables, not constants, so tests can shorten them.
+var (
+	// killGrace is how long a command gets to exit after SIGTERM before
+	// SIGKILL, and how long stop then waits for the session to end.
+	killGrace = 2 * time.Second
+	// stopHelperTimeout bounds one run of the stop helper in the guest.
+	stopHelperTimeout = 3 * time.Second
+)
+
+func newExecTag() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// stop ends a running command: SIGTERM, then SIGKILL after killGrace. It
+// reports whether the session ended, which is the only proof that the command
+// is gone.
+//
+// The SSH "signal" request alone is not enough. sshd delivers it with
+// killpg(), but only from a privilege-separated session, and a root login has
+// none (OpenSSH privsep_postauth clears use_privsep for uid 0, and
+// session_signal_req then answers "session signalling requires privilege
+// separation"). The agent logs in as root, so before this helper existed a
+// cancelled exec sent a SIGTERM that never arrived and the command ran on.
+// The request is still sent, for a guest that is not root-only.
+func (c *Client) stop(conn *ssh.Client, sess *ssh.Session, tag string, done <-chan error) bool {
+	for _, sig := range []ssh.Signal{ssh.SIGTERM, ssh.SIGKILL} {
+		_ = sess.Signal(sig)
+		if tag != "" {
+			runStopHelper(conn, stopScript(tag, string(sig)))
+		}
+		select {
+		case <-done:
+			return true
+		case <-time.After(killGrace):
+		}
+	}
+	return false
+}
+
+// stopScript is the shell run in the guest, in a session of its own, to
+// signal the process group of the exec marked with tag. sig is TERM or KILL.
+//
+// It does what sshd's killpg() would have done. sshd starts the command as
+// the leader of a new session, so the leader's pid is the id of the process
+// group that holds the command and everything it started without setsid. The
+// leader is the tagged process that leads its session (pid == session id)
+// and whose parent is not tagged (the parent is sshd). A daemon that the
+// command detached with setsid also leads a session, but its parent is
+// either a tagged process or, once that has exited, pid 1; both are skipped,
+// so such a daemon is left alone, as it is by timeout(1).
+func stopScript(tag, sig string) string {
+	return `t='` + execTagEnv + `=` + tag + `'
+for e in /proc/[0-9]*/environ; do
+  grep -qaF "$t" "$e" 2>/dev/null || continue
+  d=${e%/environ}; p=${d#/proc/}
+  set -- $(sed 's/^.*) //' "$d/stat" 2>/dev/null)
+  [ "$4" = "$p" ] || continue
+  [ "$2" != 1 ] || continue
+  grep -qaF "$t" "/proc/$2/environ" 2>/dev/null && continue
+  kill -s ` + sig + ` -- "-$p" 2>/dev/null
+done
+:`
+}
+
+// runStopHelper runs script in its own session and waits for it, for at most
+// stopHelperTimeout. Errors are not reported: the caller learns whether the
+// stop worked from the command's own session ending.
+func runStopHelper(conn *ssh.Client, script string) {
+	helper, err := conn.NewSession()
+	if err != nil {
+		return // e.g. the connection is at sshd's MaxSessions
+	}
+	defer helper.Close()
+	if err := helper.Start(script); err != nil {
+		return
+	}
+	finished := make(chan struct{})
+	go func() {
+		_ = helper.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(stopHelperTimeout):
 	}
 }
 

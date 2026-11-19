@@ -138,7 +138,14 @@ function statusLabel(value?: string | number | null): string {
 }
 
 export function StatusBadge({ value }: { value?: string | number | null }) {
-  return <Badge variant={statusTone(value)}>{statusLabel(value)}</Badge>;
+  // The orange dot means "up right now", the same mark the Now page uses.
+  const live = String(value ?? "").toLowerCase() === "running";
+  return (
+    <Badge variant={statusTone(value)} className={live ? "gap-1.5" : ""}>
+      {live && <span className="live-pulse size-1.5 shrink-0 rounded-full" style={{ background: "var(--c-signal)" }} />}
+      {statusLabel(value)}
+    </Badge>
+  );
 }
 
 // DbStatusBadge: database-aware status. An auto-suspended (hibernated)

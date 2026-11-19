@@ -17,7 +17,7 @@ CPU and memory are **baked into each template** at build time — they are a pro
 | ------------------- | ----------------------------- | ---- | ------ | ------ | --------------------------------------------------------------------------------------------------- |
 | `base`              | Ubuntu 24.04 + mise           | 2    | 2 GB   | 2 GB   | Universal language runtime — Node 22, Python 3.12, Go, Bun via mise. The default for general use.    |
 | `code-interpreter`  | Python 3.11 + Node 22         | 2    | 2 GB   | 2 GB   | pandas, numpy, matplotlib, scipy, scikit-learn, jupyter, playwright, openai-agents. LLM tool-use and data analysis. |
-| `agent`             | Ubuntu 24.04 + Node 22        | 2    | 2 GB   | 2 GB   | Every public coding-agent CLI in one image: `claude-code`, `codex`, `opencode`. Pick one via its API key. |
+| `agent`             | Ubuntu 24.04 + Node 24        | 2    | 2 GB   | 2 GB   | Seven coding-agent CLIs in one image: `claude`, `codex`, `opencode`, `gemini`, `grok`, `amp`, `copilot`. Also reachable [by each tool's name](#coding-agents-by-name). |
 | `postgres-16`       | Ubuntu 24.04 + PGDG           | 2    | 1 GB   | 2 GB   | Managed PostgreSQL 16 + pgvector on a durable volume. Backs the [Databases](/docs/concepts/databases) API. |
 
 Every template autostarts `sshd` and the `pandastack-agent` systemd unit, so [exec](/docs/concepts/exec), the [terminal](/docs/concepts/terminal), and [preview URLs](/docs/concepts/preview-urls) work the instant the sandbox is `running`.
@@ -32,9 +32,34 @@ Every template autostarts `sshd` and the `pandastack-agent` systemd unit, so [ex
 | ------------------------------------------------- | --------------------- |
 | General-purpose Node / Python / Go / Bun work      | `base`                |
 | LLM tool calling, data analysis, Jupyter-style    | `code-interpreter`    |
-| Running Claude Code / Codex / OpenCode as an agent | `agent`              |
+| Running Claude Code, Codex, Gemini CLI or another coding agent | `claude`, `codex`, `gemini`, … (or `agent`) |
 | Managed PostgreSQL 16 with pgvector               | `postgres-16`         |
 | Anything custom — browser automation, extra system packages, pinned toolchains | bake your own (below) |
+
+## Coding agents by name
+
+Seven more names start the `agent` image. You name the tool, and the tool is on the `PATH` when the sandbox is up.
+
+| Template   | Tool               | Run a prompt and exit | What it needs                                   |
+| ---------- | ------------------ | --------------------- | ----------------------------------------------- |
+| `claude`   | Claude Code        | `claude -p "…"`       | `ANTHROPIC_API_KEY`                             |
+| `codex`    | Codex CLI          | `codex exec "…"`      | `OPENAI_API_KEY`                                |
+| `opencode` | OpenCode           | `opencode run "…"`    | the key of the model provider you choose        |
+| `gemini`   | Gemini CLI         | `gemini -p "…"`       | `GEMINI_API_KEY`                                |
+| `grok`     | Grok CLI           | `grok -p "…"`         | `XAI_API_KEY`                                   |
+| `amp`      | Amp                | `amp -x "…"`          | `AMP_API_KEY`                                   |
+| `copilot`  | GitHub Copilot CLI | `copilot -p "…"`      | a GitHub token with Copilot access (`GH_TOKEN`) |
+
+These are second names, not second images: there is no extra rootfs to build and no extra snapshot to bake, so `agent` is the only one of them you need on a host. The API turns the name into `agent` before the request reaches an agent, and stamps the name you asked for on the sandbox as `metadata.template_alias`. In `GET /v1/templates` each one appears with `alias_of: "agent"`.
+
+```bash
+pandastack sandbox create --template claude --ttl 1800
+pandastack sandbox exec <id> -- claude --version
+```
+
+PandaStack does not supply the model. You bring the key for the tool you run, and the tool talks to its own provider from inside the sandbox.
+
+The seven names are reserved: a custom template cannot be built under one of them. A custom template of that name that already exists in your workspace keeps working and wins over the alias.
 
 ## Bake your own
 
@@ -45,7 +70,11 @@ PandaStack at it by reference. The build request stays tiny: PandaStack pulls
 the image server-side, flattens it, and bakes the snapshot.
 
 <Callout type="warn">
-  **Debian-based images only.** Your final image must be Debian or a Debian derivative — `debian`, `ubuntu`, `python`, `node`, `golang`, etc. The bake step guarantees the microVM's init + SSH contract by `apt`-installing `systemd-sysv` and `openssh-server` into the rootfs, which needs a Debian userland. Alpine, RedHat-based, and distroless images will not boot.
+  **Your image must bring an init and an SSH server.** A microVM boots the image's own `/sbin/init`, and exec, the terminal and file access all go through its `sshd`. Add this line to your Dockerfile:
+
+  `RUN apt-get update && apt-get install -y --no-install-recommends systemd-sysv openssh-server`
+
+  An image without both is refused, with a message that says which one is missing. Use Debian or a Debian derivative (`debian`, `ubuntu`, `python`, `node`, `golang`, …); Alpine, RedHat-based and distroless images are not supported.
 </Callout>
 
 ### Build from an image reference
@@ -98,9 +127,15 @@ back-compat, but it sends the whole filesystem through the API — prefer
 
 1. The agent pulls the image from the trusted registry and **flattens its layers** into a single rootfs tar — layers applied in order with whiteouts and opaque dirs resolved (equivalent to `docker export`).
 2. It writes that tar into a sparse ext4 image of `size_mb` MB and injects working guest DNS.
-3. It guarantees the **guest contract**: if the image has no `/sbin/init` or no `sshd`, the bake `apt`-installs `systemd`, `systemd-sysv`, `openssh-server`, and `sudo` into the rootfs. You do not add them to your Dockerfile, and any `CMD`/`ENTRYPOINT` you set is not used for boot.
+3. It checks the **guest contract**: the image must contain `/sbin/init` and `/usr/sbin/sshd`. If either is missing the build fails here. Nothing from your image is run on the host, and any `CMD`/`ENTRYPOINT` you set is not used for boot.
 4. It boots the image once under Firecracker and takes a memory + disk snapshot.
 5. It registers the snapshot under `my-template` — instantly available for `Sandbox.create`.
+
+<Callout type="info">
+  **Why the agent no longer installs them for you.** Earlier versions fixed up an image that lacked init or sshd by `chroot`-ing into its filesystem on the host and running the image's own `apt` there, as root. That runs code from the image on the host, so whoever built the image could run code as root on your agent. The agent now refuses instead, mounts every guest disk it prepares with `nosuid,nodev,noexec`, and never follows a symbolic link out of the image when it writes its SSH key into it.
+
+  If you are the only person who builds templates on your deployment, you can turn the old behaviour back on with `PANDASTACK_TEMPLATE_HOST_INSTALL=1` in the agent's environment. Do not set it on a host that bakes images from people you would not give a root shell.
+</Callout>
 
 ### Example Dockerfiles
 
@@ -109,6 +144,7 @@ back-compat, but it sends the whole filesystem through the API — prefer
 ```dockerfile
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd-sysv openssh-server \
       ffmpeg imagemagick poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 ```
@@ -118,6 +154,9 @@ starts ready — no install step at create time:
 
 ```dockerfile
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd-sysv openssh-server \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir \
       pandas numpy scikit-learn duckdb pyarrow
 COPY ./pipeline /opt/pipeline
@@ -129,6 +168,7 @@ bake exactly the version you want instead:
 ```dockerfile
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      systemd-sysv openssh-server \
       chromium-browser xvfb fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install -g playwright && playwright install --with-deps chromium
@@ -151,7 +191,7 @@ client.templates.get_build(build_id)
 ```
 
 The agent also streams timestamped build progress (`pulling`, `flattening`,
-`installing guest contract`, `baking`, …) as Server-Sent Events at
+`checking guest contract`, `baking`, …) as Server-Sent Events at
 `GET /templates/builds/{id}/logs` on the agent that ran the build — useful when
 a bake fails and you want the failing step rather than a status string.
 
@@ -187,8 +227,8 @@ GET    /v1/templates
 GET    /v1/templates/{name}
 POST   /v1/templates/build               (multipart: name, size_mb, cpu, memory_mb, kernel?, and exactly ONE of image_ref or a rootfs file; ?replace=true to overwrite)
 DELETE /v1/templates/{name}              (also clears the cached snapshot)
-GET    /v1/templates/builds
-GET    /v1/templates/builds/{id}
+GET    /v1/templates/builds              (your workspace's builds only)
+GET    /v1/templates/builds/{id}         (404 for a build that is not yours)
 ```
 
 The `image_ref` form field is the registry path (recommended); the legacy

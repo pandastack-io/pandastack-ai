@@ -172,6 +172,9 @@ type ExecResponse struct {
 	// Err is set for daemon-side failures that are not a normal nonzero exit
 	// (e.g. fork failure). Empty on success.
 	Err string `json:"err,omitempty"`
+	// TimedOut is set when the command ran past ExecRequest.TimeoutMS and the
+	// daemon stopped it. Stdout and Stderr then hold the output so far.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 // ReadFileRequest reads the whole file at Path.

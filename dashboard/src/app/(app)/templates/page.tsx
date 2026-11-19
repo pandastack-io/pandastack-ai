@@ -213,6 +213,7 @@ export default function TemplatesPage() {
                             style={{ color: "var(--text-muted)" }}
                           >
                             {t.name}
+                            {t.alias_of ? ` · same image as ${t.alias_of}` : ""}
                           </div>
                         </div>
                       </div>

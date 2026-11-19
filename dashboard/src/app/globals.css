@@ -1,139 +1,114 @@
 @import "tailwindcss";
 @import "@xterm/xterm/css/xterm.css";
 
-/* Class-based dark mode (next-themes sets .dark on <html>) */
+/* Class-based dark mode. The app is dark only: next-themes is pinned to
+   "dark" (components/theme.tsx), so .dark is always on <html> and the dark:
+   variant always applies. */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Dual-theme token system.
- * Light (default) mirrors the marketing site: warm off-white, ink text,
- * electric-violet brand. Dark keeps the original zinc surfaces but swaps
- * the emerald brand for the same violet.
+ * One theme: the marketing site's system.
  *
- * The zinc-* and emerald-* Tailwind scales are remapped below in
- * @theme inline so the existing hardcoded utility classes (bg-zinc-900,
- * text-emerald-400, ...) become theme-aware automatically. The light
- * values invert the scale, preserving contrast relationships.
+ * An ink canvas, hairlines instead of boxes, bone type, and ONE signal colour
+ * (the logo's orange) that only ever means "live, right now". Everything else
+ * is a step on the same grey ramp. The dashboard used to carry a light theme
+ * and a violet brand; both are gone.
+ *
+ * The --c-* names are the marketing site's own (marketing/app/globals.css), so
+ * a value can be read across the two. The older --bg-*, --text-*, --border-*
+ * and --brand names stay as aliases: every existing page is written against
+ * them and re-themes without being touched. The zinc-* and emerald-* Tailwind
+ * scales are remapped below for the same reason: bg-zinc-900 or
+ * text-emerald-400 in an older page lands on this ramp, not on stock Tailwind.
  */
-:root {
+:root,
+.dark {
+  /* the ramp */
+  --c-ink:      #08080a;  /* canvas */
+  --c-coal:     #0e0f12;  /* raised surface, the selected row */
+  --c-coal-2:   #17171c;  /* second raise, hover */
+  --c-line:     #25252a;  /* hairline */
+  --c-line-2:   #414249;  /* strong hairline, control outlines */
+  --c-mute:     #62626a;  /* tertiary labels */
+  --c-smoke:    #94949d;  /* labels */
+  --c-ash:      #babac1;  /* body copy */
+  --c-bone:     #f0f0f4;  /* primary type, fills */
+  /* the signal: live things only */
+  --c-signal:    #ff5a1f;
+  --c-signal-hi: #ff9a6e; /* small signal text on ink */
+  /* trouble, the one other hue */
+  --c-fail:     #ff6b6b;
+  --c-warn:     #f2b24c;
+  /* A second series in a chart, and the "static" chip. Two pages used
+     var(--accent) before any theme defined it (one swatch was invisible). */
+  --accent:     #8ab4ff;
+
   /* Surface hierarchy */
-  --bg-base:      #fafaf8;
-  --bg-surface:   #ffffff;
-  --bg-elevated:  #ffffff;
-  --bg-overlay:   #f0efea;
+  --bg-base:      var(--c-ink);
+  --bg-surface:   var(--c-ink);
+  --bg-elevated:  var(--c-coal);
+  --bg-overlay:   var(--c-coal-2);
 
   /* Borders */
-  --border-subtle:  rgba(22, 22, 28, 0.05);
-  --border-default: rgba(22, 22, 28, 0.09);
-  --border-strong:  rgba(22, 22, 28, 0.16);
+  --border-subtle:  var(--c-line);
+  --border-default: var(--c-line);
+  --border-strong:  var(--c-line-2);
 
   /* Text */
-  --text-primary:   #16161c;
-  --text-secondary: #5b5b66;
-  --text-muted:     #94949e;
-  --text-faint:     #b8b8c0;
+  --text-primary:   var(--c-bone);
+  --text-secondary: var(--c-ash);
+  --text-muted:     var(--c-smoke);
+  --text-faint:     var(--c-mute);
 
-  /* Brand — electric violet (matches marketing) */
-  --brand:        #6d4aff;
-  --brand-dim:    rgba(109, 74, 255, 0.10);
-  --brand-border: rgba(109, 74, 255, 0.30);
+  /* "Brand" in older pages meant emphasis. Emphasis is bone here; the orange
+     is not an accent colour. */
+  --brand:        var(--c-bone);
+  --brand-dim:    var(--c-coal);
+  --brand-border: var(--c-line-2);
 
-  /* Status */
-  --status-running:    #16a34a;
-  --status-paused:     #d97706;
-  --status-failed:     #dc2626;
-  --status-hibernated: #7c3aed;
-  --status-creating:   #2563eb;
+  /* Status. Running is bone (the orange dot beside it says "live");
+     asleep and paused step down the ramp; only failure gets a hue. */
+  --status-running:    var(--c-bone);
+  --status-paused:     var(--c-warn);
+  --status-failed:     var(--c-fail);
+  --status-hibernated: var(--c-smoke);
+  --status-creating:   var(--c-ash);
+  /* Names a few pages reach for with a hard-coded fallback. */
+  --status-error:      var(--c-fail);
+  --danger:            var(--c-fail);
 
-  /* zinc-* remap (light = inverted scale) */
-  --z-950: #fafaf8;
-  --z-900: #ffffff;
-  --z-800: #efeee9;
-  --z-700: #e2e1da;
-  --z-600: #94949e;
-  --z-500: #74747e;
-  --z-400: #5b5b66;
-  --z-300: #44444e;
-  --z-200: #2c2c35;
-  --z-100: #1f1f27;
-  --z-50:  #16161c;
+  /* zinc-* remap: the ramp, darkest to lightest */
+  --z-950: #08080a;
+  --z-900: #0e0f12;
+  --z-800: #1c1c22;
+  --z-700: #2e2e35;
+  --z-600: #62626a;
+  --z-500: #7d7d86;
+  --z-400: #94949d;
+  --z-300: #babac1;
+  --z-200: #d8d8de;
+  --z-100: #f0f0f4;
+  --z-50:  #fafafc;
 
-  /* emerald-* remap → violet brand scale */
-  --br-50:  #f4f0ff;
-  --br-200: #e3daff;
-  --br-300: #5b3ad9;
-  --br-400: #6d4aff;
-  --br-500: #6d4aff;
-  --br-600: #5b3ad9;
-  --br-700: #c9bcf5;
-  --br-900: #ece6ff;
+  /* emerald-* remap. Older pages use emerald for emphasis (primary buttons,
+     active tabs, links, checkboxes): all of that is bone now. */
+  --br-50:  #fafafc;
+  --br-200: #e2e2e8;
+  --br-300: #f0f0f4;
+  --br-400: #f0f0f4;
+  --br-500: #f0f0f4;
+  --br-600: #d8d8de;
+  --br-700: #414249;
+  --br-900: #17171c;
 
-  /* status hue remaps (300 = text, 900/950 = washes) */
-  --red-300: #b91c1c;  --red-400: #dc2626;  --red-500: #dc2626;
-  --red-700: #fca5a5;  --red-900: #fee2e2;  --red-950: #fef2f2;  --red-200: #991b1b;
-  --amber-200: #92400e; --amber-300: #b45309; --amber-400: #d97706;
-  --amber-500: #d97706; --amber-700: #fcd34d; --amber-900: #fef3c7; --amber-950: #fffbeb;
-  --sky-300: #0369a1; --sky-500: #0284c7; --sky-700: #7dd3fc; --sky-900: #e0f2fe;
+  /* trouble hues (300 = text, 900/950 = washes) */
+  --red-200: #ffc9c9; --red-300: #ff9c9c; --red-400: #ff6b6b; --red-500: #f25050;
+  --red-700: #8f2a2a; --red-900: #3a1414; --red-950: #1f0b0b;
+  --amber-200: #f8dfa6; --amber-300: #f5cf85; --amber-400: #f2b24c;
+  --amber-500: #e09a2b; --amber-700: #7d5516; --amber-900: #33240b; --amber-950: #1d1406;
+  --sky-300: #babac1; --sky-500: #94949d; --sky-700: #414249; --sky-900: #17171c;
 
-  --xterm-bg: #0e0e16; /* terminals stay ink in both themes */
-}
-
-.dark {
-  --bg-base:      #09090b;
-  --bg-surface:   #111113;
-  --bg-elevated:  #18181b;
-  --bg-overlay:   #27272a;
-
-  --border-subtle:  rgba(255, 255, 255, 0.05);
-  --border-default: rgba(255, 255, 255, 0.08);
-  --border-strong:  rgba(255, 255, 255, 0.12);
-
-  --text-primary:   #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted:     #52525b;
-  --text-faint:     #3f3f46;
-
-  --brand:        #8d6bff;
-  --brand-dim:    rgba(141, 107, 255, 0.14);
-  --brand-border: rgba(141, 107, 255, 0.30);
-
-  --status-running:    #22c55e;
-  --status-paused:     #f59e0b;
-  --status-failed:     #ef4444;
-  --status-hibernated: #8b5cf6;
-  --status-creating:   #3b82f6;
-
-  /* zinc-* true values */
-  --z-950: #09090b;
-  --z-900: #18181b;
-  --z-800: #27272a;
-  --z-700: #3f3f46;
-  --z-600: #52525b;
-  --z-500: #71717a;
-  --z-400: #a1a1aa;
-  --z-300: #d4d4d8;
-  --z-200: #e4e4e7;
-  --z-100: #f4f4f5;
-  --z-50:  #fafafa;
-
-  /* emerald-* remap → violet, dark-tuned */
-  --br-50:  #f4f0ff;
-  --br-200: #d6c9ff;
-  --br-300: #b6a3ff;
-  --br-400: #9d80ff;
-  --br-500: #7c5cff;
-  --br-600: #6d4aff;
-  --br-700: #4c34b8;
-  --br-900: #261c5c;
-
-  /* status hues = stock Tailwind dark-appropriate values */
-  --red-300: #fca5a5;  --red-400: #f87171;  --red-500: #ef4444;
-  --red-700: #b91c1c;  --red-900: #7f1d1d;  --red-950: #450a0a;  --red-200: #fecaca;
-  --amber-200: #fde68a; --amber-300: #fcd34d; --amber-400: #fbbf24;
-  --amber-500: #f59e0b; --amber-700: #b45309; --amber-900: #78350f; --amber-950: #451a03;
-  --sky-300: #7dd3fc; --sky-500: #0ea5e9; --sky-700: #0369a1; --sky-900: #0c4a6e;
-
-  --xterm-bg: #09090b;
+  --xterm-bg: #08080a;
 }
 
 @theme inline {
@@ -141,6 +116,30 @@
   --color-foreground: var(--text-primary);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* corners: the system is square. rounded-full is left alone (dots, avatars). */
+  --radius-xs: 1px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+  --radius-3xl: 6px;
+
+  /* the ramp and the signal as utilities (bg-ink, text-bone, border-line, ...) */
+  --color-ink: var(--c-ink);
+  --color-coal: var(--c-coal);
+  --color-coal-2: var(--c-coal-2);
+  --color-line: var(--c-line);
+  --color-line-2: var(--c-line-2);
+  --color-mute: var(--c-mute);
+  --color-smoke: var(--c-smoke);
+  --color-ash: var(--c-ash);
+  --color-bone: var(--c-bone);
+  --color-signal: var(--c-signal);
+  --color-signal-hi: var(--c-signal-hi);
+  --color-fail: var(--c-fail);
+  --color-warn: var(--c-warn);
 
   /* brand color utilities (bg-brand, text-brand, ...) */
   --color-brand: var(--brand);
@@ -196,9 +195,6 @@
 html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  color-scheme: light;
-}
-html.dark {
   color-scheme: dark;
 }
 
@@ -216,12 +212,23 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 /* Selection */
-::selection { background: rgba(109, 74, 255, 0.22); color: var(--text-primary); }
+::selection { background: rgba(255, 90, 31, 0.28); color: var(--text-primary); }
 
 /* Focus ring */
 :focus-visible {
-  outline: 2px solid rgba(109, 74, 255, 0.5);
+  outline: 2px solid var(--c-signal-hi);
   outline-offset: 2px;
+}
+
+/* Small labels. Older pages wrote them as tracked uppercase, about thirty
+   times by hand; the house label is mono lowercase (LABEL in components/ui).
+   One rule moves them all, so a table cannot show both styles in one row. */
+.uppercase.tracking-wider,
+.uppercase.tracking-wide {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  text-transform: lowercase;
+  letter-spacing: 0;
 }
 
 /* Skeleton shimmer */
@@ -238,10 +245,20 @@ body {
 
 /* Glowing pill pulse */
 @keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(109, 74, 255, 0.4); }
-  50%       { box-shadow: 0 0 8px 2px rgba(109, 74, 255, 0.15); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 90, 31, 0.4); }
+  50%       { box-shadow: 0 0 8px 2px rgba(255, 90, 31, 0.15); }
 }
 .glow-pulse { animation: glow-pulse 2s ease-in-out infinite; }
+
+/* The live dot: the one orange thing on a screen. */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.live-pulse { animation: live-pulse 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .live-pulse, .glow-pulse { animation: none; }
+}
 
 /* Route transition — page content fades and rises in on every navigation
    (via (app)/template.tsx, which remounts per-route). `backwards` fill applies

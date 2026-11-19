@@ -87,7 +87,7 @@ export function SupportWidget() {
         className="fixed bottom-6 right-6 z-40 flex items-center justify-center w-12 h-12 rounded-full shadow-lg transition-all hover:scale-105 active:scale-95"
         style={{
           background: 'var(--brand)',
-          color: '#fff',
+          color: 'var(--c-ink)',
         }}
         aria-label="Help"
       >
@@ -298,7 +298,7 @@ export function SupportWidget() {
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all"
                 style={{
                   background: 'var(--brand)',
-                  color: '#fff',
+                  color: 'var(--c-ink)',
                 }}
               >
                 <Mail size={16} />

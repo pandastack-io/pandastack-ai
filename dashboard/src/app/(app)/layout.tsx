@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 "use client";
 
+// The app shell: a rail of grouped links on the left, a top bar that is mostly
+// a command line, and the page. Styles: components/shell/shell.module.css.
+
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -11,284 +14,334 @@ import { API_BASE, getMe, listOrgs, setCurrentOrg, type Org } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 import { clearListCache } from "@/lib/list-cache";
 import { ConfirmProvider } from "@/components/ui";
-import { ThemeToggle } from "@/components/theme";
-import {
-  Box,
-  Cpu,
-  Database,
-  FileBox,
-  HardDrive,
-  Key,
-  LayoutGrid,
-  Search,
-  Settings,
-  X,
-  ChevronLeft,
-  ChevronRight,
-  Activity,
-  LineChart,
-  Bell,
-  User,
-  Command,
-  ChevronDown,
-  Building2,
-  Users,
-  BookOpen,
-  MessageCircle,
-  Globe,
-  ExternalLink,
-  Camera,
-} from "lucide-react";
+import { CommandBar, PageCode, hasPageCode } from "@/components/shell/command";
+import { useShellData, type ShellData } from "@/components/shell/shell-data";
+import s from "@/components/shell/shell.module.css";
 
-const NAV = [
-  { href: "/sandboxes",       label: "Sandboxes",    icon: Box,        shortcut: "G S" },
-  { href: "/databases",       label: "Databases",    icon: Database,   shortcut: "" },
-  { href: "/templates",       label: "Templates",    icon: LayoutGrid, shortcut: "G T" },
-  { href: "/volumes",         label: "Volumes",      icon: HardDrive,  shortcut: "" },
-  { href: "/snapshots",       label: "Snapshots",    icon: Camera,     shortcut: "" },
-  { href: "/audit",           label: "Audit Log",    icon: Bell,       shortcut: "" },
-  { href: "/stats",           label: "Performance",  icon: Activity,   shortcut: "" },
-  { href: "/observability",   label: "Observability",icon: LineChart,  shortcut: "" },
-  { href: "/settings/tokens", label: "API Tokens",   icon: Key,        shortcut: "" },
-  { href: "/settings/team",   label: "Team",         icon: Users,      shortcut: "" },
-  { href: "/settings/orgs",   label: "Organizations",icon: Building2,  shortcut: "" },
+type Count = keyof NonNullable<ShellData["counts"]>;
+type NavLink = { href: string; label: string; count?: Count };
+
+// The pages, grouped by what you are doing: running things, keeping things,
+// building things, watching things, and the account.
+const NAV: { group?: string; links: NavLink[] }[] = [
+  { links: [{ href: "/now", label: "Now", count: "live" }] },
+  {
+    group: "run",
+    links: [{ href: "/sandboxes", label: "Sandboxes", count: "sandboxes" }],
+  },
+  {
+    group: "store",
+    links: [
+      { href: "/databases", label: "Databases", count: "databases" },
+      { href: "/volumes", label: "Volumes" },
+      { href: "/snapshots", label: "Snapshots" },
+    ],
+  },
+  { group: "build", links: [{ href: "/templates", label: "Templates" }] },
+  {
+    group: "watch",
+    links: [
+      { href: "/stats", label: "Performance" },
+      { href: "/observability", label: "Observability" },
+      { href: "/audit", label: "Audit log" },
+    ],
+  },
+  {
+    group: "account",
+    links: [
+      { href: "/settings/tokens", label: "API keys" },
+      { href: "/settings/team", label: "Team" },
+      { href: "/settings/orgs", label: "Organizations" },
+    ],
+  },
 ];
 
-export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const [collapsed, setCollapsed] = useState(false);
-  const [showSearch, setShowSearch] = useState(false);
-  const [showShortcuts, setShowShortcuts] = useState(false);
+const SHORTCUTS: { keys: string[]; or?: string[]; label: string }[] = [
+  { keys: ["⌘", "K"], or: ["/"], label: "Open the command bar" },
+  { keys: ["G", "N"], label: "Go to Now" },
+  { keys: ["G", "S"], label: "Go to Sandboxes" },
+  { keys: ["G", "T"], label: "Go to Templates" },
+  { keys: ["?"], label: "Show these shortcuts" },
+  { keys: ["Esc"], label: "Close a dialog" },
+];
 
-  // keyboard shortcuts
+/** A dropdown closes when you press Esc or press anywhere outside it. */
+function useDismiss<T extends HTMLElement>(open: boolean, setOpen: (open: boolean) => void) {
+  const ref = useRef<T | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, setOpen]);
+  return ref;
+}
+
+export default function AppLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const shell = useShellData();
+  const [showCommand, setShowCommand] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showCode, setShowCode] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
+
+  // A link in the mobile drawer has done its job once the page changes.
+  useEffect(() => {
+    setRailOpen(false);
+  }, [pathname]);
+
   useEffect(() => {
     const seq: string[] = [];
     const handler = (e: KeyboardEvent) => {
-      // ignore inputs
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      // ? key for shortcuts modal
+      const el = e.target as HTMLElement | null;
+      const typing = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || Boolean(el?.isContentEditable);
+      // ⌘K works from anywhere; the single-key shortcuts must not fire while typing.
+      if (e.key === "k" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        e.preventDefault();
+        setShowCommand((v) => !v);
+        return;
+      }
+      if (typing) return;
       if (e.key === "?" && !e.metaKey) {
         setShowShortcuts((v) => !v);
         return;
       }
-      // / or cmd+k for search
-      if ((e.key === "/" || (e.key === "k" && e.metaKey)) && !e.shiftKey) {
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
-        setShowSearch((v) => !v);
+        setShowCommand(true);
         return;
       }
-      // Esc to close modals
       if (e.key === "Escape") {
-        setShowSearch(false);
+        setShowCommand(false);
         setShowShortcuts(false);
+        setShowCode(false);
+        setRailOpen(false);
         return;
       }
-
-      // g-prefixed navigation
       seq.push(e.key.toLowerCase());
       if (seq.length > 2) seq.shift();
       const combo = seq.join(" ");
-      if (combo === "g s") { window.location.href = "/sandboxes"; seq.length = 0; }
-      if (combo === "g t") { window.location.href = "/templates"; seq.length = 0; }
+      const to = combo === "g n" ? "/now" : combo === "g s" ? "/sandboxes" : combo === "g t" ? "/templates" : null;
+      if (to) {
+        seq.length = 0;
+        router.push(to);
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [router]);
+
+  // /now is one ruled sheet that runs edge to edge; every other page keeps its
+  // padded column.
+  const bleed = pathname === "/now";
 
   return (
     <ConfirmProvider>
-      <div className="flex h-screen overflow-hidden" style={{ background: "var(--bg-base)" }}>
-        <Sidebar collapsed={collapsed} setCollapsed={setCollapsed} />
-        <div className="flex flex-1 flex-col overflow-hidden">
+      <div className={s.shell}>
+        {railOpen && <div className={s.scrim} onClick={() => setRailOpen(false)} aria-hidden="true" />}
+        <Rail pathname={pathname} shell={shell} open={railOpen} />
+        <div className={s.main}>
           <TopBar
-            onSearch={() => setShowSearch(true)}
+            onCommand={() => setShowCommand(true)}
             onShortcuts={() => setShowShortcuts(true)}
+            onCode={hasPageCode(pathname) ? () => setShowCode(true) : undefined}
+            onMenu={() => setRailOpen(true)}
           />
-          <main className="flex-1 overflow-y-auto overflow-x-hidden">
-            {/* dev-mode banner removed by user request */}
-            <div className="mx-auto w-full max-w-7xl px-6 py-6">{children}</div>
-          </main>
+          <main className={s.content}>{bleed ? children : <div className={s.padded}>{children}</div>}</main>
         </div>
 
-        {/* Search modal */}
-        {showSearch && (
-          <SearchModal onClose={() => setShowSearch(false)} />
-        )}
-
-        {/* Shortcuts modal */}
-        {showShortcuts && (
-          <ShortcutsModal onClose={() => setShowShortcuts(false)} />
-        )}
+        {showCommand && <CommandBar things={shell.things} onClose={() => setShowCommand(false)} onRan={shell.refresh} />}
+        {showCode && <PageCode pathname={pathname} onClose={() => setShowCode(false)} />}
+        {showShortcuts && <ShortcutsSheet onClose={() => setShowShortcuts(false)} />}
       </div>
     </ConfirmProvider>
   );
 }
 
-function Sidebar({
-  collapsed,
-  setCollapsed,
-}: {
-  collapsed: boolean;
-  setCollapsed: (v: boolean) => void;
-}) {
-  const path = usePathname();
-  const w = collapsed ? "w-[60px]" : "w-[220px]";
-  const navItems = NAV.filter((item) => {
-    if (isStubAuth() && item.href === "/settings/team") return false;
-    return true;
-  });
+// ------------------------------------------------------------------ rail ---
 
+function Rail({ pathname, shell, open }: { pathname: string; shell: ShellData; open: boolean }) {
+  const stub = isStubAuth();
   return (
-    <aside
-      className={`hidden md:flex flex-col shrink-0 ${w} transition-[width] duration-200 ease-in-out overflow-hidden`}
-      style={{
-        background: "var(--bg-base)",
-        borderRight: "1px solid var(--border-subtle)",
-      }}
-    >
-      {/* Logo */}
-      <div className="flex h-14 items-center gap-3 px-3" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-        <Link href="/sandboxes" className="flex items-center gap-2.5 min-w-0">
-          <img
-            src="/logo.svg"
-            alt="PandaStack"
-            className="size-7 shrink-0 rounded-lg object-contain"
-          />
-          {!collapsed && (
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="text-[14px] font-semibold tracking-tight truncate" style={{ color: "var(--text-primary)" }}>
-                PandaStack
-              </span>
-            </div>
-          )}
-        </Link>
-        {!collapsed && (
-          <button
-            onClick={() => setCollapsed(true)}
-            className="ml-auto rounded p-1 transition-colors hover:bg-zinc-800"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <ChevronLeft size={14} />
-          </button>
-        )}
-      </div>
-
-      {/* Nav */}
-      <nav className="flex flex-1 flex-col gap-0.5 p-2 overflow-y-auto">
-        {navItems.map((n) => {
-          const active = path === n.href || (n.href !== "/" && path.startsWith(n.href));
-          const Icon = n.icon;
-          return (
-            <Link
-              key={n.href}
-              href={n.href}
-              title={collapsed ? n.label : undefined}
-              className={`group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] transition-all ${
-                active ? "font-medium" : "hover:text-zinc-100"
-              }`}
-              style={
-                active
-                  ? { background: "var(--brand-dim)", color: "var(--brand)", border: "1px solid var(--brand-border)" }
-                  : { color: "var(--text-secondary)", border: "1px solid transparent" }
-              }
-            >
-              <Icon size={15} className="shrink-0" />
-              {!collapsed && <span className="truncate">{n.label}</span>}
-            </Link>
-          );
-        })}
+    <aside className={`${s.rail}${open ? ` ${s.open}` : ""}`} aria-label="Main">
+      <Link href="/now" className={s.brand}>
+        <img src="/logo.svg" alt="" />
+        pandastack
+      </Link>
+      <OrgSwitcher />
+      <nav className={s.nav}>
+        {NAV.map((section, i) => (
+          <div key={section.group ?? i}>
+            {section.group && <div className={s.group}>{section.group}</div>}
+            {section.links.map((l) => {
+              // Team has nothing to show without real accounts.
+              if (stub && l.href === "/settings/team") return null;
+              const active = pathname === l.href || pathname.startsWith(`${l.href}/`);
+              const n = l.count && shell.counts ? shell.counts[l.count] : undefined;
+              const live = l.count === "live";
+              return (
+                <Link key={l.href} href={l.href} className={s.link} aria-current={active ? "page" : undefined}>
+                  {l.label}
+                  {n !== undefined && (live ? n > 0 : true) && (
+                    <span className={`${s.n}${live ? ` ${s.live}` : ""}`}>
+                      {live && <span className={`${s.dot} live-pulse`} />}
+                      {live ? `${n} live` : n}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
-
-      {/* External links */}
-      <div className="px-2 pb-1" style={{ borderTop: "1px solid var(--border-subtle)" }}>
-        {collapsed ? (
-          <div className="flex flex-col items-center gap-0.5 py-1.5">
-            {[
-              { href: "https://docs.pandastack.ai", icon: BookOpen, label: "Docs" },
-              { href: "https://discord.gg/GzxpktHpHD", icon: MessageCircle, label: "Discord" },
-              { href: "https://pandastack.ai", icon: Globe, label: "Website" },
-            ].map(({ href, icon: Icon, label }) => (
-              <a
-                key={href}
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={label}
-                className="flex w-full items-center justify-center rounded-md p-2 transition-colors hover:bg-zinc-800"
-                style={{ color: "var(--text-muted)" }}
-              >
-                <Icon size={13} />
-              </a>
-            ))}
-          </div>
-        ) : (
-          <div className="flex items-center justify-between px-1 py-2">
-            <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>Resources</span>
-            <div className="flex items-center gap-0.5">
-              {[
-                { href: "https://docs.pandastack.ai", icon: BookOpen, label: "Docs" },
-                { href: "https://discord.gg/GzxpktHpHD", icon: MessageCircle, label: "Discord" },
-                { href: "https://pandastack.ai", icon: Globe, label: "Website" },
-              ].map(({ href, icon: Icon, label }) => (
-                <a
-                  key={href}
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={label}
-                  className="flex items-center justify-center rounded p-1.5 transition-colors hover:bg-zinc-800"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <Icon size={13} />
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="p-2" style={{ borderTop: "1px solid var(--border-subtle)" }}>
-        {collapsed ? (
-          <button
-            onClick={() => setCollapsed(false)}
-            className="flex w-full items-center justify-center rounded-md p-2 transition-colors hover:bg-zinc-800"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <ChevronRight size={14} />
-          </button>
-        ) : (
-          <div className="flex items-center gap-2 px-2 py-1.5">
-            <div
-              className="flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
-              style={{ background: "var(--bg-overlay)", color: "var(--text-secondary)" }}
-            >
-              A
-            </div>
-            <div className="min-w-0">
-              <div className="truncate text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>Admin</div>
-              <div className="truncate text-[11px]" style={{ color: "var(--text-muted)" }}>default workspace</div>
-            </div>
-            <Settings size={12} className="ml-auto shrink-0" style={{ color: "var(--text-muted)" }} />
-          </div>
-        )}
+      <div className={s.foot}>
+        <div className={s.links}>
+          <a href="https://docs.pandastack.ai" target="_blank" rel="noopener noreferrer">
+            docs
+          </a>
+          <a href="https://discord.gg/GzxpktHpHD" target="_blank" rel="noopener noreferrer">
+            discord
+          </a>
+          <a href="https://pandastack.ai" target="_blank" rel="noopener noreferrer">
+            website
+          </a>
+        </div>
       </div>
     </aside>
   );
 }
 
+function OrgSwitcher() {
+  const router = useRouter();
+  const [orgs, setOrgs] = useState<Org[]>([]);
+  const [currentOrgId, setCurrentOrgId] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const box = useDismiss<HTMLDivElement>(open, setOpen);
+
+  const loadOrgs = async () => {
+    setLoading(true);
+    try {
+      const stored = typeof window !== "undefined" ? window.localStorage.getItem("pandastack_org_id") : null;
+      try {
+        const me = await getMe();
+        setOrgs(me.orgs);
+        const resolvedOrgId = me.current_org_id ?? me.orgs[0]?.id ?? stored ?? null;
+        setCurrentOrgId(resolvedOrgId);
+        // Stamp localStorage so getAuthHeaders sends the correct org for this user.
+        if (resolvedOrgId && typeof window !== "undefined") {
+          const {
+            data: { session },
+          } = await createClient().auth.getSession();
+          if (session?.user?.id) {
+            window.localStorage.setItem("pandastack_org_id", resolvedOrgId);
+            window.localStorage.setItem("pandastack_org_user", session.user.id);
+          }
+        }
+      } catch {
+        const items = await listOrgs();
+        setOrgs(items);
+        setCurrentOrgId(stored ?? items[0]?.id ?? null);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to load organizations");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadOrgs();
+    const handler = () => loadOrgs();
+    window.addEventListener("pandastack-org-changed", handler);
+    return () => window.removeEventListener("pandastack-org-changed", handler);
+    // loadOrgs is recreated every render and only reads state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const current = orgs.find((org) => org.id === currentOrgId) ?? orgs[0];
+
+  const switchOrg = async (org: Org) => {
+    if (org.id === currentOrgId) {
+      setOpen(false);
+      return;
+    }
+    try {
+      await setCurrentOrg(org.id);
+      setCurrentOrgId(org.id);
+      setOpen(false);
+      toast.success(`Switched to ${org.name}`);
+      window.dispatchEvent(new Event("pandastack-org-changed"));
+      router.refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to switch organization");
+    }
+  };
+
+  return (
+    <div className={s.org} ref={box}>
+      <button type="button" className={s.orgBtn} onClick={() => setOpen((v) => !v)} aria-expanded={open} title="Switch organization">
+        <span>{current?.name ?? (loading ? "Loading…" : "No organization")}</span>
+        {current?.role && <span className={s.chip}>{current.role}</span>}
+        <span className={s.caret} aria-hidden="true">
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div className={s.menu}>
+          <div className={s.menuHead}>organizations</div>
+          {orgs.length === 0 ? (
+            <div className={s.menuHead} style={{ borderBottom: 0 }}>
+              none found
+            </div>
+          ) : (
+            orgs.map((org) => (
+              <button key={org.id} type="button" className={s.menuItem} aria-current={org.id === currentOrgId} onClick={() => switchOrg(org)}>
+                <span>{org.name}</span>
+                <small>{org.role}</small>
+              </button>
+            ))
+          )}
+          <div className={s.menuFoot}>
+            <Link href="/settings/orgs" className={s.menuItem} onClick={() => setOpen(false)}>
+              <span>Manage organizations →</span>
+            </Link>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- top bar ---
+
 function TopBar({
-  onSearch,
+  onCommand,
   onShortcuts,
+  onCode,
+  onMenu,
 }: {
-  onSearch: () => void;
+  onCommand: () => void;
   onShortcuts: () => void;
+  onCode?: () => void;
+  onMenu: () => void;
 }) {
   const router = useRouter();
   const [health, setHealth] = useState<"ok" | "down" | "degraded" | "checking">("checking");
   const [degraded, setDegraded] = useState<string[]>([]);
   const [user, setUser] = useState<SupabaseUser | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const meBox = useDismiss<HTMLDivElement>(menuOpen, setMenuOpen);
 
   useEffect(() => {
     let alive = true;
@@ -297,8 +350,8 @@ function TopBar({
       let nextDelay = 30000;
       try {
         // /readyz, not /healthz: healthz only reports "the process is up and
-        // configured" and stays 200 through a full control-plane outage where
-        // every create fails. readyz pings the database and checks for a live
+        // configured" and stayed 200 through a full control-plane outage where
+        // every create failed. readyz pings the database and checks for a live
         // compute node, so this pill tells the truth.
         const h = await fetch(`${API_BASE}/readyz`, { cache: "no-store" });
         if (!alive) return;
@@ -325,7 +378,9 @@ function TopBar({
       if (alive) timer = setTimeout(poll, nextDelay);
     };
     poll();
-    const onVis = () => { if (!document.hidden) poll(); };
+    const onVis = () => {
+      if (!document.hidden) poll();
+    };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       alive = false;
@@ -337,148 +392,83 @@ function TopBar({
   useEffect(() => {
     let alive = true;
     const supabase = createClient();
-
     supabase.auth.getUser().then(({ data }) => {
       if (alive) setUser(data.user);
     });
-
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
     });
-
     return () => {
       alive = false;
       data.subscription.unsubscribe();
     };
   }, []);
 
-  const email = isStubAuth() ? STUB_USER_EMAIL : user?.email ?? "Signed in";
-  const initial = email.slice(0, 1).toUpperCase();
+  const email = isStubAuth() ? STUB_USER_EMAIL : (user?.email ?? "Signed in");
+  const initials = email.slice(0, 2).toUpperCase();
 
   const signOut = async () => {
     await createClient().auth.signOut();
     clearListCache(); // drop cached list rows so a later account never sees them
     setMenuOpen(false);
-    router.push(isStubAuth() ? "/sandboxes" : "/login");
+    router.push(isStubAuth() ? "/now" : "/login");
     router.refresh();
   };
 
+  const healthText =
+    health === "ok"
+      ? "all systems normal"
+      : health === "down"
+        ? "API unreachable"
+        : health === "degraded"
+          ? `degraded${degraded.length ? `: ${degraded.join(", ")}` : ""}`
+          : "checking…";
+
   return (
-    <header
-      className="flex h-14 shrink-0 items-center gap-3 px-4"
-      style={{
-        borderBottom: "1px solid var(--border-subtle)",
-        background: "var(--bg-base)",
-        backdropFilter: "blur(12px)",
-      }}
-    >
-      {/* Search */}
-      <button
-        onClick={onSearch}
-        className="flex flex-1 max-w-[280px] items-center gap-2 rounded-md px-3 py-1.5 text-[13px] transition-colors hover:border-zinc-700"
-        style={{
-          background: "var(--bg-elevated)",
-          border: "1px solid var(--border-default)",
-          color: "var(--text-muted)",
-        }}
-      >
-        <Search size={13} />
-        <span className="flex-1 text-left">Search…</span>
-        <kbd
-          className="ml-auto hidden rounded px-1.5 py-0.5 text-[10px] font-medium sm:block"
-          style={{ background: "var(--bg-overlay)", color: "var(--text-muted)" }}
-        >
-          ⌘K
-        </kbd>
+    <header className={s.top}>
+      <button type="button" className={s.burger} onClick={onMenu} aria-label="Open the menu">
+        <svg width="16" height="12" viewBox="0 0 16 12" fill="none" aria-hidden="true">
+          <path d="M0 1h16M0 6h16M0 11h16" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
       </button>
-
-      <div className="flex-1" />
-
-      <OrgSwitcher />
-
-      {/* Health */}
-      <div className="flex items-center gap-1.5">
-        <span
-          className={`size-2 rounded-full ${health === "ok" ? "" : health === "down" ? "" : "animate-pulse"}`}
-          style={{
-            background:
-              health === "ok" ? "var(--status-running)"
-              : health === "down" ? "var(--status-failed)"
-              : health === "degraded" ? "var(--status-paused)"
-              : "var(--text-muted)",
-          }}
-        />
-        <span className="hidden text-[12px] sm:block" style={{ color: "var(--text-muted)" }}>
-          {health === "ok"
-            ? "API online"
-            : health === "down"
-              ? "API down"
-              : health === "degraded"
-                ? `Degraded${degraded.length ? `: ${degraded.join(", ")}` : ""}`
-                : "checking…"}
+      <button type="button" className={s.cmd} onClick={onCommand} aria-label="Open the command bar">
+        <span className={s.prompt} aria-hidden="true">
+          &gt;
         </span>
+        <span className={s.ghost}>sandbox create --template claude</span>
+        <span className={s.hint}>type what you would type in the CLI, or search by name or id</span>
+        <span className={s.kbd}>⌘K</span>
+      </button>
+      <div className={s.cell} title={healthText}>
+        <span className={`${s.health}${health === "ok" ? "" : ` ${s[health]}`}`} />
+        {healthText}
       </div>
-
-      {/* Theme toggle */}
-      <ThemeToggle />
-
-      {/* Shortcuts hint */}
-      <button
-        onClick={onShortcuts}
-        className="rounded p-1.5 transition-colors hover:bg-zinc-800"
-        title="Keyboard shortcuts (?)"
-        style={{ color: "var(--text-muted)" }}
-      >
-        <Command size={14} />
+      {onCode && (
+        <button type="button" className={s.iconBtn} onClick={onCode} title="This page, as code" aria-label="This page, as code">
+          {"</>"}
+        </button>
+      )}
+      <button type="button" className={s.iconBtn} onClick={onShortcuts} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+        ?
       </button>
-
-      {/* Notifications stub */}
-      <button
-        className="rounded p-1.5 transition-colors hover:bg-zinc-800"
-        style={{ color: "var(--text-muted)" }}
-      >
-        <Bell size={14} />
-      </button>
-
-      {/* User menu */}
-      <div className="relative">
-        <button
-          onClick={() => setMenuOpen((v) => !v)}
-          className="flex items-center gap-2 rounded-full py-1 pl-1 pr-2 text-[12px] transition-colors hover:bg-zinc-800"
-          style={{ color: "var(--text-secondary)" }}
-        >
-          <span
-            className="flex size-7 items-center justify-center rounded-full text-[12px] font-semibold"
-            style={{ background: "var(--bg-overlay)", color: "var(--text-secondary)" }}
-          >
-            {initial || <User size={14} />}
-          </span>
-          <span className="hidden max-w-[180px] truncate sm:block">{email}</span>
+      <div className={s.me} ref={meBox}>
+        <button type="button" className={s.meBtn} onClick={() => setMenuOpen((v) => !v)} aria-expanded={menuOpen} aria-label="Account menu">
+          <span className={s.avatar}>{initials}</span>
         </button>
         {menuOpen && (
-          <div
-            className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-lg shadow-2xl"
-            style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)" }}
-          >
-            <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-              <div className="truncate text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>{email}</div>
-              <div className="truncate text-[11px]" style={{ color: "var(--text-muted)" }}>{isStubAuth() ? "Local stub workspace" : "Supabase workspace"}</div>
-            </div>
-            <Link
-              href="/settings/tokens"
-              onClick={() => setMenuOpen(false)}
-              className="block w-full px-3 py-2 text-left text-[13px] transition-colors hover:bg-zinc-800"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              Settings
+          <div className={`${s.menu} ${s.right}`}>
+            <div className={s.menuHead}>{email}</div>
+            <Link href="/settings/tokens" className={s.menuItem} onClick={() => setMenuOpen(false)}>
+              <span>API keys</span>
             </Link>
-            <button
-              onClick={signOut}
-              className="w-full px-3 py-2 text-left text-[13px] transition-colors hover:bg-zinc-800"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              Sign out
-            </button>
+            <Link href="/settings/orgs" className={s.menuItem} onClick={() => setMenuOpen(false)}>
+              <span>Organizations</span>
+            </Link>
+            <div className={s.menuFoot}>
+              <button type="button" className={s.menuItem} onClick={signOut}>
+                <span>Sign out</span>
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -486,214 +476,33 @@ function TopBar({
   );
 }
 
-
-function OrgSwitcher() {
-  const router = useRouter();
-  const [orgs, setOrgs] = useState<Org[]>([]);
-  const [currentOrgId, setCurrentOrgId] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-
-  const loadOrgs = async () => {
-    setLoading(true);
-    try {
-      const stored = typeof window !== "undefined" ? window.localStorage.getItem("pandastack_org_id") : null;
-      try {
-        const me = await getMe();
-        setOrgs(me.orgs);
-        const resolvedOrgId = me.current_org_id ?? me.orgs[0]?.id ?? stored ?? null;
-        setCurrentOrgId(resolvedOrgId);
-        // Stamp localStorage so getAuthHeaders sends the correct org for this user.
-        if (resolvedOrgId && typeof window !== "undefined") {
-          const { data: { session } } = await createClient().auth.getSession();
-          if (session?.user?.id) {
-            window.localStorage.setItem("pandastack_org_id", resolvedOrgId);
-            window.localStorage.setItem("pandastack_org_user", session.user.id);
-          }
-        }
-      } catch {
-        const items = await listOrgs();
-        setOrgs(items);
-        setCurrentOrgId(stored ?? items[0]?.id ?? null);
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to load organizations");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadOrgs();
-    const handler = () => loadOrgs();
-    window.addEventListener("pandastack-org-changed", handler);
-    return () => window.removeEventListener("pandastack-org-changed", handler);
-  }, []);
-
-  const current = orgs.find((org) => org.id === currentOrgId) ?? orgs[0];
-
-  const switchOrg = async (org: Org) => {
-    if (org.id === currentOrgId) {
-      setOpen(false);
-      return;
-    }
-    try {
-      await setCurrentOrg(org.id);
-      setCurrentOrgId(org.id);
-      setOpen(false);
-      toast.success(`Switched to ${org.name}`);
-      window.dispatchEvent(new Event("pandastack-org-changed"));
-      router.refresh();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to switch organization");
-    }
-  };
-
+function ShortcutsSheet({ onClose }: { onClose: () => void }) {
   return (
-    <div className="relative hidden sm:block">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex max-w-[220px] items-center gap-2 rounded-md px-3 py-1.5 text-[12px] transition-colors hover:bg-zinc-800"
-        style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-secondary)" }}
-        title="Switch organization"
-      >
-        <Building2 size={13} className="shrink-0" />
-        <span className="truncate">{current?.name ?? (loading ? "Loading…" : "No organization")}</span>
-        <ChevronDown size={12} className="shrink-0" />
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-lg shadow-2xl"
-          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)" }}
-        >
-          <div className="px-3 py-2 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)" }}>
-            Organizations
-          </div>
-          <div className="max-h-64 overflow-y-auto p-1">
-            {orgs.length === 0 ? (
-              <div className="px-3 py-2 text-[12px]" style={{ color: "var(--text-muted)" }}>No organizations found</div>
-            ) : orgs.map((org) => (
-              <button
-                key={org.id}
-                onClick={() => switchOrg(org)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[13px] transition-colors hover:bg-zinc-800"
-                style={{ color: org.id === currentOrgId ? "var(--brand)" : "var(--text-secondary)" }}
-              >
-                <span className="min-w-0 flex-1 truncate">{org.name}</span>
-                <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>{org.role}</span>
-              </button>
-            ))}
-          </div>
-          <Link
-            href="/settings/orgs"
-            onClick={() => setOpen(false)}
-            className="block px-3 py-2 text-[13px] transition-colors hover:bg-zinc-800"
-            style={{ color: "var(--text-primary)", borderTop: "1px solid var(--border-subtle)" }}
-          >
-            Manage organizations →
-          </Link>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SearchModal({ onClose }: { onClose: () => void }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const router = useRouter();
-
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
-  const actions = [
-    { label: "Go to Sandboxes", shortcut: "G S", href: "/sandboxes" },
-    { label: "Go to Databases", shortcut: "", href: "/databases" },
-    { label: "Go to Templates", shortcut: "G T", href: "/templates" },
-    { label: "Go to Volumes", shortcut: "", href: "/volumes" },
-    { label: "Go to Performance", shortcut: "", href: "/stats" },
-    { label: "Go to API Tokens", shortcut: "", href: "/settings/tokens" },
-    { label: "Go to Team", shortcut: "", href: "/settings/team" },
-    { label: "Go to Organizations", shortcut: "", href: "/settings/orgs" },
-  ];
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh]" onClick={onClose}>
-      <div
-        className="w-full max-w-lg rounded-xl shadow-2xl"
-        style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-3 px-4 py-3" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-          <Search size={16} style={{ color: "var(--text-muted)" }} />
-          <input
-            ref={inputRef}
-            placeholder="Search pages, sandboxes…"
-            className="flex-1 bg-transparent text-[14px] outline-none"
-            style={{ color: "var(--text-primary)" }}
-          />
-          <button onClick={onClose}>
-            <X size={14} style={{ color: "var(--text-muted)" }} />
+    <div className={s.veil} onClick={onClose}>
+      <div className={s.sheet} role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}>
+        <div className={s.sheetHead}>
+          <span>keyboard shortcuts</span>
+          <button type="button" onClick={onClose}>
+            close
           </button>
         </div>
-        <div className="p-2">
-          <div className="px-3 py-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-            Navigate
-          </div>
-          {actions.map((a) => (
-            <button
-              key={a.href}
-              onClick={() => { router.push(a.href); onClose(); }}
-              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-[13px] transition-colors hover:bg-zinc-800"
-              style={{ color: "var(--text-primary)" }}
-            >
-              <span className="flex-1 text-left">{a.label}</span>
-              {a.shortcut && (
-                <kbd className="rounded px-1.5 py-0.5 text-[10px]" style={{ background: "var(--bg-overlay)", color: "var(--text-muted)" }}>
-                  {a.shortcut}
-                </kbd>
-              )}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ShortcutsModal({ onClose }: { onClose: () => void }) {
-  const shortcuts = [
-    { keys: ["G", "S"], label: "Go to Sandboxes" },
-    { keys: ["G", "T"], label: "Go to Templates" },
-    { keys: ["⌘", "K"], label: "Open search" },
-    { keys: ["?"], label: "Toggle shortcuts" },
-    { keys: ["Esc"], label: "Close modals" },
-  ];
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div
-        className="w-full max-w-sm rounded-xl shadow-2xl"
-        style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-          <div className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>Keyboard Shortcuts</div>
-          <button onClick={onClose}><X size={14} style={{ color: "var(--text-muted)" }} /></button>
-        </div>
-        <div className="p-4 space-y-2">
-          {shortcuts.map((s, i) => (
-            <div key={i} className="flex items-center justify-between">
-              <span className="text-[13px]" style={{ color: "var(--text-secondary)" }}>{s.label}</span>
-              <div className="flex items-center gap-1">
-                {s.keys.map((k, j) => (
-                  <kbd
-                    key={j}
-                    className="rounded px-2 py-0.5 text-[12px] font-medium"
-                    style={{ background: "var(--bg-overlay)", color: "var(--text-primary)", border: "1px solid var(--border-default)" }}
-                  >
-                    {k}
-                  </kbd>
+        <div className={s.sheetBody}>
+          {SHORTCUTS.map((k, i) => (
+            <div key={i} className={s.keyRow}>
+              <span>{k.label}</span>
+              <span>
+                {k.keys.map((key) => (
+                  <kbd key={key}>{key}</kbd>
                 ))}
-              </div>
+                {k.or && (
+                  <>
+                    <em>or</em>
+                    {k.or.map((key) => (
+                      <kbd key={key}>{key}</kbd>
+                    ))}
+                  </>
+                )}
+              </span>
             </div>
           ))}
         </div>

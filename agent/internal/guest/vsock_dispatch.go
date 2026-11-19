@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/pandastack/agent/internal/guest/vsockwire"
 )
@@ -25,9 +26,17 @@ import (
 // for command-level bounding.
 const opDeadline = 0 // 0 => no host-side frame deadline (rely on ctx + Exec timeout)
 
+// vsockTimeoutSlack is how long past a command's own timeout the host waits
+// for the daemon's answer before it stops listening. The daemon needs a few
+// seconds of it to SIGTERM, then SIGKILL, the command.
+var vsockTimeoutSlack = 10 * time.Second
+
+// Exec runs cmd to completion with no limit on its run time. Over SSH the
+// context is used to reach the guest only: once the command has started,
+// cancelling ctx does not stop it. Use ExecTimeout to bound a command.
 func (c *Client) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
 	if c.vsockEnabled() {
-		res, err := c.execVsock(ctx, cmd)
+		res, err := c.execVsock(ctx, cmd, 0)
 		if err == nil {
 			return res, nil
 		}
@@ -39,10 +48,26 @@ func (c *Client) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
 	return c.execSSH(ctx, cmd)
 }
 
-func (c *Client) execVsock(ctx context.Context, cmd string) (*ExecResult, error) {
-	respOp, payload, err := c.vsockRoundTrip(ctx, vsockwire.OpExec,
-		vsockwire.ExecRequest{Cmd: cmd}, opDeadline)
+// execVsock runs cmd through the in-guest daemon. With a timeout the daemon
+// stops the command itself (ExecRequest.TimeoutMS) and says so; the result
+// then carries the output so far and the error is ErrExecTimeout.
+func (c *Client) execVsock(ctx context.Context, cmd string, timeout time.Duration) (*ExecResult, error) {
+	req := vsockwire.ExecRequest{Cmd: cmd}
+	deadline := time.Duration(opDeadline)
+	if timeout > 0 {
+		req.TimeoutMS = max(1, int(timeout/time.Millisecond))
+		deadline = timeout + vsockTimeoutSlack
+	}
+	started := time.Now()
+	respOp, payload, err := c.vsockRoundTrip(ctx, vsockwire.OpExec, req, deadline)
 	if err != nil {
+		// A transport error normally means "use SSH instead". Once the
+		// timeout has passed the request did reach the daemon and the
+		// command did run, so running it again over SSH would be wrong:
+		// this is a timeout whose stop was never confirmed.
+		if timeout > 0 && time.Since(started) >= timeout {
+			return nil, errors.Join(ErrExecTimeout, ErrStillRunning)
+		}
 		return nil, err
 	}
 	if respOp == vsockwire.OpError {
@@ -55,7 +80,14 @@ func (c *Client) execVsock(ctx context.Context, cmd string) (*ExecResult, error)
 	if resp.Err != "" {
 		return nil, errors.New(resp.Err)
 	}
-	return &ExecResult{Stdout: resp.Stdout, Stderr: resp.Stderr, ExitCode: resp.ExitCode}, nil
+	res := &ExecResult{Stdout: resp.Stdout, Stderr: resp.Stderr, ExitCode: resp.ExitCode}
+	// A daemon baked before TimedOut existed kills the command at the
+	// timeout and reports only the signal exit (-1).
+	oldDaemonTimeout := timeout > 0 && resp.ExitCode == -1 && time.Since(started) >= timeout
+	if resp.TimedOut || oldDaemonTimeout {
+		return res, ErrExecTimeout
+	}
+	return res, nil
 }
 
 func (c *Client) ReadFile(ctx context.Context, p string) ([]byte, error) {
