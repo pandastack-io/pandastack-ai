@@ -2,10 +2,9 @@
 package api
 
 import (
-	"strconv"
-	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/pandastack/agent/internal/sandbox"
@@ -107,25 +106,25 @@ func summarize(m map[string][]int64) map[string]bucket {
 	return out
 }
 
+// stats summarises boot times. Percentiles use the nearest-rank method: the
+// p-th percentile is the smallest sample with at least p% of the samples at
+// or below it (rank = ceil(p/100 × n), in integers so no float rounding can
+// move a rank). For an even count that makes p50 the lower of the two middle
+// samples.
 func stats(v []int64) bucket {
 	if len(v) == 0 {
 		return bucket{}
 	}
 	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
-	// Nearest-rank percentile: the smallest value at or below which at least
-	// p of the samples fall, i.e. the ceil(p*N)'th (1-based) element. The
-	// earlier form rounded over len(v)-1, which shifted P50 up by one rank —
-	// the median of 10 evenly spaced boot times read as the 6th sample instead
-	// of the 5th, over-reporting typical cold-start latency.
-	pick := func(p float64) int64 {
-		idx := int(math.Ceil(p*float64(len(v)))) - 1
-		if idx < 0 {
-			idx = 0
+	pick := func(pct int) int64 {
+		rank := (pct*len(v) + 99) / 100
+		if rank < 1 {
+			rank = 1
 		}
-		if idx >= len(v) {
-			idx = len(v) - 1
+		if rank > len(v) {
+			rank = len(v)
 		}
-		return v[idx]
+		return v[rank-1]
 	}
 	var sum int64
 	for _, x := range v {
@@ -136,9 +135,9 @@ func stats(v []int64) bucket {
 		Min:   v[0],
 		Max:   v[len(v)-1],
 		Mean:  sum / int64(len(v)),
-		P50:   pick(0.50),
-		P90:   pick(0.90),
-		P99:   pick(0.99),
+		P50:   pick(50),
+		P90:   pick(90),
+		P99:   pick(99),
 	}
 }
 

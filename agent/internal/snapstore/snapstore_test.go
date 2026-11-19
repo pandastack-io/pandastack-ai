@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -114,19 +115,75 @@ func TestDownloadLock_Serializes(t *testing.T) {
 	}
 }
 
-// Download against an empty store with both vm.mem and vm.state already
-// present locally must return nil immediately without touching gsutil.
-// This is the same-agent fork fast path (no GCS round-trip).
+// recordingGsutil puts a `gsutil` on PATH that only records that it was run
+// and fails, and returns a function that reports how often it was. No test in
+// this package may reach the real tool: it would talk to a real bucket with
+// whatever credentials the machine has.
+func recordingGsutil(t *testing.T) (calls func() int) {
+	t.Helper()
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls")
+	stub := "#!/bin/sh\necho \"$*\" >> " + log + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "gsutil"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() int {
+		b, err := os.ReadFile(log)
+		if err != nil {
+			return 0
+		}
+		return strings.Count(string(b), "\n")
+	}
+}
+
+// Download of a snapshot that is already complete locally (vm.mem, vm.state
+// and meta.json) must return nil without touching gsutil. This is the
+// same-agent fork fast path: no GCS round-trip.
+//
+// The test used to write only vm.mem and vm.state. Since the fast path also
+// asks for meta.json, that took the repair path instead and ran the machine's
+// real gsutil four times against a bucket named after this test, while the
+// comment above still said "without touching gsutil".
 func TestDownload_LocalShortCircuit(t *testing.T) {
+	calls := recordingGsutil(t)
 	s := &Store{Bucket: "irrelevant-because-files-exist"}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "vm.mem"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "vm.state"), []byte("y"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, body := range map[string]string{"vm.mem": "x", "vm.state": "y", "meta.json": "{}"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := s.Download(context.Background(), "any-id", dir); err != nil {
-		t.Fatalf("Download with both files present should be nil, got: %v", err)
+		t.Fatalf("Download of a locally complete snapshot should be nil, got: %v", err)
+	}
+	if n := calls(); n != 0 {
+		t.Fatalf("the local fast path ran gsutil %d time(s)", n)
+	}
+}
+
+// Without meta.json the snapshot is not known to be complete, so Download
+// goes to the store for the optional pieces: that is the repair path, and it
+// does run gsutil. vm.mem and vm.state are local, so they are not fetched
+// again.
+func TestDownload_WithoutMetaAsksTheStore(t *testing.T) {
+	calls := recordingGsutil(t)
+	s := &Store{Bucket: "irrelevant-because-files-exist"}
+	dir := t.TempDir()
+	for name, body := range map[string]string{"vm.mem": "x", "vm.state": "y"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Download(context.Background(), "any-id", dir); err != nil {
+		t.Fatalf("a legacy snapshot without meta or disk should still restore, got: %v", err)
+	}
+	if n := calls(); n == 0 {
+		t.Fatal("the repair path did not ask the store for the optional pieces")
+	}
+	for _, name := range []string{"vm.mem", "vm.state"} {
+		if b, _ := os.ReadFile(filepath.Join(dir, name)); len(b) != 1 {
+			t.Errorf("%s was replaced: %q", name, b)
+		}
 	}
 }

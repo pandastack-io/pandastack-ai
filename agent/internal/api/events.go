@@ -2,12 +2,11 @@
 package api
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/pandastack/agent/internal/sandbox"
+	"github.com/pandastack/agent/internal/sse"
 )
 
 func registerEvents(mux *http.ServeMux, mgr *sandbox.Manager) {
@@ -32,19 +31,16 @@ func registerEvents(mux *http.ServeMux, mgr *sandbox.Manager) {
 			writeJSON(w, 200, map[string]any{"events": past})
 			return
 		}
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			writeErr(w, 500, errString("streaming unsupported"))
+		// sse.Stream: headers at once, a keep-alive comment while no event
+		// arrives (a follow that is idle for ~100 s is otherwise dropped by
+		// the proxies in front), and a writer the ticker can share.
+		stream, err := sse.Start(w)
+		if err != nil {
+			writeErr(w, 500, err)
 			return
 		}
-		w.Header().Set("content-type", "text/event-stream")
-		w.Header().Set("cache-control", "no-cache")
-		w.WriteHeader(200)
-		send := func(typ string, payload any) {
-			b, _ := json.Marshal(payload)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", typ, b)
-			flusher.Flush()
-		}
+		defer stream.Close()
+		send := func(typ string, payload any) { _ = stream.Event(typ, payload) }
 		for _, ev := range past {
 			send("event", ev)
 		}

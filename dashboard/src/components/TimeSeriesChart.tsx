@@ -10,7 +10,6 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { useTheme } from "next-themes";
 
 export type Series = {
   name: string;
@@ -44,27 +43,12 @@ export { CHART_PALETTE, type Series as ThemeSeries } from "./chart-theme";
 
 /*
  * Recharts sets stroke/fill as SVG presentation attributes, which (per SVG2)
- * do not accept var() — so the chart chrome and line colors are resolved in
- * JS from the active theme instead of CSS custom properties.
+ * do not accept var() — so the chart chrome is given as hex here. The values
+ * are the app's ramp (globals.css): smoke text, hairline grid, strong hairline.
  */
 const CHROME = {
-  dark:  { text: "#a1a1aa", grid: "#27272a", border: "#3f3f46" },
-  light: { text: "#74747e", grid: "#e7e6e0", border: "#d8d7d0" },
+  dark: { text: "#94949d", grid: "#25252a", border: "#414249" },
 };
-
-/** Dark-palette → light-readable line color (consumers pass CHART_PALETTE hexes). */
-const LIGHT_LINE: Record<string, string> = {
-  "#a78bfa": "#7c3aed",
-  "#34d399": "#059669",
-  "#fbbf24": "#d97706",
-  "#60a5fa": "#2563eb",
-  "#f87171": "#dc2626",
-  "#22d3ee": "#0891b2",
-};
-
-function lineColor(c: string, light: boolean): string {
-  return light ? LIGHT_LINE[c] ?? c : c;
-}
 
 // UTC bucket-string regex: "YYYY-MM-DD HH:MM:SS[.fff]" — the exact shape the
 // analytics store's toStartOfInterval hands back (no TZ marker). See toMs.
@@ -213,9 +197,8 @@ export default function TimeSeriesChart({
   toMs: toMsProp,
   stepMs,
 }: Props) {
-  const { resolvedTheme } = useTheme();
-  const light = resolvedTheme !== "dark";
-  const chrome = light ? CHROME.light : CHROME.dark;
+  // The app is dark only (components/theme.tsx pins it).
+  const chrome = CHROME.dark;
 
   const range: Range | undefined =
     fromMs != null && toMsProp != null && stepMs != null
@@ -276,7 +259,7 @@ export default function TimeSeriesChart({
                 key={s.name}
                 type="monotone"
                 dataKey={s.name}
-                stroke={lineColor(s.color || PALETTE[i % PALETTE.length], light)}
+                stroke={s.color || PALETTE[i % PALETTE.length]}
                 strokeWidth={2}
                 dot={false}
                 activeDot={{ r: 4 }}

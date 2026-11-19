@@ -604,7 +604,7 @@ func (t *templatesAPI) setupBuildSchema(ctx context.Context) error {
 func (t *templatesAPI) buildStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !strings.HasPrefix(id, "tb_") {
-		t.passthrough(w, r)
+		t.agentBuildStatusForOwner(w, r)
 		return
 	}
 	ws := tplWorkspace(r)
@@ -627,7 +627,7 @@ func (t *templatesAPI) buildStatus(w http.ResponseWriter, r *http.Request) {
 func (t *templatesAPI) buildLogsSSE(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !strings.HasPrefix(id, "tb_") {
-		t.passthrough(w, r)
+		t.agentBuildLogsForOwner(w, r)
 		return
 	}
 	ws := tplWorkspace(r)
@@ -741,3 +741,108 @@ func (t *templatesAPI) deleteOnAllAgents(ctx context.Context, ws, name string, s
 }
 
 var _ = sql.ErrNoRows
+
+// templateNameTaken reports whether name belongs to a first-party template or
+// to a workspace other than ws, or is being built right now by another
+// workspace (a build row that is not finished and was touched in the last 30
+// minutes; every log line touches it, so a live build stays fresh and a
+// crashed one stops holding the name).
+func (t *templatesAPI) templateNameTaken(ctx context.Context, name, ws string) (bool, error) {
+	if t.db == nil {
+		return false, nil
+	}
+	var taken bool
+	err := t.db.QueryRowContext(ctx, templateNameTakenQuery, name, ws).Scan(&taken)
+	return taken, err
+}
+
+const templateNameTakenQuery = `
+SELECT EXISTS (SELECT 1 FROM templates WHERE name = $1 AND (is_global OR workspace <> $2))
+    OR EXISTS (SELECT 1 FROM template_builds
+                WHERE name = $1 AND workspace <> $2
+                  AND status NOT IN ('done','failed')
+                  AND updated_at > now() - interval '30 minutes')`
+
+// ownsAgentBuild reports whether ws owns an agent build record. The agent
+// keeps every workspace's builds in one map and stamps each with the
+// workspace that started it. A record without an owner belongs to nobody a
+// tenant could be (a first-party bake). A request with no workspace owns
+// nothing, except under stub auth (local dev), where there are no workspaces
+// at all: the auth layer always sets one otherwise, and if that ever failed
+// the answer must be "nothing", not "everything".
+func ownsAgentBuild(record map[string]any, ws string) bool {
+	if ws == "" {
+		return authMode() == "stub"
+	}
+	owner, _ := record["owner_workspace"].(string)
+	return owner != "" && owner == ws
+}
+
+// agentBuildRecord fetches one agent build record through the director and
+// returns it only if ws owns it. Any other outcome (no such build, another
+// workspace's build, an agent error) is "not found": a caller must not be able
+// to tell another workspace's build id from a random one.
+func (t *templatesAPI) agentBuildRecord(r *http.Request, id, ws string) (map[string]any, bool) {
+	resp, err := t.agentCall(r, http.MethodGet, "/v1/templates/builds/"+id, ws, nil)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var record map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&record); err != nil || record == nil {
+		return nil, false
+	}
+	if !ownsAgentBuild(record, ws) {
+		return nil, false
+	}
+	return record, true
+}
+
+// agentBuildStatusForOwner serves an agent build's status to its owner.
+func (t *templatesAPI) agentBuildStatusForOwner(w http.ResponseWriter, r *http.Request) {
+	record, ok := t.agentBuildRecord(r, r.PathValue("id"), tplWorkspace(r))
+	if !ok {
+		writeErrOrg(w, http.StatusNotFound, "build not found")
+		return
+	}
+	writeJSONOrg(w, http.StatusOK, record)
+}
+
+// agentBuildLogsForOwner relays an agent build's log stream to its owner.
+func (t *templatesAPI) agentBuildLogsForOwner(w http.ResponseWriter, r *http.Request) {
+	if _, ok := t.agentBuildRecord(r, r.PathValue("id"), tplWorkspace(r)); !ok {
+		writeErrOrg(w, http.StatusNotFound, "build not found")
+		return
+	}
+	t.v1.ServeHTTP(w, r)
+}
+
+// listBuilds serves the caller's own builds. The agent returns every
+// workspace's builds, so the filter is here.
+func (t *templatesAPI) listBuilds(w http.ResponseWriter, r *http.Request) {
+	ws := tplWorkspace(r)
+	rec := httptest.NewRecorder()
+	t.v1.ServeHTTP(rec, r)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		writeErrOrg(w, http.StatusBadGateway, "could not list builds")
+		return
+	}
+	var records []map[string]any
+	if err := json.NewDecoder(io.LimitReader(res.Body, 16<<20)).Decode(&records); err != nil {
+		t.log.Warn("templates: unexpected build list from agent", "err", err)
+		writeJSONOrg(w, http.StatusOK, []map[string]any{})
+		return
+	}
+	out := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		if ownsAgentBuild(record, ws) {
+			out = append(out, record)
+		}
+	}
+	writeJSONOrg(w, http.StatusOK, out)
+}

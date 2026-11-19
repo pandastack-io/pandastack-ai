@@ -30,6 +30,38 @@ sudo FORCE=1 scripts/bake-templates.sh postgres-16 code-interpreter   # or a sub
 `rootfs.ext4`. Baking also purges `template-snaps/<name>/`, so the agent
 re-bakes the snapshot on the next sandbox create.
 
+### ⚠️ Custom images must bring their own init and sshd
+
+A custom template image that has no `/sbin/init` or no `/usr/sbin/sshd` is now
+**refused** at build time. Until now the agent fixed such an image up by
+`chroot`-ing into its filesystem on the host and running the image's own `apt`
+there as root, with the host's `/dev`, `/proc` and `/sys` bound in: whoever
+built the image could run code as root on the agent. Add one line to your
+Dockerfile:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends systemd-sysv openssh-server
+```
+
+If you are the only person who builds templates on your deployment, the old
+behaviour is still available with `PANDASTACK_TEMPLATE_HOST_INSTALL=1` in the
+agent's environment. Do not set it on a host that bakes images from people you
+would not give a root shell.
+
+### Security
+
+- Every guest disk the agent mounts on the host to prepare it is mounted
+  `nosuid,nodev,noexec`, and every write into one (the agent's
+  `authorized_keys`, the sshd drop-in, `resolv.conf`) goes through
+  `internal/guestfs`, which refuses a path that leaves the image through a
+  symbolic link. An image with `root/.ssh -> /root/.ssh` used to send the
+  agent's key into the **host's** `authorized_keys`.
+- `GET /v1/templates/builds`, `GET /v1/templates/builds/{id}` and its log
+  stream now answer only for the caller's own workspace. The agent keeps every
+  workspace's builds in one list, and the API used to pass it through whole.
+- A template build under a name that a first-party template or another
+  workspace already holds is refused by the API before an agent does any work.
+
 ### Changed
 
 - **`DefaultTemplateCPU` is now `8`** (was `1`). This applies to custom and dev
@@ -45,6 +77,19 @@ re-bakes the snapshot on the next sandbox create.
   full session semantics). A pooled PgBouncer URL is not part of this edition.
 
 ### Added
+
+- **Coding agents by name**: `claude`, `codex`, `opencode`, `gemini`, `grok`,
+  `amp` and `copilot` are accepted as template names and start the `agent`
+  image. They are aliases resolved in the API (no second rootfs, no second
+  snapshot); the name asked for is kept on the sandbox as
+  `metadata.template_alias`, and the catalog lists each with `alias_of`.
+- Dashboard: a **Now** page (the new home) that draws every sandbox and
+  database as a line on one clock, a **command bar** (`⌘K` or `/`) that takes
+  the CLI's own words, a shell in a sandbox from the page, and "this screen, as
+  code". The dashboard is dark only; the light theme is gone.
+- `exec/stream`, `logs?follow=1` and `events?follow=1` send a `: keep-alive`
+  comment every 15 s (`PANDASTACK_SSE_KEEPALIVE_SEC`), so a proxy in front does
+  not drop a quiet stream.
 
 - Demand-paged **rootfs streaming** over an in-kernel NBD device, gated behind
   `PANDASTACK_STREAM_DISK=1`, with per-host egress guards
@@ -74,6 +119,21 @@ re-bakes the snapshot on the next sandbox create.
   template.
 
 ### Fixed
+
+- `exec/stream` could corrupt its response when a command wrote to stdout and
+  stderr at the same time: the two pumps wrote to one connection without a
+  lock. All SSE streams now share one writer (`internal/sse`).
+- `timeout_seconds` on exec now really stops the command in the guest (TERM,
+  then KILL 2 s later) and reports `timed_out: true`. The old path sent an SSH
+  signal request, which sshd ignores for a root login.
+- Output that ends in the middle of a multi-byte character is no longer split
+  across two stream events.
+- Boot-time percentiles use nearest rank computed in integers, so `p50` of an
+  even number of samples is the lower middle one.
+- The confirm dialog in the dashboard could be answered by the same Enter key
+  press that opened it.
+- Several agent tests depended on the machine they ran on (a database written
+  next to the sources, a real `gcloud` on `PATH`).
 
 - The README no longer advertises app hosting or serverless functions, and the
   repository-layout and template tables match what ships.

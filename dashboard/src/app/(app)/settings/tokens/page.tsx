@@ -253,7 +253,7 @@ pandastack sandbox exec <id> "echo hello"`,
             </div>
           </div>
           {exampleTab === "cli" && (
-            <span className="rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: "rgba(22,163,74,0.1)", color: "var(--status-running)", border: "1px solid rgba(22,163,74,0.25)" }}>
+            <span className="rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: "var(--bg-elevated)", color: "var(--text-primary)", border: "1px solid var(--border-strong)" }}>
               available
             </span>
           )}

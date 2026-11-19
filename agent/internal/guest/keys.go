@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pandastack/agent/internal/guestfs"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -110,7 +111,7 @@ func (k *KeyStore) InjectInto(rootfsPath string) error {
 	}
 	defer os.RemoveAll(mnt)
 
-	if out, err := exec.Command("mount", "-o", "loop", rootfsPath, mnt).CombinedOutput(); err != nil {
+	if out, err := exec.Command("mount", "-o", guestfs.MountOptions, rootfsPath, mnt).CombinedOutput(); err != nil {
 		return fmt.Errorf("mount rootfs: %v: %s", err, string(out))
 	}
 	// Safety-net unmount for the error paths below; the success path unmounts
@@ -123,28 +124,7 @@ func (k *KeyStore) InjectInto(rootfsPath string) error {
 		}
 	}()
 
-	sshDir := filepath.Join(mnt, "root", ".ssh")
-	if err := os.MkdirAll(sshDir, 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(sshDir, "authorized_keys"), k.publicKey, 0o600); err != nil {
-		return err
-	}
-
-	// Make sshd permit root pubkey login. The Firecracker CI rootfs ships
-	// with a stock sshd_config; we just append overrides.
-	confDir := filepath.Join(mnt, "etc", "ssh", "sshd_config.d")
-	if err := os.MkdirAll(confDir, 0o755); err != nil {
-		return err
-	}
-	override := "PermitRootLogin prohibit-password\nPubkeyAuthentication yes\nPasswordAuthentication no\n"
-	if err := os.WriteFile(filepath.Join(confDir, "10-pandastack.conf"), []byte(override), 0o644); err != nil {
-		return err
-	}
-
-	// Drop a marker so we can detect "this rootfs already has my key baked
-	// in" without re-mounting on every sandbox create.
-	if err := os.WriteFile(filepath.Join(mnt, "etc", "pandastack-key.fp"), k.fingerprint(), 0o644); err != nil {
+	if err := k.writeGuestAccess(mnt); err != nil {
 		return err
 	}
 
@@ -155,6 +135,36 @@ func (k *KeyStore) InjectInto(rootfsPath string) error {
 		return fmt.Errorf("umount rootfs: %v: %s", err, string(out))
 	}
 	return nil
+}
+
+// sshdOverride makes sshd permit root pubkey login. The Firecracker CI rootfs
+// ships with a stock sshd_config; this is a drop-in next to it.
+const sshdOverride = "PermitRootLogin prohibit-password\nPubkeyAuthentication yes\nPasswordAuthentication no\n"
+
+// writeGuestAccess writes the three files that give the agent SSH access to a
+// guest into the guest tree mounted at mnt: the agent's public key, the sshd
+// drop-in, and a marker with the key's fingerprint (so "this rootfs already
+// has my key" can be told without re-mounting on every sandbox create).
+//
+// The tree is someone else's: it is built from a template author's image.
+// Every write goes through guestfs, which refuses a path that leaves the tree
+// through a symbolic link, so an image with `root/.ssh -> /root/.ssh` gets an
+// error here and not the host's authorized_keys.
+func (k *KeyStore) writeGuestAccess(mnt string) error {
+	tree, err := guestfs.Open(mnt)
+	if err != nil {
+		return err
+	}
+	// Closed before the caller unmounts: an open handle keeps the mount busy.
+	defer tree.Close()
+
+	if err := tree.WriteFile("root/.ssh/authorized_keys", k.publicKey, 0o700, 0o600); err != nil {
+		return err
+	}
+	if err := tree.WriteFile("etc/ssh/sshd_config.d/10-pandastack.conf", []byte(sshdOverride), 0o755, 0o644); err != nil {
+		return err
+	}
+	return tree.WriteFile("etc/pandastack-key.fp", k.fingerprint(), 0o755, 0o644)
 }
 
 // fingerprint returns a short hash that uniquely identifies the agent's

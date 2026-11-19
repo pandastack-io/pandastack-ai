@@ -13,7 +13,7 @@ import {
   type Port,
   type Sandbox,
 } from "@/lib/api";
-import { useConfirm } from "@/components/ui";
+import { StatusPill, useConfirm } from "@/components/ui";
 import { formatResources } from "@/lib/resources";
 import { createClient } from "@/lib/supabase/client";
 
@@ -99,20 +99,20 @@ export default function Detail({
                 <ActionBtn label="pause" busy={busy} onClick={() => act("pause", () => api.pause(id))} />
                 <ActionBtn label="snapshot" busy={busy} onClick={() => act("snapshot", () => api.snapshot(id))} />
                 <ActionBtn label="fork ×2" busy={busy} onClick={() => act("fork", () => api.fork(id, 2))} />
-                <ActionBtn label="Stop" busy={busy} onClick={async () => { const ok = await confirm({ title: "Stop this sandbox?", description: "The running VM will be stopped. Unsaved in-memory state is lost.", confirmLabel: "Stop", destructive: true }); if (ok) act("stop", () => api.stop(id)); }} />
+                <ActionBtn label="stop" busy={busy} onClick={async () => { const ok = await confirm({ title: "Stop this sandbox?", description: "The running VM will be stopped. Unsaved in-memory state is lost.", confirmLabel: "Stop", destructive: true }); if (ok) act("stop", () => api.stop(id)); }} />
               </>
             )}
             {s.status === "paused" && (
               <ActionBtn label="resume" busy={busy} onClick={() => act("resume", () => api.resume(id))} />
             )}
             {s.status === "hibernated" && (
-              <ActionBtn label="Start" busy={busy} accent="emerald" onClick={() => act("start", () => api.start(id))} />
+              <ActionBtn label="start" busy={busy} accent="emerald" onClick={() => act("start", () => api.start(id))} />
             )}
           </div>
         )}
       </div>
       {notice && (
-        <div className="mb-3 rounded-lg px-4 py-2.5 text-[13px]" style={{ background: "rgba(22,163,74,0.08)", border: "1px solid rgba(22,163,74,0.2)", color: "var(--status-running)" }}>
+        <div className="mb-3 rounded-lg px-4 py-2.5 text-[13px]" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-primary)" }}>
           {notice}
         </div>
       )}
@@ -171,7 +171,7 @@ function ActionBtn({
     <button
       disabled={!!busy}
       onClick={onClick}
-      className="rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors disabled:opacity-50"
+      className="rounded-md px-3 py-1.5 font-mono text-[12px] transition-colors hover:text-zinc-100 disabled:opacity-50"
       style={
         accent === "emerald"
           ? { background: "var(--brand-dim)", border: "1px solid var(--brand-border)", color: "var(--brand)" }
@@ -189,26 +189,6 @@ function Kv({ k, v }: { k: string; v: string }) {
       <span className="text-[11px] uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{k}</span>{" "}
       <span className="text-[12px] font-mono" style={{ color: "var(--text-secondary)" }}>{v || "—"}</span>
     </div>
-  );
-}
-
-function StatusPill({ status }: { status: Sandbox["status"] }) {
-  const map: Record<string, { bg: string; text: string; border: string }> = {
-    running:    { bg: "rgba(22,163,74,0.1)",   text: "var(--status-running)",    border: "rgba(22,163,74,0.25)" },
-    paused:     { bg: "rgba(245,158,11,0.1)",  text: "var(--status-paused)",     border: "rgba(245,158,11,0.25)" },
-    failed:     { bg: "rgba(239,68,68,0.1)",   text: "var(--status-failed)",     border: "rgba(239,68,68,0.25)" },
-    hibernated: { bg: "rgba(139,92,246,0.1)",  text: "var(--status-hibernated)", border: "rgba(139,92,246,0.25)" },
-    creating:   { bg: "rgba(59,130,246,0.1)",  text: "var(--status-creating)",   border: "rgba(59,130,246,0.25)" },
-  };
-  const s = map[status] ?? { bg: "var(--bg-overlay)", text: "var(--text-secondary)", border: "var(--border-default)" };
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium"
-      style={{ background: s.bg, color: s.text, border: `1px solid ${s.border}` }}
-    >
-      <span className="size-1.5 rounded-full" style={{ background: s.text }} />
-      {status}
-    </span>
   );
 }
 

@@ -16,7 +16,7 @@ function callbackUrl() {
 
 export default function SignupPage() {
   useEffect(() => {
-    if (isStubAuth()) window.location.replace("/sandboxes");
+    if (isStubAuth()) window.location.replace("/now");
   }, []);
 
   const [email, setEmail] = useState("");

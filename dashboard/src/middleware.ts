@@ -4,6 +4,7 @@ import { isStubAuth } from "@/lib/auth-mode";
 import { updateSession } from "@/lib/supabase/middleware";
 
 const PROTECTED_PREFIXES = [
+  "/now",
   "/sandboxes",
   "/databases",
   "/volumes",
@@ -22,7 +23,7 @@ export async function middleware(request: NextRequest) {
 
   if (isStubAuth()) {
     if (pathname === "/login" || pathname === "/signup") {
-      return NextResponse.redirect(new URL("/sandboxes", request.url));
+      return NextResponse.redirect(new URL("/now", request.url));
     }
     return NextResponse.next({ request });
   }
@@ -34,7 +35,7 @@ export async function middleware(request: NextRequest) {
   }
 
   if (user && (pathname === "/login" || pathname === "/signup")) {
-    return NextResponse.redirect(new URL("/sandboxes", request.url));
+    return NextResponse.redirect(new URL("/now", request.url));
   }
 
   return response;

@@ -185,8 +185,65 @@ func TestVersion_PopulatesFromLdflags(t *testing.T) {
 
 func TestBootStats_PercentileMath(t *testing.T) {
 	b := stats([]int64{100, 200, 300, 400, 500, 600, 700, 800, 900, 1000})
-	if b.Count != 10 || b.Min != 100 || b.Max != 1000 || b.P50 != 500 || b.P90 != 900 {
+	if b.Count != 10 || b.Min != 100 || b.Max != 1000 || b.Mean != 550 || b.P50 != 500 || b.P90 != 900 || b.P99 != 1000 {
 		t.Fatalf("unexpected stats: %#v", b)
+	}
+}
+
+// Nearest rank: the p-th percentile is the smallest sample with at least p%
+// of the samples at or below it.
+func TestBootStats_NearestRank(t *testing.T) {
+	seq := func(n int) []int64 { // 1, 2, …, n
+		out := make([]int64, n)
+		for i := range out {
+			out[i] = int64(i + 1)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name          string
+		in            []int64
+		p50, p90, p99 int64
+	}{
+		{"one sample is every percentile", []int64{7}, 7, 7, 7},
+		// The old formula answered 5000 here: the median of two boots was
+		// the slower one.
+		{"two samples: p50 is the lower", []int64{100, 5000}, 100, 5000, 5000},
+		{"three samples: p50 is the middle", []int64{30, 10, 20}, 20, 30, 30},
+		{"unsorted input is sorted first", []int64{5, 1, 4, 2, 3}, 3, 5, 5},
+		{"100 samples", seq(100), 50, 90, 99},
+		{"101 samples", seq(101), 51, 91, 100},
+		{"1000 samples", seq(1000), 500, 900, 990},
+		{"all equal", []int64{9, 9, 9, 9}, 9, 9, 9},
+	} {
+		b := stats(c.in)
+		if b.P50 != c.p50 || b.P90 != c.p90 || b.P99 != c.p99 {
+			t.Errorf("%s: p50/p90/p99 = %d/%d/%d, want %d/%d/%d", c.name, b.P50, b.P90, b.P99, c.p50, c.p90, c.p99)
+		}
+		// The definition itself, checked against the sorted samples.
+		for _, q := range []struct {
+			pct int
+			got int64
+		}{{50, b.P50}, {90, b.P90}, {99, b.P99}} {
+			atOrBelow, below := 0, 0
+			for _, x := range c.in {
+				if x <= q.got {
+					atOrBelow++
+				}
+				if x < q.got {
+					below++
+				}
+			}
+			if atOrBelow*100 < q.pct*len(c.in) {
+				t.Errorf("%s: p%d = %d has only %d of %d samples at or below it", c.name, q.pct, q.got, atOrBelow, len(c.in))
+			}
+			if below*100 >= q.pct*len(c.in) {
+				t.Errorf("%s: p%d = %d is not the smallest such sample (%d of %d are below it)", c.name, q.pct, q.got, below, len(c.in))
+			}
+		}
+	}
+	if got := stats(nil); got != (bucket{}) {
+		t.Errorf("no samples: %#v", got)
 	}
 }
 

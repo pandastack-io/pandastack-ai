@@ -93,6 +93,9 @@ type catalogTemplate struct {
 	Category    string   `json:"category,omitempty"`
 	Base        string   `json:"base,omitempty"`
 	Tools       []string `json:"tools,omitempty"`
+	// AliasOf names the template this entry is a second name for (see
+	// template_aliases.go). Empty for a real template.
+	AliasOf string `json:"alias_of,omitempty"`
 }
 
 const templatesSchema = `
@@ -253,7 +256,7 @@ func (t *templatesAPI) Register(mux *http.ServeMux) {
 	// Build endpoints. POST routes server-side (Cloud Build) when a dockerfile
 	// is uploaded, else proxies the legacy image_ref/rootfs path to the agent.
 	mux.HandleFunc("POST /v1/templates/build", t.build)
-	mux.HandleFunc("GET /v1/templates/builds", t.passthrough)
+	mux.HandleFunc("GET /v1/templates/builds", t.listBuilds)
 	// Status + logs: server-side builds (id starts with "tb_") are served from
 	// the control-plane DB; agent-direct builds proxy through. Both shapes match
 	// so the SDKs consume them identically.
@@ -313,7 +316,7 @@ ORDER BY is_global DESC, name ASC`, ws)
 	}
 	// Bare array to match the historical agent response shape (SDK + dashboard
 	// both expect a JSON array, not a wrapped object).
-	writeJSONOrg(w, http.StatusOK, out)
+	writeJSONOrg(w, http.StatusOK, withTemplateAliases(out))
 }
 
 func (t *templatesAPI) get(w http.ResponseWriter, r *http.Request) {
@@ -323,21 +326,33 @@ func (t *templatesAPI) get(w http.ResponseWriter, r *http.Request) {
 SELECT `+templateSelectCols+`
 FROM templates WHERE name = $1`, name)
 	c, err := rowToCatalog(row.Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErrOrg(w, http.StatusNotFound, "template not found")
-		return
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		t.log.Error("templates: get query failed", "err", err)
 		writeErrOrg(w, http.StatusInternalServerError, "could not get template")
 		return
 	}
-	// Private templates are only visible to their owner.
-	if !c.IsGlobal && c.Workspace != ws {
-		writeErrOrg(w, http.StatusNotFound, "template not found")
+	// Visible: a first-party template, or the caller's own.
+	if err == nil && (c.IsGlobal || c.Workspace == ws) {
+		writeJSONOrg(w, http.StatusOK, c)
 		return
 	}
-	writeJSONOrg(w, http.StatusOK, c)
+	// No such template for this caller (none at all, or another workspace's
+	// private one): the name may still be a first-party alias.
+	if alias, ok := resolveTemplateAlias(name); ok {
+		target, terr := rowToCatalog(t.db.QueryRowContext(r.Context(), `
+SELECT `+templateSelectCols+`
+FROM templates WHERE name = $1 AND is_global`, alias.target).Scan)
+		if terr == nil {
+			writeJSONOrg(w, http.StatusOK, aliasCatalogEntry(alias, target))
+			return
+		}
+		if !errors.Is(terr, sql.ErrNoRows) {
+			t.log.Error("templates: alias target query failed", "alias", name, "err", terr)
+			writeErrOrg(w, http.StatusInternalServerError, "could not get template")
+			return
+		}
+	}
+	writeErrOrg(w, http.StatusNotFound, "template not found")
 }
 
 func (t *templatesAPI) delete(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +443,24 @@ func (t *templatesAPI) build(w http.ResponseWriter, r *http.Request) {
 				parseErr = probe.ParseForm()
 			}
 			if parseErr == nil {
+				name := strings.TrimSpace(probe.FormValue("name"))
+				if isReservedTemplateName(name) {
+					writeErrOrg(w, http.StatusBadRequest, reservedTemplateNameMessage(name))
+					return
+				}
+				// A name held by a first-party template or by another
+				// workspace is refused here, before an agent pulls or unpacks
+				// anything for it.
+				if name != "" {
+					if taken, err := t.templateNameTaken(r.Context(), name, ws); err != nil {
+						t.log.Warn("templates: name ownership check failed", "name", name, "err", err)
+						writeErrOrg(w, http.StatusServiceUnavailable, "could not check the template name just now; try again in a moment")
+						return
+					} else if taken {
+						writeErrOrg(w, http.StatusConflict, fmt.Sprintf("template name %q is already taken; choose another name", name))
+						return
+					}
+				}
 				if df := probe.FormValue("dockerfile"); strings.TrimSpace(df) != "" {
 					writeErrOrg(w, http.StatusNotImplemented,
 						"server-side Dockerfile builds are not available in this build; "+
@@ -496,11 +529,6 @@ WHERE templates.is_global = false AND templates.workspace = $2`,
 	_, _ = w.Write(body)
 }
 
-// passthrough forwards a request unchanged to the agent director.
-func (t *templatesAPI) passthrough(w http.ResponseWriter, r *http.Request) {
-	t.v1.ServeHTTP(w, r)
-}
-
 // createSandbox validates the requested template against the registry before
 // proxying to the agent. This blocks sandbox creation on legacy/unknown rootfs
 // dirs that still live on hosts but are not part of the curated catalog.
@@ -518,6 +546,18 @@ func (t *templatesAPI) createSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(raw, &peek)
 	name := strings.TrimSpace(peek.Template)
+	// A first-party alias (`claude`, `codex`, ...) becomes its target template
+	// here, before the scheduler or an agent sees the request. A workspace's
+	// own custom template of the same name, built before the name was
+	// reserved, still wins.
+	if alias, ok := resolveTemplateAlias(name); ok && !t.ownsTemplate(r.Context(), name, ws) {
+		rewritten, rerr := rewriteCreateBodyForAlias(raw, alias)
+		if rerr != nil {
+			writeErrOrg(w, http.StatusBadRequest, "invalid request body: "+rerr.Error())
+			return
+		}
+		raw, name = rewritten, alias.target
+	}
 	if name != "" {
 		if !t.templateAllowed(r.Context(), name, ws) {
 			writeErrOrg(w, http.StatusBadRequest,
@@ -546,6 +586,24 @@ func (t *templatesAPI) templateAllowed(ctx context.Context, name, ws string) boo
 		return true
 	}
 	return ok
+}
+
+// ownsTemplate reports whether ws owns a custom (non-global) template called
+// name. A DB error reads as "does not own": the caller then resolves the alias
+// to its first-party target, which is the safe answer.
+func (t *templatesAPI) ownsTemplate(ctx context.Context, name, ws string) bool {
+	if t.db == nil || ws == "" {
+		return false
+	}
+	var owns bool
+	err := t.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM templates WHERE name = $1 AND workspace = $2 AND NOT is_global)`,
+		name, ws).Scan(&owns)
+	if err != nil {
+		t.log.Warn("templates: ownership check failed, treating as not owned", "name", name, "err", err)
+		return false
+	}
+	return owns
 }
 
 // agentCall proxies a request to the internal v1 handler (agent director),

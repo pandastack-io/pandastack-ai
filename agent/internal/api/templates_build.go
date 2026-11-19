@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pandastack/agent/internal/guestfs"
 	"github.com/pandastack/agent/internal/ociregistry"
 	"github.com/pandastack/agent/internal/sandbox"
 	"github.com/pandastack/agent/internal/seed"
@@ -512,9 +513,16 @@ func runTemplateBuild(st *buildState, mgr *sandbox.Manager, stage, srcPath, srcN
 		return
 	}
 
-	// Mount, extract tarball, unmount. Requires root.
+	// Mount, extract tarball, unmount. Requires root. The tree is the
+	// template author's, so it is mounted with nothing in it able to run on the host
+	// (guestfs.MountOptions); only the legacy host-side install needs a plain
+	// mount, because it executes the image's own apt.
 	logf(st, "mounting + extracting rootfs into ext4…")
-	if err := runCmd("mount", "-o", "loop", imgPath, mntPath); err != nil {
+	mountOpts := guestfs.MountOptions
+	if hostInstallAllowed() {
+		mountOpts = "loop"
+	}
+	if err := runCmd("mount", "-o", mountOpts, imgPath, mntPath); err != nil {
 		fail(fmt.Errorf("mount: %w (requires agent running as root)", err))
 		return
 	}
@@ -532,9 +540,9 @@ func runTemplateBuild(st *buildState, mgr *sandbox.Manager, stage, srcPath, srcN
 		if werr := writeGuestResolvConf(mntPath); werr != nil {
 			fmt.Fprintf(os.Stderr, "template build %s: warning: write guest resolv.conf: %v\n", st.Name, werr)
 		}
-		// Guarantee the microVM init + sshd contract so any Debian image boots
-		// and exec/SSH works without the author adding packages. Fatal on
-		// failure — a template that can't boot or accept exec is unusable.
+		// The microVM init + sshd contract. The image must bring both; one
+		// that lacks them is refused here (it would not boot or accept
+		// exec). Nothing from the image is run on this host to fix it up.
 		contractErr = ensureGuestContract(mntPath, st)
 	}
 	_ = runCmd("sync")
@@ -682,45 +690,105 @@ func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) 
 // Any pre-existing /etc/resolv.conf (e.g. a systemd-resolved 127.0.0.53 stub
 // symlink) is removed first so the regular file actually lands.
 func writeGuestResolvConf(mnt string) error {
-	etc := filepath.Join(mnt, "etc")
-	if err := os.MkdirAll(etc, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", etc, err)
+	// Through guestfs: the image decides what /etc and /etc/resolv.conf are,
+	// and a link there must not send this write to the host's own /etc.
+	tree, err := guestfs.Open(mnt)
+	if err != nil {
+		return err
 	}
-	p := filepath.Join(etc, "resolv.conf")
-	_ = os.Remove(p) // drop any resolved stub symlink so WriteFile creates a real file
-	if err := os.WriteFile(p, []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", p, err)
-	}
-	return nil
+	defer tree.Close()
+	return tree.WriteFile("etc/resolv.conf", []byte("nameserver 1.1.1.1\nnameserver 8.8.8.8\n"), 0o755, 0o644)
 }
 
-// ensureGuestContract makes a freshly-extracted custom rootfs (mounted at mnt)
-// bootable as a PandaStack microVM by guaranteeing the two things the platform
-// requires but a plain application image (e.g. node:20-slim, python:3.12-slim)
-// usually lacks:
+// hostInstallEnv is the operator's opt-in to the legacy behaviour of
+// installing init + sshd into a template from the host. See
+// installGuestContractOnHost for what that means.
+const hostInstallEnv = "PANDASTACK_TEMPLATE_HOST_INSTALL"
+
+// hostInstallAllowed reports whether hostInstallEnv is set to an explicit yes.
+// Anything else, including unset and a typo, is no.
+func hostInstallAllowed() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(hostInstallEnv))) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
+// errGuestContractMissing is what a build gets when its image cannot boot as a
+// microVM. The text reaches the template's author.
+func errGuestContractMissing(hasInit, hasSSHD bool) error {
+	var missing []string
+	if !hasInit {
+		missing = append(missing, "an init (/sbin/init)")
+	}
+	if !hasSSHD {
+		missing = append(missing, "sshd (/usr/sbin/sshd)")
+	}
+	return fmt.Errorf("the image is missing %s; a template needs both an init and sshd to boot and to run commands. "+
+		"Add this line to the image's Dockerfile: "+
+		"RUN apt-get update && apt-get install -y --no-install-recommends systemd-sysv openssh-server",
+		strings.Join(missing, " and "))
+}
+
+// ensureGuestContract checks that a freshly-extracted custom rootfs (mounted
+// at mnt) can boot as a PandaStack microVM. It needs the two things the
+// platform requires but a plain application image (node:20-slim,
+// python:3.12-slim) usually lacks:
 //
 //   - an init: /sbin/init (systemd-sysv). Without it the Firecracker kernel
 //     falls through to /bin/sh and nothing boots.
-//   - sshd: /usr/sbin/sshd (openssh-server) — the host↔guest exec/fs bridge and
+//   - sshd: /usr/sbin/sshd (openssh-server), the host↔guest exec/fs bridge and
 //     the snapshot-bake readiness probe (TCP :22). The agent injects
 //     authorized_keys + sshd overrides at create time but does NOT install the
 //     binary; the rootfs must supply it.
 //
-// This is what lets a user bake *any* Debian image (Dockerfile only, no special
-// packages) and still get working exec/SSH. Idempotent: if both are already
-// present (first-party templates install them in their Dockerfile) it does
-// nothing. Debian-only by contract (the base-image guard enforces this), so apt
-// is the package manager. Requires a working chroot + apt egress (resolv.conf is
-// already written by the caller).
+// Both are installed where the image is built: the first-party templates
+// install them in their own Dockerfile, and a custom image is expected to do
+// the same (docs: concepts/templates). So an image normally arrives here
+// complete and this function only looks.
+//
+// An image that arrives without them is REFUSED. This function used to fix it
+// up instead, by chroot-ing into the rootfs on the host; that is now behind an
+// explicit operator opt-in (installGuestContractOnHost).
+//
+// The check does not follow the entries: Debian's /sbin/init is an absolute
+// link to /lib/systemd/systemd, which os.Stat would resolve against the HOST's
+// filesystem and answer for the host's init, not the image's.
 func ensureGuestContract(mnt string, st *buildState) error {
-	initPath := filepath.Join(mnt, "sbin", "init")
-	sshdPath := filepath.Join(mnt, "usr", "sbin", "sshd")
-	_, initErr := os.Stat(initPath)
-	_, sshdErr := os.Stat(sshdPath)
-	if initErr == nil && sshdErr == nil {
+	tree, err := guestfs.Open(mnt)
+	if err != nil {
+		return err
+	}
+	hasInit, hasSSHD := tree.Has("/sbin/init"), tree.Has("/usr/sbin/sshd")
+	// Closed before anything else touches or unmounts the tree.
+	_ = tree.Close()
+	if hasInit && hasSSHD {
 		logf(st, "guest contract present (init + sshd already in image)")
 		return nil
 	}
+	if !hostInstallAllowed() {
+		return errGuestContractMissing(hasInit, hasSSHD)
+	}
+	logf(st, "WARNING: image lacks init or sshd; installing them from the host because %s is set", hostInstallEnv)
+	return installGuestContractOnHost(mnt, st)
+}
+
+// installGuestContractOnHost installs systemd-sysv + openssh-server into the
+// rootfs mounted at mnt by chroot-ing into it ON THE HOST, as root, with the
+// host's /dev, /proc and /sys bind-mounted inside.
+//
+// That runs the image's own /bin/sh, its apt and every package maintainer
+// script with the host's kernel interfaces in reach: whoever built the image
+// runs code as root on this host. chroot is not a security boundary. It is
+// acceptable only where every template author is the operator (a single-tenant
+// self-hosted install with no build service in front), and it only runs when
+// PANDASTACK_TEMPLATE_HOST_INSTALL says so. Never set that on a host that
+// bakes images from people you would not give a root shell.
+//
+// Debian-only by contract, so apt is the package manager. Requires apt egress
+// (resolv.conf is already written by the caller).
+func installGuestContractOnHost(mnt string, st *buildState) error {
 	logf(st, "installing guest contract (systemd-sysv + openssh-server) into rootfs…")
 
 	// Bind-mount the kernel filesystems so apt's maintainer scripts work, then

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pandastack/agent/internal/guest/vsockwire"
@@ -150,19 +151,57 @@ func shexec(ctx context.Context, cmd string, stdin []byte) (stdout, stderr strin
 	var so, se bytes.Buffer
 	c.Stdout = &so
 	c.Stderr = &se
+	// When ctx ends (ExecRequest.TimeoutMS), stop the whole command, not just
+	// /bin/sh. CommandContext's default kills only the shell: `sleep 600;
+	// echo x` left the sleep running, and Run then waited for it because it
+	// still held the output pipes. The command gets its own process group,
+	// which is sent SIGTERM and, execKillGrace later, SIGKILL.
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	finished := make(chan struct{})
+	c.Cancel = func() error {
+		pgid := c.Process.Pid
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		time.AfterFunc(execKillGrace, func() {
+			select {
+			case <-finished: // gone: do not signal a process group id that may be reused
+			default:
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+		})
+		return nil
+	}
+	if _, bounded := ctx.Deadline(); bounded {
+		// Only for a command with a timeout: once it has been stopped (or its
+		// shell has exited), do not wait longer than this for output still
+		// held open by a process that left the group with setsid. An
+		// unbounded command keeps the old behaviour and waits for its output
+		// to close.
+		c.WaitDelay = execKillGrace + time.Second
+	}
 	err := c.Run()
+	close(finished)
 	exit = 0
 	if err != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		switch {
+		case errors.As(err, &ee):
 			exit = ee.ExitCode()
-		} else {
+		case errors.Is(err, exec.ErrWaitDelay) && c.ProcessState != nil:
+			// The shell exited by itself; something it left behind still
+			// held the output when WaitDelay ran out. The exit status is the
+			// shell's.
+			exit = c.ProcessState.ExitCode()
+		default:
 			// Could not start the process at all (e.g. /bin/sh missing).
 			return so.String(), se.String(), -1, err
 		}
 	}
 	return so.String(), se.String(), exit, nil
 }
+
+// execKillGrace is how long a timed-out command gets between SIGTERM and
+// SIGKILL.
+const execKillGrace = 2 * time.Second
 
 func handleExec(req vsockwire.ExecRequest) vsockwire.ExecResponse {
 	ctx := context.Background()
@@ -173,6 +212,12 @@ func handleExec(req vsockwire.ExecRequest) vsockwire.ExecResponse {
 	}
 	stdout, stderr, exit, err := shexec(ctx, req.Cmd, nil)
 	resp := vsockwire.ExecResponse{Stdout: stdout, Stderr: stderr, ExitCode: exit}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// The command was stopped at its timeout. That is a result, with the
+		// output so far, not a daemon failure.
+		resp.TimedOut = true
+		return resp
+	}
 	if err != nil {
 		resp.Err = err.Error()
 	}

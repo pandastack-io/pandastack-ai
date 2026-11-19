@@ -4,12 +4,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/pandastack/agent/internal/sandbox"
 	"github.com/gorilla/websocket"
+	"github.com/pandastack/agent/internal/execstream"
+	"github.com/pandastack/agent/internal/guest"
+	"github.com/pandastack/agent/internal/sandbox"
 )
 
 // Multiplexed WebSocket exec endpoint.
@@ -38,6 +42,11 @@ import (
 //     with the request id, so the client can fan them out.
 //   - The connection survives forever; client closes when done.
 //   - Ping/pong keepalives every 20s (matches PTY handler).
+//   - timeout_seconds and {"cancel":true} stop the command in the guest
+//     (SIGTERM, then SIGKILL). A timeout's error contains "timeout".
+//   - A closed socket stops its in-flight commands only when
+//     PANDASTACK_EXEC_STOP_ON_DISCONNECT is on (execstream.StopOnDisconnect);
+//     otherwise they run to their end, as on the SSE endpoint.
 var execWSUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
@@ -45,10 +54,10 @@ var execWSUpgrader = websocket.Upgrader{
 }
 
 type execWSReq struct {
-	ID             string `json:"id"`
-	Cmd            string `json:"cmd"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	Cancel         bool   `json:"cancel,omitempty"`
+	ID             string  `json:"id"`
+	Cmd            string  `json:"cmd"`
+	TimeoutSeconds float64 `json:"timeout_seconds,omitempty"`
+	Cancel         bool    `json:"cancel,omitempty"`
 }
 
 type execWSResp struct {
@@ -123,17 +132,27 @@ func registerExecWS(mux *http.ServeMux, mgr *sandbox.Manager) {
 			}
 		}()
 
+		// A command's context. By default it does not end with the socket:
+		// see execstream.StopOnDisconnect for why a dropped connection leaves
+		// the command running.
+		stopOnDisconnect := execstream.StopOnDisconnect()
+		base := r.Context()
+		if !stopOnDisconnect {
+			base = context.WithoutCancel(base)
+		}
+
 		// Main read loop. Each request runs in its own goroutine so multiple
 		// commands can be in flight at once on the same socket.
 		for {
 			_, raw, rerr := conn.ReadMessage()
 			if rerr != nil {
-				// Cancel any in-flight requests on disconnect.
-				liveMu.Lock()
-				for _, f := range live {
-					f.cancel()
+				if stopOnDisconnect {
+					liveMu.Lock()
+					for _, f := range live {
+						f.cancel()
+					}
+					liveMu.Unlock()
 				}
-				liveMu.Unlock()
 				return
 			}
 			var req execWSReq
@@ -154,23 +173,47 @@ func registerExecWS(mux *http.ServeMux, mgr *sandbox.Manager) {
 				continue
 			}
 
-			ctx, cf := context.WithCancel(r.Context())
-			if req.TimeoutSeconds > 0 {
-				ctx, cf = context.WithTimeout(r.Context(), time.Duration(req.TimeoutSeconds)*time.Second)
+			timeout := execstream.Request{Timeout: req.TimeoutSeconds}.TimeoutDuration()
+			var (
+				ctx context.Context
+				cf  context.CancelFunc
+			)
+			if timeout > 0 {
+				ctx, cf = context.WithTimeout(base, timeout)
+			} else {
+				ctx, cf = context.WithCancel(base)
 			}
 			register(req.ID, cf)
 
 			go func(req execWSReq, ctx context.Context, cf context.CancelFunc) {
 				defer cf()
 				defer finish(req.ID)
-				exit, err := gc.ExecStream(ctx, req.Cmd, func(stream string, data []byte) {
-					_ = send(execWSResp{ID: req.ID, Stream: stream, Data: string(data)})
-				})
-				if err != nil {
-					_ = send(execWSResp{ID: req.ID, Error: err.Error()})
-					return
+				// A read from the guest can end inside a UTF-8 character;
+				// each frame's data is a JSON string.
+				text := map[string]*guest.TextChunker{"stdout": {}, "stderr": {}}
+				emit := func(stream string, data []byte) {
+					if len(data) > 0 {
+						_ = send(execWSResp{ID: req.ID, Stream: stream, Data: string(data)})
+					}
 				}
-				_ = send(execWSResp{ID: req.ID, Exit: &exit})
+				exit, err := gc.ExecStream(ctx, req.Cmd, func(stream string, data []byte) {
+					if tc := text[stream]; tc != nil {
+						emit(stream, tc.Push(data))
+					}
+				})
+				for _, stream := range []string{"stdout", "stderr"} {
+					emit(stream, text[stream].Flush())
+				}
+				switch {
+				case err == nil:
+					_ = send(execWSResp{ID: req.ID, Exit: &exit})
+				case timeout > 0 && errors.Is(err, context.DeadlineExceeded):
+					_ = send(execWSResp{ID: req.ID, Error: execstream.TimeoutMessage(timeout, errors.Is(err, guest.ErrStillRunning))})
+				default:
+					// A joined error (cancelled + could not be stopped) is
+					// two lines; keep the frame's error on one.
+					_ = send(execWSResp{ID: req.ID, Error: strings.ReplaceAll(err.Error(), "\n", "; ")})
+				}
 			}(req, ctx, cf)
 		}
 	})

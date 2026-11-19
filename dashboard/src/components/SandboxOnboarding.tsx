@@ -47,7 +47,7 @@ export function SandboxOnboarding({
           <button
             onClick={onLaunch}
             disabled={launching}
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-500 px-4 py-2 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-emerald-400 active:bg-emerald-600 disabled:opacity-70"
+            className="inline-flex items-center gap-2 rounded-md bg-bone px-4 py-2 font-mono text-[12px] font-medium text-ink transition-colors hover:bg-white active:bg-zinc-200 disabled:opacity-70"
           >
             {launching ? <Loader2 size={14} className="animate-spin" /> : <Rocket size={14} />}
             {launching ? "Booting…" : "Launch sandbox"}

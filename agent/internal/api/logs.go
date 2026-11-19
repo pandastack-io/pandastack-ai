@@ -3,13 +3,12 @@ package api
 
 import (
 	"bufio"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/pandastack/agent/internal/sandbox"
+	"github.com/pandastack/agent/internal/sse"
 )
 
 func registerLogs(mux *http.ServeMux, mgr *sandbox.Manager) {
@@ -37,19 +36,20 @@ func registerLogs(mux *http.ServeMux, mgr *sandbox.Manager) {
 			return
 		}
 
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			writeErr(w, 500, errString("streaming unsupported"))
+		// sse.Stream: headers at once, a keep-alive comment while the log is
+		// quiet (a follow that is idle for ~100 s is otherwise dropped by the
+		// proxies in front), and a writer the ticker can share.
+		stream, err := sse.Start(w)
+		if err != nil {
+			writeErr(w, 500, err)
 			return
 		}
-		w.Header().Set("content-type", "text/event-stream")
-		w.Header().Set("cache-control", "no-cache")
-		w.WriteHeader(200)
+		defer stream.Close()
+		send := func(event string, payload any) { _ = stream.Event(event, payload) }
 
 		f, err := os.Open(path)
 		if err != nil {
-			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-			flusher.Flush()
+			send("error", map[string]string{"error": err.Error()})
 			return
 		}
 		defer f.Close()
@@ -62,11 +62,6 @@ func registerLogs(mux *http.ServeMux, mgr *sandbox.Manager) {
 			_, _ = f.Seek(from, 0)
 		}
 		reader := bufio.NewReader(f)
-		send := func(event string, payload any) {
-			b, _ := json.Marshal(payload)
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-			flusher.Flush()
-		}
 		// Send an initial ping so the client knows the stream is live even if the
 		// log file is momentarily empty.
 		send("open", map[string]string{"path": path})
