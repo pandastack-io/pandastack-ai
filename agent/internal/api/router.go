@@ -518,6 +518,12 @@ var readOnlyInspectionGETs = map[string]bool{
 	"/fs/dir":        true,
 	"/postgres-info": true,
 	"/repl/sessions": true,
+	// /util is a cgroup read on the host (CPU/memory counters); it never
+	// touches the guest. The API's free-tier CPU watchdog samples it every
+	// 30 s per edge for every running non-billable sandbox, so while it
+	// counted as activity the idle TTL never fired for those sandboxes
+	// (2026-11-16: four idle `agent` sandboxes still running after 21 h).
+	"/util": true,
 }
 
 // shouldAutoWake decides whether a sandbox-scoped request should transparently
