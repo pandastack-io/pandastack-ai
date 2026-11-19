@@ -143,7 +143,8 @@ export function StatusBadge({ value }: { value?: string | number | null }) {
   return (
     <Badge variant={statusTone(value)} className={live ? "gap-1.5" : ""}>
       {live && <span className="live-pulse size-1.5 shrink-0 rounded-full" style={{ background: "var(--c-signal)" }} />}
-      {statusLabel(value)}
+      {/* lower case like every other chip: "running" beside "Asleep" read as two styles */}
+      {statusLabel(value).toLowerCase()}
     </Badge>
   );
 }

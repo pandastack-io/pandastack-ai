@@ -43,10 +43,18 @@ export function SandboxTerminal({
       const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
       if (cancelled) return;
 
+      // xterm measures one character on a canvas to size its grid, and a
+      // canvas font cannot hold a CSS variable: with var(--font-geist-mono) in
+      // the list the measurement silently used the canvas default (a wide
+      // sans-serif) and every letter sat in a cell too wide for it. So the
+      // variable is read here and its value is what xterm gets.
+      const geistMono = getComputedStyle(el).getPropertyValue("--font-geist-mono").trim();
+      const fontFamily = `${geistMono ? `${geistMono}, ` : ""}ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
+
       term = new Terminal({
         convertEol: true,
         cursorBlink: true,
-        fontFamily: "var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+        fontFamily,
         fontSize,
         // xterm paints on a canvas and cannot read CSS variables: these are
         // the app's ramp (globals.css) as literals.
