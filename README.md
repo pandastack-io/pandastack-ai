@@ -10,7 +10,11 @@ Open-source Firecracker microVM sandboxes and managed PostgreSQL, self-hosted.
 [![CI](https://github.com/pandastack-io/pandastack-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/pandastack-io/pandastack-ai/actions/workflows/ci.yml)
 [![GitHub stars](https://img.shields.io/github/stars/pandastack-io/pandastack-ai?style=social)](https://github.com/pandastack-io/pandastack-ai/stargazers)
 
-<img width="1657" height="949" alt="pandastack-dashboard-image" src="https://github.com/user-attachments/assets/72a7e7dc-2218-4ecb-acfb-953e278f3406" />
+<p align="center">
+  <img src="docs/assets/dashboard.gif" width="100%" alt="The PandaStack dashboard: every sandbox and database drawn as a line on one clock, a shell opened in a sandbox from the page, and a command bar that takes the CLI's own words" />
+</p>
+
+<p align="center"><sub>The dashboard, recorded on sample data: pick a machine on the timeline, open a shell in a new sandbox, type a CLI command into the command bar.</sub></p>
 
 
 ## 60-second quickstart
@@ -212,7 +216,7 @@ This is the **open-source core** of PandaStack. A few things to know before you 
 - **Managed databases are Beta.** They work, and they are continuously archived — but read replicas, storage autoscaling, and cross-host durability are not here yet. Don't make a single Beta database the only copy of irreplaceable data.
 - **Object-storage coupling.** Snapshot seeds, UFFD memory streaming, and rootfs streaming currently assume GCS (or an S3-compatible store). Other backends need an adapter (see Roadmap).
 - **Deployment is Terraform-first.** Production deploys use the multi-node Terraform envs ([`infra/terraform/envs/dev-aws`](infra/terraform/envs/dev-aws), [`dev-gcp-multi`](infra/terraform/envs/dev-gcp-multi)). The cloud-init/user-data bootstrap scripts are functional scaffolds — review them before a real apply, and expect to adapt AMI/image baking to your environment.
-- **The dashboard screenshot is an illustration**, not a product screenshot (see note above).
+- **The dashboard animation at the top runs on sample data.** It is the real dashboard from this repository, but the machines, names and timings in it are examples, not measurements, and the one line the shell prints is scripted.
 
 ## Contributing
 
