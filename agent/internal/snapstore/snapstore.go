@@ -149,7 +149,7 @@ func (s *Store) Upload(ctx context.Context, snapID, localDir string) error {
 	// and reads as unpublished rather than silently downgrading to a
 	// disk-less snapshot.
 	artifacts := []string{"vm.mem", "vm.state"}
-	for _, opt := range []string{"hugepages", "vm.mem.header"} {
+	for _, opt := range []string{"hugepages", "vm.mem.header", "firecracker-version"} {
 		if _, err := os.Stat(filepath.Join(localDir, opt)); err == nil {
 			artifacts = append(artifacts, opt)
 		}
@@ -363,6 +363,10 @@ func (s *Store) Download(ctx context.Context, snapID, localDir string) error {
 		src+"hugepages", localDir+"/").Run()
 	_ = exec.CommandContext(ctx, "gsutil", "-q", "cp",
 		src+"vm.mem.header", localDir+"/").Run()
+	// The Firecracker version that wrote the snapshot; absent on snapshots
+	// made before it existed, which are v1.16.0.
+	_ = exec.CommandContext(ctx, "gsutil", "-q", "cp",
+		src+"firecracker-version", localDir+"/").Run()
 	// Captured disk (rootfs.tar.zst): required-if-published. A legacy snapshot
 	// without one restores memory-only (template disk fallback); a snapshot
 	// WITH one must not restore without it, or user files silently vanish.

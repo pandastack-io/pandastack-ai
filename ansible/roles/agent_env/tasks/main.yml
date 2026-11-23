@@ -21,6 +21,34 @@
     that: env_stat.stat.exists
     fail_msg: "{{ agent_env_file }} not found — cloud-init has not provisioned this node yet."
 
+# PANDASTACK_FIRECRACKER_BIN names the binary every NEW VM runs. On a
+# host without it every cold boot and every bake would fail, and agent.yml and
+# env.yml do not run the firecracker role. So a binary that does not answer
+# --version here is replaced by the stock /usr/local/bin/firecracker, loudly:
+# run firecracker.yml for that host, then this play again.
+- name: Check the Firecracker binary new VMs will run
+  ansible.builtin.command: "{{ agent_env_managed.PANDASTACK_FIRECRACKER_BIN }} --version"
+  register: agent_env_fc_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: "'PANDASTACK_FIRECRACKER_BIN' in agent_env_managed"
+
+- name: Fall back to the stock Firecracker binary where the configured one is missing
+  ansible.builtin.set_fact:
+    agent_env_effective: "{{ agent_env_managed | combine({'PANDASTACK_FIRECRACKER_BIN': '/usr/local/bin/firecracker'}) }}"
+  when:
+    - "'PANDASTACK_FIRECRACKER_BIN' in agent_env_managed"
+    - (agent_env_fc_check.rc | default(1)) != 0
+
+- name: Warn about the Firecracker fallback
+  ansible.builtin.debug:
+    msg: >-
+      {{ agent_env_managed.PANDASTACK_FIRECRACKER_BIN }} does not run on this
+      host, so new VMs stay on /usr/local/bin/firecracker. Run firecracker.yml
+      for this host, then env.yml.
+  when: agent_env_effective is defined
+
 - name: Set managed env knobs (idempotent, preserves 0600)
   ansible.builtin.lineinfile:
     path: "{{ agent_env_file }}"
@@ -29,7 +57,7 @@
     owner: root
     group: root
     mode: "0600"
-  loop: "{{ agent_env_managed | dict2items }}"
+  loop: "{{ (agent_env_effective | default(agent_env_managed)) | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
   notify: restart pandastack-agent

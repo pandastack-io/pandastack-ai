@@ -79,10 +79,12 @@ CLICKHOUSE_URL="$(fetch_secret "$SECRET_CH")"
 SUPABASE_JWKS_URL="$(fetch_secret "$SECRET_JWKS")"
 
 # Install Firecracker.
-# v1.16.0: brings the vsock UDS path override at /snapshot/load (PR #5323)
-# used for the per-sandbox readiness ping. NOTE: Firecracker snapshots are
+# v1.16.0 as /usr/local/bin/firecracker: brings the vsock UDS path override at
+# /snapshot/load (PR #5323) used for the per-sandbox readiness ping. Below it,
+# the side-by-side binaries. NOTE: Firecracker snapshots are
 # version-bound — seeds baked on another FC version are rejected by seed-sync
-# (manifest fc_version check) and re-baked on first spawn.
+# (manifest fc_version check against PANDASTACK_FIRECRACKER_BIN) and re-baked
+# on first spawn.
 install -d -m 0755 /usr/local/src/pandastack-firecracker
 if ! command -v firecracker >/dev/null 2>&1 || ! firecracker --version 2>/dev/null | grep -q '1.16.0'; then
   for i in 1 2 3 4 5; do
@@ -94,6 +96,37 @@ if ! command -v firecracker >/dev/null 2>&1 || ! firecracker --version 2>/dev/nu
   tar -xzf /usr/local/src/pandastack-firecracker/firecracker-v1.16.0-x86_64.tgz -C /usr/local/src/pandastack-firecracker
   install -m 0755 /usr/local/src/pandastack-firecracker/release-v1.16.0-x86_64/firecracker-v1.16.0-x86_64 /usr/local/bin/firecracker
   install -m 0755 /usr/local/src/pandastack-firecracker/release-v1.16.0-x86_64/jailer-v1.16.0-x86_64 /usr/local/bin/jailer
+fi
+
+# Side-by-side Firecracker binaries, as /usr/local/bin/firecracker-v<version>,
+# each from GitHub's release tarball checked against its published sha256 — the
+# same pins as ansible group_vars/all.yml firecracker_side_versions (keep the
+# two in step). 1.16.2 changed the snapshot format, so the agent restores every
+# snapshot with the version that wrote it (its firecracker-version file; none =
+# 1.16.0) and runs NEW VMs on PANDASTACK_FIRECRACKER_BIN (env.agent below). A
+# host that cannot install 1.18 keeps 1.16 for new VMs instead of pointing the
+# agent at a binary that is not there.
+fc_side() { # fc_side <version> <sha256 of the release tarball>; non-zero = not installed
+  local v="$1" sum="$2" t="/usr/local/src/pandastack-firecracker/firecracker-v$1-x86_64.tgz"
+  "/usr/local/bin/firecracker-v$v" --version 2>/dev/null | grep -q "v$v" && return 0
+  if ! echo "$sum  $t" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    for i in 1 2 3 4 5; do
+      wget -qO "$t" "https://github.com/firecracker-microvm/firecracker/releases/download/v$v/firecracker-v$v-x86_64.tgz" \
+        && echo "$sum  $t" | sha256sum -c --quiet - && break
+      echo "firecracker v$v download attempt $i failed, retrying"; sleep $((i*5))
+    done
+  fi
+  echo "$sum  $t" | sha256sum -c --quiet - || { echo "firecracker v$v: no tarball matching the pinned sha256; not installed"; return 1; }
+  tar -xzf "$t" -C /usr/local/src/pandastack-firecracker || return 1
+  install -m 0755 "/usr/local/src/pandastack-firecracker/release-v$v-x86_64/firecracker-v$v-x86_64" "/usr/local/bin/firecracker-v$v" || return 1
+  "/usr/local/bin/firecracker-v$v" --version | grep -q "v$v"
+}
+fc_side 1.16.0 bd04e26952d4e158085778c6230a0b383d2619c319182e27eaa9d61a212e92d6 || echo "pandastack: firecracker-v1.16.0 missing; snapshots made by 1.16 restore with /usr/local/bin/firecracker (also 1.16.0)"
+FC_DEFAULT_BIN=/usr/local/bin/firecracker
+if fc_side 1.18.0 1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd; then
+  FC_DEFAULT_BIN=/usr/local/bin/firecracker-v1.18.0
+else
+  echo "pandastack: firecracker-v1.18.0 not installed; new VMs run 1.16.0 (run ansible firecracker.yml, then env.yml)"
 fi
 
 groupadd -f kvm
@@ -408,6 +441,11 @@ PANDASTACK_GCS_BUCKET=${GCS_BUCKET}
 # Snapshot/WAL bucket: user snapshot+fork replication, managed-DB WAL archive
 # (wal_relay) and db failover restore. Unset = all three silently disabled.
 PANDASTACK_SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET}
+# Firecracker binary for NEW VMs (cold boots, and so every bake); restores use
+# the version that wrote the snapshot. 1.18 only when the side-by-side
+# install above succeeded. Keep in step with ansible group_vars/all.yml
+# (pandastack_firecracker_bin) or the next ansible run rewrites it.
+PANDASTACK_FIRECRACKER_BIN=${FC_DEFAULT_BIN}
 # UFFD streaming first-boot: serve guest page faults on demand from the seed's
 # vm.mem (and GCS range reads) instead of downloading the whole memory image
 # before boot. Eliminates the cold-host first-boot cliff. The agent advertises

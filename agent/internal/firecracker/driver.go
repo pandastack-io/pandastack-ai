@@ -104,6 +104,11 @@ type Driver struct {
 	// taken from this VM inherit the marker (see markSnapshotHugepages).
 	hugepages bool
 
+	// bin is the Firecracker binary this VM runs: DefaultBinary() for a cold
+	// boot, the version that wrote the snapshot for a restore (fcbin.go).
+	// Set before the process starts, never changed after.
+	bin string
+
 	// Shared FC API-socket HTTP clients (lazy; see warmfork.go helpers).
 	// Per-op client construction leaked one idle keep-alive conn per call.
 	hcOnce sync.Once
@@ -227,8 +232,15 @@ func (d *Driver) Start(ctx context.Context) error {
 	// Firecracker must outlive any request-scoped context. Use background.
 	machineCtx := context.Background()
 
+	// New VMs run the default binary; a restore runs the version that wrote
+	// the snapshot (fcbin.go), like the raw-HTTP restores in warmfork.go.
+	if d.spec.FromSnapDir != "" {
+		d.bin = binaryForSnapshot(d.spec.FromSnapDir)
+	} else {
+		d.bin = DefaultBinary()
+	}
 	cmd := fc.VMCommandBuilder{}.
-		WithBin("/usr/local/bin/firecracker").
+		WithBin(d.bin).
 		WithSocketPath(d.spec.SocketPath)
 
 	// Capture serial console (kernel boot + guest stdout) to per-sandbox file
@@ -471,9 +483,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, dir string) error {
 		}); err != nil {
 			return fmt.Errorf("create snapshot: %w", err)
 		}
-		if d.hugepages {
-			d.markSnapshotHugepages(dir)
-		}
+		d.markSnapshot(dir)
 		return nil
 	}
 
@@ -488,9 +498,7 @@ func (d *Driver) CreateSnapshot(ctx context.Context, dir string) error {
 	if err := d.machine.CreateSnapshot(ctx, mem, state); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
-	if d.hugepages {
-		d.markSnapshotHugepages(dir)
-	}
+	d.markSnapshot(dir)
 	return nil
 }
 
@@ -556,9 +564,7 @@ func (d *Driver) PauseForFork(ctx context.Context, dir, rootfsDst, rootfsSrc str
 		}); err != nil {
 			return fmt.Errorf("create snapshot: %w", err)
 		}
-		if d.hugepages {
-			d.markSnapshotHugepages(dir)
-		}
+		d.markSnapshot(dir)
 		return nil
 	}
 
@@ -577,9 +583,7 @@ func (d *Driver) PauseForFork(ctx context.Context, dir, rootfsDst, rootfsSrc str
 	if err := d.machine.CreateSnapshot(ctx, mem, state); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
-	if d.hugepages {
-		d.markSnapshotHugepages(dir)
-	}
+	d.markSnapshot(dir)
 	return nil
 }
 func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
@@ -609,9 +613,7 @@ func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
 		}); err != nil {
 			return fmt.Errorf("create snapshot: %w", err)
 		}
-		if d.hugepages {
-			d.markSnapshotHugepages(dir)
-		}
+		d.markSnapshot(dir)
 		return nil
 	}
 
@@ -624,9 +626,7 @@ func (d *Driver) PauseAndSnapshot(ctx context.Context, dir string) error {
 	if err := d.machine.CreateSnapshot(ctx, mem, state); err != nil {
 		return fmt.Errorf("create snapshot: %w", err)
 	}
-	if d.hugepages {
-		d.markSnapshotHugepages(dir)
-	}
+	d.markSnapshot(dir)
 	return nil
 }
 

@@ -69,7 +69,12 @@ ansible-playbook agent.yml --check --diff
 
 - **common** — asserts the host is really an agent; ensures `/etc/pandastack`.
 - **firecracker** — idempotent install of `firecracker`/`jailer` v`{{ firecracker_version }}`
-  (mirrors cloud-init). No-op when already at version.
+  (mirrors cloud-init). No-op when already at version. Also installs each
+  `firecracker_side_versions` entry as `/usr/local/bin/firecracker-v<version>`
+  (sha256-checked): the agent restores every snapshot with the version that
+  wrote it, and runs new VMs on `PANDASTACK_FIRECRACKER_BIN` (1.18.0 by
+  default, set by **agent_env**, which falls back to the stock binary on a host
+  where that one does not run).
 - **agent** — pulls `bin/pandastack-agent` from GCS on the VM, sha256-compares to
   the installed binary, atomically swaps + restarts **only when changed**, then
   health-checks `systemctl is-active`.

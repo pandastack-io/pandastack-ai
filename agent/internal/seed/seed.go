@@ -127,6 +127,10 @@ func streamDiskEnabled() bool {
 var optionalFiles = []string{
 	"vm.mem.header",
 	"hugepages",
+	// The Firecracker version that wrote the snapshot (internal/firecracker
+	// fcbin.go): a restore runs that version's binary, because 1.16.2
+	// changed the snapshot format. Absent = v1.16.0.
+	"firecracker-version",
 	// clone.ext4 chunk index (PSD1) + hot-block prefetch trace for disk
 	// streaming (v4). Tiny; absent on a bake that predates disk streaming, in
 	// which case a disk-streaming restore is not possible and the agent
@@ -229,7 +233,13 @@ func fcVersion() string {
 	if cachedFCVersion != "" {
 		return cachedFCVersion
 	}
-	out, err := exec.Command("/usr/local/bin/firecracker", "--version").Output()
+	// The binary new VMs (so new bakes) run: PANDASTACK_FIRECRACKER_BIN, else
+	// the default path (internal/firecracker DefaultBinary).
+	bin := strings.TrimSpace(os.Getenv("PANDASTACK_FIRECRACKER_BIN"))
+	if bin == "" {
+		bin = "/usr/local/bin/firecracker"
+	}
+	out, err := exec.Command(bin, "--version").Output()
 	if err != nil {
 		return ""
 	}
