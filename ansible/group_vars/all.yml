@@ -28,6 +28,20 @@ agent_gcs_bucket: REPLACE_WITH_YOUR_GCS_BUCKET
 
 # ─────────────────────────── Firecracker ───────────────────────────────────
 firecracker_version: "1.16.0"
+# Side-by-side Firecracker binaries, installed by firecracker.yml as
+# /usr/local/bin/firecracker-v<version> next to the default above. 1.16.2
+# changed the snapshot format, so the agent restores every snapshot with the
+# version that wrote it (its firecracker-version file; none = 1.16.0) and runs
+# NEW VMs on PANDASTACK_FIRECRACKER_BIN (agent_env_managed below).
+# cloud-init/user-data-agent.sh installs the same two pins on a new host (keep
+# the two in step). Installing these binaries changes nothing by itself and
+# restarts nothing. sha256 = GitHub's published digest of the x86_64 release
+# tarball (checked 2026-11-22).
+firecracker_side_versions:
+  - version: "1.16.0"
+    sha256: "bd04e26952d4e158085778c6230a0b383d2619c319182e27eaa9d61a212e92d6"
+  - version: "1.18.0"
+    sha256: "1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd"
 firecracker_arch: x86_64
 
 # ─────────────────────────── Agent binary ──────────────────────────────────
@@ -66,3 +80,11 @@ agent_env_managed:
   # per call. SSH stays the automatic per-op fallback, so worst case this is a
   # no-op. Requires the daemon baked into your snapshots — leave "0" until then.
   PANDASTACK_VSOCK_EXEC: "0"
+  # The Firecracker binary NEW VMs run (cold boots, and so every bake).
+  # Restores always run the version that wrote the snapshot. The same default
+  # as cloud-init/user-data-agent.sh. A host where this binary does not run
+  # gets /usr/local/bin/firecracker (1.16.0) instead: the agent_env role checks
+  # it first, so a host firecracker.yml never reached keeps working. Per-host
+  # override: `pandastack_firecracker_bin:` in host_vars (rollback =
+  # /usr/local/bin/firecracker there, then agent.yml --limit that host).
+  PANDASTACK_FIRECRACKER_BIN: "{{ pandastack_firecracker_bin | default('/usr/local/bin/firecracker-v1.18.0') }}"

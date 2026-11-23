@@ -64,7 +64,8 @@ func (d *Driver) StartWarmFork(ctx context.Context, snapDir, childRootfs string)
 	}
 	uffdCh := d.beginUffdRestoreAsync(snapDir)
 
-	cmd := exec.Command("/usr/local/bin/firecracker",
+	d.bin = binaryForSnapshot(snapDir) // the version that wrote it (fcbin.go)
+	cmd := exec.Command(d.bin,
 		"--api-sock", d.spec.SocketPath,
 		"--log-path", d.spec.LogPath,
 		"--level", "Info",
@@ -170,8 +171,9 @@ func (d *Driver) StartFromSnapNoDrive(ctx context.Context, snapDir, hostTAP stri
 	}
 	uffdCh := d.beginUffdRestoreAsync(snapDir)
 
+	d.bin = binaryForSnapshot(snapDir) // the version that wrote it (fcbin.go)
 	cmd := fcExecCommand(d.spec.Netns, d.spec.VsockBindDir,
-		"/usr/local/bin/firecracker",
+		d.bin,
 		"--api-sock", d.spec.SocketPath,
 		"--log-path", d.spec.LogPath,
 		"--level", "Info",

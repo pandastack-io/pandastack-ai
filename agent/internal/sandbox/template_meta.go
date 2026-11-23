@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Defaults used when a template's meta.json doesn't carry an explicit size.
@@ -57,6 +58,10 @@ type snapManifest struct {
 	MemoryMB int    `json:"memory_mb"`
 	DiskGB   int    `json:"disk_gb,omitempty"`
 	SSHKeyFP string `json:"ssh_key_fp,omitempty"`
+	// Kernel is the file name of the guest kernel the bake booted ("" =
+	// unknown: older bakes, and app seeds, which snapshot a running VM).
+	// Informational: templateSnapReady does not compare it (kernel_select.go).
+	Kernel string `json:"kernel,omitempty"`
 }
 
 // LegacySnapDiskGB is the rootfs size historical bakes captured when no
@@ -119,6 +124,26 @@ func ReadTemplateSize(dataDir, template string) TemplateSize {
 	return out
 }
 
+// TemplateKernel returns the guest kernel a template's meta.json names
+// ("kernel", e.g. "vmlinux-5.10"), trimmed, or "" when the file, the field or a
+// string value is missing. Whether the name is acceptable and present on this
+// host is the resolver's business (kernel_select.go).
+func TemplateKernel(dataDir, template string) string {
+	if template == "" {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(dataDir, "templates", template, "meta.json"))
+	if err != nil {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return ""
+	}
+	s, _ := m["kernel"].(string)
+	return strings.TrimSpace(s)
+}
+
 // TemplateOwner reads <dataDir>/templates/<name>/meta.json and reports the
 // owning workspace. The returned `readable` is false ONLY when the meta file
 // exists but cannot be parsed (corruption) — security-sensitive callers must
@@ -158,10 +183,10 @@ func IsPublicTemplate(dataDir, template string) bool {
 }
 
 // WriteSnapManifest records what cpu/memory_mb/disk_gb/ssh_key_fp the snapshot was actually
-// built with. Called at the very end of ensureTemplateSnapshot so its
-// presence proves a successful bake at the recorded size.
-func WriteSnapManifest(snapDir string, cpu, memMB, diskGB int, sshKeyFP string) error {
-	b, err := json.MarshalIndent(snapManifest{CPU: cpu, MemoryMB: memMB, DiskGB: diskGB, SSHKeyFP: sshKeyFP}, "", "  ")
+// built with, and the kernel file it booted ("" when unknown). Called at the very end of
+// ensureTemplateSnapshot so its presence proves a successful bake at the recorded size.
+func WriteSnapManifest(snapDir string, cpu, memMB, diskGB int, sshKeyFP, kernel string) error {
+	b, err := json.MarshalIndent(snapManifest{CPU: cpu, MemoryMB: memMB, DiskGB: diskGB, SSHKeyFP: sshKeyFP, Kernel: kernel}, "", "  ")
 	if err != nil {
 		return err
 	}

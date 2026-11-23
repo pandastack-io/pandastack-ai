@@ -42,7 +42,7 @@ COMPOSE="docker compose -f $REPO_ROOT/docker-compose.dev.yml"
 
 ensure_deps() {
   command -v docker >/dev/null || die "docker not found; install docker engine"
-  command -v go     >/dev/null || die "go not found; install Go 1.25+"
+  command -v go     >/dev/null || die "go not found; install Go 1.27+"
   command -v node   >/dev/null || warn "node not found; dashboard will run in docker (slower rebuilds)"
   [[ -e /dev/kvm   ]] || die "/dev/kvm missing; KVM not enabled. Check 'kvm-ok' or BIOS virtualization."
   [[ -r /dev/kvm && -w /dev/kvm ]] || die "/dev/kvm not readable+writable by $USER. Add yourself to the 'kvm' group: sudo usermod -aG kvm $USER && newgrp kvm"

@@ -1,0 +1,23 @@
+# PandaStack additions to Firecracker's 6.1 CI guest config.
+# Observability and security daemons inside a sandbox:
+# BPF JIT, BPF LSM, BTF type info, kprobes, uprobes, ftrace.
+CONFIG_BPF_JIT=y
+CONFIG_BPF_LSM=y
+CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_KPROBES=y
+CONFIG_KPROBE_EVENTS=y
+CONFIG_UPROBE_EVENTS=y
+CONFIG_FTRACE=y
+CONFIG_FUNCTION_TRACER=y
+CONFIG_DYNAMIC_FTRACE=y
+CONFIG_FTRACE_SYSCALLS=y
+CONFIG_BPF_EVENTS=y
+# k3s / kube-proxy need iptables -m comment (no ClusterIP without it).
+CONFIG_NETFILTER_XT_MATCH_COMMENT=y
+# In 6.1 the BPF JIT, kprobes and BPF LSM depend on loadable-module support,
+# which Firecracker's config turns off. Each sandbox is its owner's own VM and
+# they are root inside it already; we ship no modules.
+CONFIG_MODULES=y
+# 5.10 parity: no crypto self-tests at boot (they slow every cold boot / bake).
+CONFIG_CRYPTO_MANAGER_DISABLE_TESTS=y

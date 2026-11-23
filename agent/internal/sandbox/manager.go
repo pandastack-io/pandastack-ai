@@ -165,7 +165,11 @@ type Manager struct {
 	// Guarded by actMu alongside lastActivity.
 	hibFails map[string]int
 
-	kernelCache cachedKernel
+	// kernelCache is the host default kernel; templateKernels the kernels
+	// templates name in meta.json. Both are read through kernelFor
+	// (kernel_select.go).
+	kernelCache     cachedKernel
+	templateKernels kernelNames
 
 	prefetcher *templatePrefetcher
 	cpuPinner  *cpuPinner
@@ -1046,10 +1050,11 @@ func pidAlive(pid int) bool {
 	return true
 }
 
-// cachedKernel memoizes the kernel path lookup so we don't re-scan the
-// filesystem on every Create() call. The result is invalidated if the file
-// disappears. This shaves a few ms per cold boot but mostly keeps Create()
-// off the disk's I/O path.
+// cachedKernel memoizes the HOST DEFAULT kernel (hostDefaultKernel) so we
+// don't re-scan the filesystem on every Create() call. The result is
+// invalidated if the file disappears. This shaves a few ms per cold boot but
+// mostly keeps Create() off the disk's I/O path. VMs get their kernel through
+// kernelFor, which prefers the one the template names.
 type cachedKernel struct {
 	mu   sync.RWMutex
 	path string
@@ -1071,7 +1076,7 @@ func (c *cachedKernel) get(dataDir string) (string, error) {
 			return c.path, nil
 		}
 	}
-	p, err := findKernel(dataDir)
+	p, err := hostDefaultKernel(dataDir)
 	if err != nil {
 		return "", err
 	}
@@ -1604,7 +1609,7 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (sb *Sandbox, e
 	}
 
 	tKernel := time.Now()
-	kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
+	kernelPath, err := m.kernelFor(req.Template)
 	if err != nil {
 		return nil, err
 	}
@@ -2405,7 +2410,10 @@ func snapshotDir(cfg config.Config, snapID string) string {
 	return filepath.Join(cfg.DataDir, "snapshots", snapID)
 }
 
-// findKernel picks the newest vmlinux-* under DataDir/kernels.
+// findKernel picks the last vmlinux-* under DataDir/kernels by name. It is
+// the final fallback of hostDefaultKernel (kernel_select.go), which prefers
+// PANDASTACK_KERNEL_DEFAULT and then vmlinux-5.10(.x), so that adding a newer
+// kernel file to a host does not switch every template to it.
 func findKernel(dataDir string) (string, error) {
 	matches, err := filepath.Glob(filepath.Join(dataDir, "kernels", "vmlinux-*"))
 	if err != nil {
@@ -2574,7 +2582,7 @@ func (m *Manager) spawnChildFromRootfs(ctx context.Context, parentID, snapID, st
 	if err := m.keys.InjectInto(rootfsPath); err != nil {
 		return "", fmt.Errorf("inject ssh key: %w", err)
 	}
-	kernelPath, err := findKernel(m.cfg.DataDir)
+	kernelPath, err := m.kernelFor(tpl)
 	if err != nil {
 		return "", err
 	}
@@ -2973,7 +2981,7 @@ func (m *Manager) wakeLocked(ctx context.Context, id string) error {
 		}
 	}
 	rootfsPath := filepath.Join(vmDir, "rootfs.ext4")
-	kernelPath, err := findKernel(m.cfg.DataDir)
+	kernelPath, err := m.kernelFor(template)
 	if err != nil {
 		return err
 	}
@@ -3507,7 +3515,11 @@ func (m *Manager) restoreFromSnapshotNATID(
 		_ = os.Remove(meta.VsockUDSPath)
 	}
 
-	kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
+	snapTemplate := meta.Template
+	if snapTemplate == "" {
+		snapTemplate = req.Template
+	}
+	kernelPath, err := m.kernelFor(snapTemplate)
 	if err != nil {
 		_ = m.netPool.ReleaseNATID(ctx, id)
 		return nil, err

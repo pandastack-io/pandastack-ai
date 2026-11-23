@@ -3,7 +3,7 @@
 # Build: docker build -f Dockerfile -t pandastack/api:dev ./api
 # Run:   docker run -p 8080:8080 -e PANDASTACK_AGENT_URL=... pandastack/api:dev
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum ./

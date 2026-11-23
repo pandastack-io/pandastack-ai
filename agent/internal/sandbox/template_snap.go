@@ -174,7 +174,7 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 		return fmt.Errorf("copy rootfs to build dir: %w", err)
 	}
 
-	kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
+	kernelPath, err := m.kernelFor(template)
 	if err != nil {
 		return err
 	}
@@ -473,7 +473,7 @@ func (m *Manager) ensureTemplateSnapshot(ctx context.Context, template string) e
 	// Mark ready (atomic-ish — last step). Also persist the size manifest
 	// so a future config drift (operator changes template meta) invalidates
 	// this snapshot in templateSnapReady.
-	if err := WriteSnapManifest(snapDir, want.CPU, want.MemoryMB, want.DiskGB, m.keys.Fingerprint()); err != nil {
+	if err := WriteSnapManifest(snapDir, want.CPU, want.MemoryMB, want.DiskGB, m.keys.Fingerprint(), filepath.Base(kernelPath)); err != nil {
 		return fmt.Errorf("write snap manifest: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(snapDir, "ready"), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644); err != nil {
@@ -791,7 +791,7 @@ func (m *Manager) startFromTemplateSnap(
 	rootfsCh := make(chan error, 1)
 	go func() { rootfsCh <- cloneFile(srcRootfs, childRootfs) }()
 
-	kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
+	kernelPath, err := m.kernelFor(template)
 	if err != nil {
 		<-rootfsCh // join the copy so the caller can safely reap vmDir
 		return nil, phases, err
@@ -1359,7 +1359,7 @@ go func() {
 	rootfsCh <- rootfsResult{path: childRootfs, mode: "clonefile"}
 }()
 
-kernelPath, err := m.kernelCache.get(m.cfg.DataDir)
+kernelPath, err := m.kernelFor(template)
 if err != nil {
 return nil, phases, err
 }

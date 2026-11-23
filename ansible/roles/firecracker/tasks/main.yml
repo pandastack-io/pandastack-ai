@@ -57,3 +57,63 @@
   register: fc_verify
   changed_when: false
   failed_when: "firecracker_version not in fc_verify.stdout"
+
+# Side-by-side binaries: /usr/local/bin/firecracker-v<version>, each
+# from GitHub's release tarball checked against its published sha256. Restores
+# of a snapshot written by that version run this binary; new VMs keep using
+# firecracker_bin unless the agent env says otherwise.
+- name: Check side-by-side firecracker binaries
+  ansible.builtin.command: "/usr/local/bin/firecracker-v{{ item.version }} --version"
+  register: fc_side_current
+  changed_when: false
+  failed_when: false
+  loop: "{{ firecracker_side_versions | default([]) }}"
+  loop_control:
+    label: "{{ item.version }}"
+
+- name: Download side-by-side firecracker tarballs (sha256-checked)
+  ansible.builtin.get_url:
+    url: "https://github.com/firecracker-microvm/firecracker/releases/download/v{{ item.item.version }}/firecracker-v{{ item.item.version }}-{{ firecracker_arch }}.tgz"
+    dest: "{{ firecracker_src_dir }}/firecracker-v{{ item.item.version }}-{{ firecracker_arch }}.tgz"
+    checksum: "sha256:{{ item.item.sha256 }}"
+    mode: "0644"
+  when: "item.item.version not in (item.stdout | default(''))"
+  loop: "{{ fc_side_current.results }}"
+  loop_control:
+    label: "{{ item.item.version }}"
+  register: fc_side_download
+  retries: 5
+  delay: 5
+  until: fc_side_download is succeeded
+
+- name: Extract side-by-side firecracker tarballs
+  ansible.builtin.unarchive:
+    src: "{{ firecracker_src_dir }}/firecracker-v{{ item.item.version }}-{{ firecracker_arch }}.tgz"
+    dest: "{{ firecracker_src_dir }}"
+    remote_src: true
+  when: "item.item.version not in (item.stdout | default(''))"
+  loop: "{{ fc_side_current.results }}"
+  loop_control:
+    label: "{{ item.item.version }}"
+
+- name: Install side-by-side firecracker binaries
+  ansible.builtin.copy:
+    src: "{{ firecracker_src_dir }}/release-v{{ item.item.version }}-{{ firecracker_arch }}/firecracker-v{{ item.item.version }}-{{ firecracker_arch }}"
+    dest: "/usr/local/bin/firecracker-v{{ item.item.version }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: "item.item.version not in (item.stdout | default(''))"
+  loop: "{{ fc_side_current.results }}"
+  loop_control:
+    label: "{{ item.item.version }}"
+
+- name: Verify side-by-side firecracker binaries
+  ansible.builtin.command: "/usr/local/bin/firecracker-v{{ item.version }} --version"
+  register: fc_side_verify
+  changed_when: false
+  failed_when: "item.version not in fc_side_verify.stdout"
+  loop: "{{ firecracker_side_versions | default([]) }}"
+  loop_control:
+    label: "{{ item.version }}"
