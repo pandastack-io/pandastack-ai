@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### ⚠️ Firecracker 1.16 support ends 2026-12-03 — install 1.18 next to it
+
+Firecracker 1.16.2 changed the snapshot format, so a snapshot written by
+1.16.0 does not load on 1.18. The agent now records which version wrote each
+snapshot (a `firecracker-version` file) and restores it with that version,
+while new VMs run `PANDASTACK_FIRECRACKER_BIN`. A snapshot without the file
+is treated as 1.16.0, the version every install script here has installed;
+if you installed another version by hand, re-bake your templates after the
+switch. Nothing changes until a host has the second binary and that
+variable is set:
+
+```bash
+# ansible: install /usr/local/bin/firecracker-v1.16.0 and -v1.18.0 (no restart),
+# then write PANDASTACK_FIRECRACKER_BIN=/usr/local/bin/firecracker-v1.18.0 (restarts the agent)
+ansible-playbook firecracker.yml
+ansible-playbook env.yml
+```
+
+New hosts made with `cloud-init/user-data-agent.sh` get both binaries and the
+variable by themselves. The local setup scripts (`scripts/mac-local-e2e.sh`,
+`scripts/linux-local-e2e.sh`, `lima/microvm.yaml`) still install only 1.16.0:
+to move such a host, put the 1.18.0 binary at
+`/usr/local/bin/firecracker-v1.18.0` (and a copy of 1.16.0 at
+`/usr/local/bin/firecracker-v1.16.0`), then set the variable in the agent's
+env file and restart it. Snapshots that already exist keep restoring on 1.16.0
+(it must stay installed); a sandbox restored on 1.16 keeps saving in the 1.16
+format, and moves to 1.18 only with a fresh boot from its disk. Template
+snapshots move when they are re-baked.
+
 ### ⚠️ Operator action required — re-bake every template snapshot
 
 `agent/internal/sandbox/template_snap.go` now configures **MMDS on the build VM
@@ -50,6 +79,17 @@ would not give a root shell.
 
 ### Security
 
+- **Dependencies updated.** Go 1.27.4 for the agent, API and db-proxy, with
+  `golang.org/x/net`, `x/crypto`, `x/text`, `x/sys`, grpc, protobuf and
+  `klauspost/compress` on fixed releases (govulncheck, reachable code: agent
+  52 → 0, API 40 → 0, db-proxy 25 → 0). Next.js 16.4.6 in the dashboard and
+  docs (npm audit, runtime dependencies: 0; the dashboard's 41 remaining
+  findings are all inside the `vercel` CLI dev tool). The `code-interpreter`
+  template moves jupyter-server, notebook, jupyterlab, pillow, pytest, nltk,
+  aiohttp, requests, urllib3 and python-dotenv to fixed releases (pip-audit:
+  294 → 0) and pins its global Node CLIs (`tsx` added). OpenTelemetry stays at
+  v1.45 on purpose: v1.46+ moves the Firecracker SDK's HTTP client to a new
+  major version.
 - Every guest disk the agent mounts on the host to prepare it is mounted
   `nosuid,nodev,noexec`, and every write into one (the agent's
   `authorized_keys`, the sshd drop-in, `resolv.conf`) goes through
@@ -78,6 +118,19 @@ would not give a root shell.
 
 ### Added
 
+- **Guest kernel per template.** A template now boots the kernel its
+  `meta.json` names (`--kernel` on `pandastack template build`, `KERNEL=` on
+  `scripts/bake-templates.sh`; both were ignored before), resolved in the
+  agent's `kernels/` folder (`vmlinux-ps-6.1` → the highest
+  `vmlinux-ps-6.1.<n>` file). A template that names none, or one the host
+  lacks, boots the host default (`PANDASTACK_KERNEL_DEFAULT`, unset =
+  `vmlinux-5.10`), so adding a kernel file to a host changes nothing by
+  itself. The kernel a bake booted is recorded in `snap-meta.json`.
+- **Our 6.1 guest kernel** (`kernel/guest-6.1/`): Linux 6.1.192 with
+  Firecracker's 6.1 CI config plus BPF JIT/LSM, BTF, kprobes, ftrace,
+  `iptables -m comment` and module support. Docker and `iptables -m comment`
+  work inside the sandbox, which they do not on 5.10; restores were faster and
+  idle sandboxes smaller in our tests. `build.sh` builds it in a container.
 - **Coding agents by name**: `claude`, `codex`, `opencode`, `gemini`, `grok`,
   `amp` and `copilot` are accepted as template names and start the `agent`
   image. They are aliases resolved in the API (no second rootfs, no second
