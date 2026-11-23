@@ -80,9 +80,9 @@ ensure_prereqs() {
   fi
   docker info >/dev/null 2>&1 || die "Docker is installed but not reachable for $USER. If you were just added to the docker group, run: newgrp docker, then rerun this script."
 
-  if ! command -v go >/dev/null 2>&1 || ! go version 2>/dev/null | grep -qE 'go1\.(2[2-9]|[3-9][0-9])'; then
-    step "Installing Go 1.22"
-    GO_VERSION="1.22.10"
+  if ! command -v go >/dev/null 2>&1 || ! go version 2>/dev/null | grep -qE 'go1\.(2[7-9]|[3-9][0-9])'; then
+    step "Installing Go 1.27"
+    GO_VERSION="1.27.4"
     GO_ARCH="$(dpkg --print-architecture)"
     case "$GO_ARCH" in amd64) GO_ARCH=amd64;; arm64) GO_ARCH=arm64;; *) die "Unsupported arch: $GO_ARCH";; esac
     curl -fL "https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz" -o /tmp/go.tgz
