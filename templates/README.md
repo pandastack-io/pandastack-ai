@@ -43,6 +43,17 @@ Then:
 pandastack template build -f Dockerfile -n my-custom-stack --size-mb 4096
 ```
 
+## Guest kernel
+
+A template boots the kernel its `meta.json` names (`"kernel"`, default
+`vmlinux-5.10`), from the agent's `kernels/` folder. Pass `--kernel` to
+`pandastack template build`, or `KERNEL=` to `scripts/bake-templates.sh`.
+`vmlinux-ps-6.1` is our 6.1 build (Docker and `iptables -m comment` work inside
+the sandbox, BPF tools have BTF): build it and put it on your hosts with
+[`kernel/guest-6.1/README.md`](../kernel/guest-6.1/README.md). A template that
+names a kernel the host lacks boots the host default (`PANDASTACK_KERNEL_DEFAULT`,
+unset = `vmlinux-5.10`). A kernel change applies at the template's next bake.
+
 ## Notes
 
 * All templates are baked from the `ubuntu-24.04-net` base on the host so
