@@ -29,9 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js 24 LTS via NodeSource ────────────────────────────────────────────
+# Global CLIs are pinned so a bake never changes them silently: the 2026-08-18
+# bake picked up TypeScript 7 because these were unpinned. 7.0.2 / 10.9.2 /
+# 1.22.22 are exactly what that bake shipped. ts-node 10.9.2 does not run with
+# TypeScript 7 (the npm package no longer carries the compiler API ts-node
+# loads) nor cleanly on Node 24; tsx runs .ts files on any of them.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g yarn typescript ts-node \
+    && npm install -g yarn@1.22.22 typescript@7.0.2 ts-node@10.9.2 tsx@4.23.15 \
     && node --version && npm --version \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,38 +52,44 @@ RUN printf 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\
     chmod +x /etc/profile.d/pandastack-path.sh
 
 # ── Full data science + AI stack (pinned versions) ────────────────────────────
+# 2026-11-21: pip-audit of the 2026-08-18 bake found 294 advisories in 19
+# packages. nltk, aiohttp, requests, urllib3, python-dotenv, pillow and pytest
+# moved to versions that fix all of theirs (pillow 12 -> 13 and pytest 8 -> 9
+# are major bumps: checked against matplotlib, imageio, scikit-image, opencv and
+# a pytest suite before pinning); unpinned dependencies pick up fixes per bake.
 RUN pip3 install --no-cache-dir \
-    # Jupyter
-    jupyter-server==2.16.0 ipykernel==6.29.5 ipython==9.2.0 notebook jupyterlab \
+    # Jupyter. jupyter-server 2.16.0, notebook 7.5.7 and jupyterlab 4.5.10 (the
+    # 2026-08-18 bake) had 14, 3 and 7 advisories; fixed in 2.21.0, 7.6.3, 4.6.4.
+    jupyter-server==2.21.1 ipykernel==6.29.5 ipython==9.2.0 notebook==7.6.5 jupyterlab==4.6.6 \
     # Core data science
     numpy==2.3.5 pandas==2.2.3 scipy==1.17.1 scikit-learn==1.6.1 scikit-image==0.25.2 \
     xarray==2025.4.0 statsmodels sympy==1.14.0 numba==0.63.1 \
     # Visualisation
     matplotlib==3.10.8 seaborn==0.13.2 plotly==6.0.1 bokeh==3.9.0 kaleido==1.0.0 \
     # Image / media
-    pillow==12.1.1 imageio==2.37.3 opencv-python==4.11.0.86 \
+    pillow==13.0.0 imageio==2.37.3 opencv-python==4.11.0.86 \
     # Audio / signal processing
     librosa==0.11.0 soundfile==0.13.1 \
     # NLP
-    nltk==3.9.3 spacy==3.8.11 textblob==0.19.0 gensim==4.4.0 \
+    nltk==3.10.4 spacy==3.8.11 textblob==0.19.0 gensim==4.4.0 \
     # Office / document formats
     openpyxl==3.1.5 xlrd==2.0.2 python-docx==1.1.2 \
     # Networking / serialisation
-    aiohttp==3.13.3 requests==2.32.5 httpx==0.28.1 urllib3==2.6.3 \
+    aiohttp==3.14.5 requests==2.34.2 httpx==0.28.1 urllib3==2.8.0 \
     beautifulsoup4==4.14.3 orjson==3.11.7 \
     # Finance / misc
     yfinance joblib==1.5.3 \
     # DB / serialisation
     psycopg2-binary dill==0.3.9 sqlalchemy==2.0.49 alembic \
     # Web server / AI
-    fastapi "uvicorn[standard]" pydantic==2.11.10 python-dotenv==1.1.1 \
+    fastapi "uvicorn[standard]" pydantic==2.11.10 python-dotenv==1.2.4 \
     openai==2.31.0 anthropic==0.94.0 \
     # Agent frameworks (folded in from the former 'openai-agents' template)
     openai-agents tiktoken \
     # Data serialisation
     pyarrow==23.0.1 \
     # Dev / testing
-    pytest==8.3.5 \
+    pytest==9.2.0 \
     # Browser automation
     playwright \
     && python3 -m ipykernel install --sys-prefix \
